@@ -1,0 +1,63 @@
+{
+  "save-cancel": {
+    "target": {"identity":{"pid":42,"launchDate":"2026-09-08T10:00:00Z","bundleId":"com.example.Editor","windowId":7},"title":"Document","bounds":{"x":100,"y":100,"width":600,"height":400}},
+    "treeOptions":{"maxDepth":8,"maxElements":500,"hintMode":"full"},
+    "evidence":{"nodes":[
+      {"path":[],"role":"AXWindow","title":"Document","actions":[],"bounds":{"x":100,"y":100,"width":600,"height":400},"childCount":2},
+      {"path":[0],"role":"AXButton","title":"Save","actions":["AXPress"],"bounds":{"x":500,"y":450,"width":70,"height":30},"childCount":0},
+      {"path":[1],"role":"AXButton","title":"Cancel","actions":["AXPress"],"bounds":{"x":410,"y":450,"width":70,"height":30},"childCount":0}
+    ],"truncation":[],"refs":[
+      {"ref":1,"path":[],"node":{"path":[],"role":"AXWindow","title":"Document","actions":[],"bounds":{"x":100,"y":100,"width":600,"height":400},"childCount":2}},
+      {"ref":2,"path":[0],"node":{"path":[0],"role":"AXButton","title":"Save","actions":["AXPress"],"bounds":{"x":500,"y":450,"width":70,"height":30},"childCount":0}},
+      {"ref":3,"path":[1],"node":{"path":[1],"role":"AXButton","title":"Cancel","actions":["AXPress"],"bounds":{"x":410,"y":450,"width":70,"height":30},"childCount":0}}
+    ]}
+  },
+  "cancel-save": {
+    "target": {"identity":{"pid":42,"launchDate":"2026-09-08T10:00:00Z","bundleId":"com.example.Editor","windowId":7},"title":"Document","bounds":{"x":100,"y":100,"width":600,"height":400}},
+    "treeOptions":{"maxDepth":8,"maxElements":500,"hintMode":"full"},
+    "evidence":{"nodes":[
+      {"path":[],"role":"AXWindow","title":"Document","actions":[],"bounds":{"x":100,"y":100,"width":600,"height":400},"childCount":2},
+      {"path":[0],"role":"AXButton","title":"Cancel","actions":["AXPress"],"bounds":{"x":410,"y":450,"width":70,"height":30},"childCount":0},
+      {"path":[1],"role":"AXButton","title":"Save","actions":["AXPress"],"bounds":{"x":500,"y":450,"width":70,"height":30},"childCount":0}
+    ],"truncation":[],"refs":[
+      {"ref":1,"path":[],"node":{"path":[],"role":"AXWindow","title":"Document","actions":[],"bounds":{"x":100,"y":100,"width":600,"height":400},"childCount":2}},
+      {"ref":2,"path":[0],"node":{"path":[0],"role":"AXButton","title":"Cancel","actions":["AXPress"],"bounds":{"x":410,"y":450,"width":70,"height":30},"childCount":0}},
+      {"ref":3,"path":[1],"node":{"path":[1],"role":"AXButton","title":"Save","actions":["AXPress"],"bounds":{"x":500,"y":450,"width":70,"height":30},"childCount":0}}
+    ]}
+  },
+  "changed-label": {
+    "target": {"identity":{"pid":42,"launchDate":"2026-09-08T10:00:00Z","bundleId":"com.example.Editor","windowId":7},"title":"Document","bounds":{"x":100,"y":100,"width":600,"height":400}},
+    "treeOptions":{"maxDepth":8,"maxElements":500,"hintMode":"full"},
+    "evidence":{"nodes":[{"path":[],"role":"AXWindow","title":"Document","actions":[],"bounds":{"x":100,"y":100,"width":600,"height":400},"childCount":2},{"path":[0],"role":"AXButton","title":"Publish","actions":["AXPress"],"bounds":{"x":500,"y":450,"width":70,"height":30},"childCount":0},{"path":[1],"role":"AXButton","title":"Cancel","actions":["AXPress"],"bounds":{"x":410,"y":450,"width":70,"height":30},"childCount":0}],"truncation":[],"refs":[{"ref":1,"path":[],"node":{"path":[],"role":"AXWindow","title":"Document","actions":[],"bounds":{"x":100,"y":100,"width":600,"height":400},"childCount":2}},{"ref":2,"path":[0],"node":{"path":[0],"role":"AXButton","title":"Publish","actions":["AXPress"],"bounds":{"x":500,"y":450,"width":70,"height":30},"childCount":0}},{"ref":3,"path":[1],"node":{"path":[1],"role":"AXButton","title":"Cancel","actions":["AXPress"],"bounds":{"x":410,"y":450,"width":70,"height":30},"childCount":0}}]}
+  },
+  "changed-actions": {
+    "target": {"identity":{"pid":42,"launchDate":"2026-09-08T10:00:00Z","bundleId":"com.example.Editor","windowId":7},"title":"Document","bounds":{"x":100,"y":100,"width":600,"height":400}},
+    "treeOptions":{"maxDepth":8,"maxElements":500,"hintMode":"full"},
+    "evidence":{"nodes":[{"path":[],"role":"AXWindow","title":"Document","actions":[],"bounds":{"x":100,"y":100,"width":600,"height":400},"childCount":2},{"path":[0],"role":"AXButton","title":"Save","actions":[],"bounds":{"x":500,"y":450,"width":70,"height":30},"childCount":0},{"path":[1],"role":"AXButton","title":"Cancel","actions":["AXPress"],"bounds":{"x":410,"y":450,"width":70,"height":30},"childCount":0}],"truncation":[],"refs":[{"ref":1,"path":[],"node":{"path":[],"role":"AXWindow","title":"Document","actions":[],"bounds":{"x":100,"y":100,"width":600,"height":400},"childCount":2}},{"ref":2,"path":[0],"node":{"path":[0],"role":"AXButton","title":"Save","actions":[],"bounds":{"x":500,"y":450,"width":70,"height":30},"childCount":0}},{"ref":3,"path":[1],"node":{"path":[1],"role":"AXButton","title":"Cancel","actions":["AXPress"],"bounds":{"x":410,"y":450,"width":70,"height":30},"childCount":0}}]}
+  },
+  "changed-geometry": {
+    "target": {"identity":{"pid":42,"launchDate":"2026-09-08T10:00:00Z","bundleId":"com.example.Editor","windowId":7},"title":"Document","bounds":{"x":100,"y":100,"width":600,"height":400}},
+    "treeOptions":{"maxDepth":8,"maxElements":500,"hintMode":"full"},
+    "evidence":{"nodes":[{"path":[],"role":"AXWindow","title":"Document","actions":[],"bounds":{"x":100,"y":100,"width":600,"height":400},"childCount":2},{"path":[0],"role":"AXButton","title":"Save","actions":["AXPress"],"bounds":{"x":501,"y":450,"width":70,"height":30},"childCount":0},{"path":[1],"role":"AXButton","title":"Cancel","actions":["AXPress"],"bounds":{"x":410,"y":450,"width":70,"height":30},"childCount":0}],"truncation":[],"refs":[{"ref":1,"path":[],"node":{"path":[],"role":"AXWindow","title":"Document","actions":[],"bounds":{"x":100,"y":100,"width":600,"height":400},"childCount":2}},{"ref":2,"path":[0],"node":{"path":[0],"role":"AXButton","title":"Save","actions":["AXPress"],"bounds":{"x":501,"y":450,"width":70,"height":30},"childCount":0}},{"ref":3,"path":[1],"node":{"path":[1],"role":"AXButton","title":"Cancel","actions":["AXPress"],"bounds":{"x":410,"y":450,"width":70,"height":30},"childCount":0}}]}
+  },
+  "removed-target": {
+    "target": {"identity":{"pid":42,"launchDate":"2026-09-08T10:00:00Z","bundleId":"com.example.Editor","windowId":7},"title":"Document","bounds":{"x":100,"y":100,"width":600,"height":400}},
+    "treeOptions":{"maxDepth":8,"maxElements":500,"hintMode":"full"},
+    "evidence":{"nodes":[{"path":[],"role":"AXWindow","title":"Document","actions":[],"bounds":{"x":100,"y":100,"width":600,"height":400},"childCount":1},{"path":[0],"role":"AXButton","title":"Cancel","actions":["AXPress"],"bounds":{"x":410,"y":450,"width":70,"height":30},"childCount":0}],"truncation":[],"refs":[{"ref":1,"path":[],"node":{"path":[],"role":"AXWindow","title":"Document","actions":[],"bounds":{"x":100,"y":100,"width":600,"height":400},"childCount":1}},{"ref":2,"path":[0],"node":{"path":[0],"role":"AXButton","title":"Cancel","actions":["AXPress"],"bounds":{"x":410,"y":450,"width":70,"height":30},"childCount":0}}]}
+  },
+  "pid-reused": {
+    "target": {"identity":{"pid":42,"launchDate":"2026-09-08T11:00:00Z","bundleId":"com.example.Editor","windowId":7},"title":"Document","bounds":{"x":100,"y":100,"width":600,"height":400}},
+    "treeOptions":{"maxDepth":8,"maxElements":500,"hintMode":"full"},
+    "evidence":{"nodes":[{"path":[],"role":"AXWindow","title":"Document","actions":[],"bounds":{"x":100,"y":100,"width":600,"height":400},"childCount":0}],"truncation":[],"refs":[{"ref":1,"path":[],"node":{"path":[],"role":"AXWindow","title":"Document","actions":[],"bounds":{"x":100,"y":100,"width":600,"height":400},"childCount":0}}]}
+  },
+  "truncated-before": {
+    "target": {"identity":{"pid":42,"launchDate":"2026-09-08T10:00:00Z","bundleId":"com.example.Editor","windowId":7},"title":"Document","bounds":{"x":100,"y":100,"width":600,"height":400}},
+    "treeOptions":{"maxDepth":1,"maxElements":2,"hintMode":"full"},
+    "evidence":{"nodes":[{"path":[],"role":"AXWindow","title":"Document","actions":[],"bounds":{"x":100,"y":100,"width":600,"height":400},"childCount":2},{"path":[0],"role":"AXButton","title":"Save","actions":["AXPress"],"bounds":{"x":500,"y":450,"width":70,"height":30},"childCount":1}],"truncation":[{"path":[0],"reason":"maxDepth","observedChildren":0,"totalChildren":1},{"path":[],"reason":"maxElements","observedChildren":1,"totalChildren":2}],"refs":[{"ref":1,"path":[],"node":{"path":[],"role":"AXWindow","title":"Document","actions":[],"bounds":{"x":100,"y":100,"width":600,"height":400},"childCount":2}},{"ref":2,"path":[0],"node":{"path":[0],"role":"AXButton","title":"Save","actions":["AXPress"],"bounds":{"x":500,"y":450,"width":70,"height":30},"childCount":1}}]}
+  },
+  "truncated-after": {
+    "target": {"identity":{"pid":42,"launchDate":"2026-09-08T10:00:00Z","bundleId":"com.example.Editor","windowId":7},"title":"Document","bounds":{"x":100,"y":100,"width":600,"height":400}},
+    "treeOptions":{"maxDepth":1,"maxElements":2,"hintMode":"full"},
+    "evidence":{"nodes":[{"path":[],"role":"AXWindow","title":"Document","actions":[],"bounds":{"x":100,"y":100,"width":600,"height":400},"childCount":3},{"path":[0],"role":"AXButton","title":"Save","actions":["AXPress"],"bounds":{"x":500,"y":450,"width":70,"height":30},"childCount":1}],"truncation":[{"path":[0],"reason":"maxDepth","observedChildren":0,"totalChildren":1},{"path":[],"reason":"maxElements","observedChildren":1,"totalChildren":3}],"refs":[{"ref":1,"path":[],"node":{"path":[],"role":"AXWindow","title":"Document","actions":[],"bounds":{"x":100,"y":100,"width":600,"height":400},"childCount":3}},{"ref":2,"path":[0],"node":{"path":[0],"role":"AXButton","title":"Save","actions":["AXPress"],"bounds":{"x":500,"y":450,"width":70,"height":30},"childCount":1}}]}
+  }
+}

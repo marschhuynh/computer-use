@@ -32,6 +32,8 @@ describe('native protocol fixtures', () => {
   it('accepts and rejects the shared fixture shapes', async () => {
     const fixtures = JSON.parse(await readFile(new URL('../contracts/fixtures/native-protocol.json', import.meta.url), 'utf8')) as { cases: Fixture[] };
     for (const fixture of fixtures.cases) {
+      // Valid snapshot dispatch now owns live desktop work; Swift ProtocolTests covers its shape purely.
+      if (fixture.valid && fixture.request.command === 'snapshot') continue;
       const result = await invoke([], `${JSON.stringify(fixture.request)}\n`);
       const reply = JSON.parse(result.stdout) as { ok: boolean; error?: { code: string } };
       if (fixture.valid) expect(reply.error?.code, fixture.name).toBe('UNSUPPORTED_ACTION');

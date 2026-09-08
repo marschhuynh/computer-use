@@ -7,6 +7,16 @@ public enum TargetSelector {
     case pid(Int, windowId: Int?)
 }
 
+extension TargetSelector {
+    static func decode(_ value: Any?) -> TargetSelector? {
+        guard let target = value as? [String: Any] else { return nil }
+        let windowID = targetInteger(target["windowId"])
+        if let app = target["app"] as? String { return .app(app, windowId: windowID) }
+        if let pid = targetInteger(target["pid"]) { return .pid(pid, windowId: windowID) }
+        return nil
+    }
+}
+
 public struct TargetIdentity: Codable, Equatable {
     public let pid: Int
     public let launchDate: String
@@ -14,7 +24,7 @@ public struct TargetIdentity: Codable, Equatable {
     public let windowId: Int
 }
 
-public struct ResolvedTarget: Equatable {
+public struct ResolvedTarget: Codable, Equatable {
     public let identity: TargetIdentity
     public let title: String
     public let bounds: WindowBounds
@@ -149,4 +159,11 @@ private func cgWindows(for pid: Int) -> [CGWindowMetadata] {
 private func matches(ax: AXWindowMetadata, cg: CGWindowMetadata) -> Bool {
     guard ax.role == "AXWindow", ax.title == cg.title, let bounds = ax.bounds else { return false }
     return bounds == cg.bounds
+}
+
+private func targetInteger(_ value: Any?) -> Int? {
+    guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+    let value = number.doubleValue
+    guard value.isFinite, value.rounded() == value, value > 0, value <= Double(maximumSafeInteger) else { return nil }
+    return Int(value)
 }
