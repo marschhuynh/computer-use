@@ -119,13 +119,32 @@ export function parse(argv: string[]): ParsedInvocation {
     case 'type': request = { ...base, command, target: target(values), textSource: textSource(values), allowClipboardReplace: flag(values, 'allow-clipboard-replace') }; break;
     case 'key': request = { ...base, command, target: target(values), key: required(values, 'key') }; break;
     case 'scroll': {
-      const snapshot = stringValue(values, 'snapshot'); const ref = stringValue(values, 'ref'); const direction = stringValue(values, 'direction');
+      const snapshot = stringValue(values, 'snapshot');
+      const ref = stringValue(values, 'ref');
+      const direction = stringValue(values, 'direction');
+      const amount = stringValue(values, 'amount');
       if (snapshot !== undefined || ref !== undefined) {
-        if (direction !== undefined || stringValue(values, 'app') !== undefined || stringValue(values, 'pid') !== undefined || stringValue(values, 'window') !== undefined) throw new ArgumentError('scroll forms are mutually exclusive');
-        request = { ...base, command, snapshotId: recordId(required(values, 'snapshot'), 'snapshot'), ref: safeInteger(required(values, 'ref'), 'ref') };
+        if (direction !== undefined || amount !== undefined || stringValue(values, 'app') !== undefined
+          || stringValue(values, 'pid') !== undefined || stringValue(values, 'window') !== undefined) {
+          throw new ArgumentError('scroll forms are mutually exclusive');
+        }
+        request = {
+          ...base,
+          command,
+          snapshotId: recordId(required(values, 'snapshot'), 'snapshot'),
+          ref: safeInteger(required(values, 'ref'), 'ref'),
+        };
       } else {
-        if (direction !== 'up' && direction !== 'down' && direction !== 'left' && direction !== 'right') throw new ArgumentError('--direction is required and must be valid');
-        request = { ...base, command, target: target(values), direction: direction as Direction, amount: stringValue(values, 'amount') === undefined ? 3 : safeInteger(required(values, 'amount'), 'amount') };
+        if (direction !== 'up' && direction !== 'down' && direction !== 'left' && direction !== 'right') {
+          throw new ArgumentError('--direction is required and must be valid');
+        }
+        request = {
+          ...base,
+          command,
+          target: target(values),
+          direction: direction as Direction,
+          amount: amount === undefined ? 3 : safeInteger(required(values, 'amount'), 'amount'),
+        };
       }
       break;
     }

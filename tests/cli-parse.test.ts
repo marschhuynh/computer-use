@@ -1,8 +1,17 @@
+import { readFileSync } from 'node:fs';
+
 import { describe, expect, it } from 'vitest';
 import { parse } from '../src/cli/parse.js';
 
 const snapshotId = '123e4567-e89b-42d3-a456-426614174000';
 const captureId = '123e4567-e89b-42d3-a456-426614174001';
+
+type ProtocolFixture = { name: string; valid: boolean; argv?: string[] };
+const protocolFixtures = (JSON.parse(
+  readFileSync(new URL('../contracts/fixtures/native-protocol.json', import.meta.url), 'utf8'),
+) as { cases: ProtocolFixture[] }).cases.filter(
+  (fixture): fixture is ProtocolFixture & { argv: string[] } => fixture.argv !== undefined,
+);
 
 describe('parse', () => {
   it.each([
@@ -57,4 +66,13 @@ describe('parse', () => {
     expect(parse(['--help'])).toEqual({ kind: 'help', json: false });
     expect(parse(['--version', '--json'])).toEqual({ kind: 'version', json: true });
   });
+
+  it('matches shared request-fixture validity for every CLI-backed case', () => {
+    for (const fixture of protocolFixtures) {
+      const parseFixture = () => parse(fixture.argv);
+      if (fixture.valid) expect(parseFixture, fixture.name).not.toThrow();
+      else expect(parseFixture, fixture.name).toThrow();
+    }
+  });
+
 });

@@ -94,58 +94,104 @@ public struct WireReply: Encodable {
 
 private func validRequest(_ request: [String: Any]) -> Bool {
     guard integer(request["schemaVersion"]) == protocolVersion,
-          let commandName = request["command"] as? String, let command = WireCommand(rawValue: commandName),
+          let commandName = request["command"] as? String,
+          let command = WireCommand(rawValue: commandName),
           validOptions(request["options"]) else { return false }
+    let base: Set<String> = ["schemaVersion", "command", "options"]
     switch command {
     case .doctor, .apps:
-        return true
+        return hasExactKeys(request, base)
     case .windows:
-        return validTarget(request["target"])
+        return hasExactKeys(request, base.union(["target"])) && validTarget(request["target"])
     case .snapshot:
-        return validTarget(request["target"]) && validTree(request["tree"])
+        return hasExactKeys(request, base.union(["target", "tree"]))
+            && validTarget(request["target"]) && validTree(request["tree"])
     case .press:
-        return validID(request["snapshotId"]) && positiveInteger(request["ref"])
+        return hasExactKeys(request, base.union(["snapshotId", "ref"]))
+            && validID(request["snapshotId"]) && positiveInteger(request["ref"])
     case .setValue:
-        return validID(request["snapshotId"]) && positiveInteger(request["ref"]) && request["text"] is String
+        return hasExactKeys(request, base.union(["snapshotId", "ref", "text"]))
+            && validID(request["snapshotId"]) && positiveInteger(request["ref"])
+            && request["text"] is String
     case .type:
-        return validTarget(request["target"]) && request["text"] is String && request["allowClipboardReplace"] is Bool
+        return hasExactKeys(request, base.union(["target", "text", "allowClipboardReplace"]))
+            && validTarget(request["target"]) && request["text"] is String
+            && validBoolean(request["allowClipboardReplace"])
     case .key:
-        return validTarget(request["target"]) && request["key"] is String
+        return hasExactKeys(request, base.union(["target", "key"]))
+            && validTarget(request["target"]) && !(request["key"] as? String ?? "").isEmpty
     case .scroll:
-        if validID(request["snapshotId"]) { return positiveInteger(request["ref"]) }
-        return validTarget(request["target"]) && ["up", "down", "left", "right"].contains(request["direction"] as? String ?? "") && positiveInteger(request["amount"])
+        let refKeys = base.union(["snapshotId", "ref"])
+        if hasExactKeys(request, refKeys) {
+            return validID(request["snapshotId"]) && positiveInteger(request["ref"])
+        }
+        let directionalKeys = base.union(["target", "direction", "amount"])
+        return hasExactKeys(request, directionalKeys)
+            && validTarget(request["target"])
+            && ["up", "down", "left", "right"].contains(request["direction"] as? String ?? "")
+            && positiveInteger(request["amount"])
     case .screenshot:
-        return validTarget(request["target"]) && request["output"] is String && request["overwrite"] is Bool && request["annotated"] is Bool && validTree(request["tree"])
+        return hasExactKeys(request, base.union(["target", "output", "overwrite", "annotated", "tree"]))
+            && validTarget(request["target"]) && !(request["output"] as? String ?? "").isEmpty
+            && validBoolean(request["overwrite"]) && validBoolean(request["annotated"])
+            && validTree(request["tree"])
     case .click:
-        return validID(request["captureId"]) && validPoint(request["point"]) && ["left", "right", "middle"].contains(request["button"] as? String ?? "") && [1, 2, 3].contains(integer(request["count"]) ?? 0)
+        return hasExactKeys(request, base.union(["captureId", "point", "button", "count"]))
+            && validID(request["captureId"]) && validPoint(request["point"])
+            && ["left", "right", "middle"].contains(request["button"] as? String ?? "")
+            && [1, 2, 3].contains(integer(request["count"]) ?? 0)
     case .move:
-        return validID(request["captureId"]) && validPoint(request["point"])
+        return hasExactKeys(request, base.union(["captureId", "point"]))
+            && validID(request["captureId"]) && validPoint(request["point"])
     case .drag:
-        return validID(request["captureId"]) && validPoint(request["from"]) && validPoint(request["to"])
+        return hasExactKeys(request, base.union(["captureId", "from", "to"]))
+            && validID(request["captureId"]) && validPoint(request["from"])
+            && validPoint(request["to"])
     }
 }
 
 private func validOptions(_ value: Any?) -> Bool {
-    guard let options = value as? [String: Any], let timeout = integer(options["timeoutMs"]) else { return false }
-    return (1...maximumTimeoutMilliseconds).contains(timeout) && ["on", "off"].contains(options["cursor"] as? String ?? "")
+    guard let options = value as? [String: Any],
+          hasExactKeys(options, ["timeoutMs", "cursor"]),
+          let timeout = integer(options["timeoutMs"]) else { return false }
+    return (1...maximumTimeoutMilliseconds).contains(timeout)
+        && ["on", "off"].contains(options["cursor"] as? String ?? "")
 }
 
 private func validTarget(_ value: Any?) -> Bool {
     guard let target = value as? [String: Any] else { return false }
-    let app = target["app"] as? String
-    let pid = integer(target["pid"])
-    guard (app != nil) != (pid != nil && pid! > 0), app?.isEmpty != true else { return false }
-    return target["windowId"] == nil || positiveInteger(target["windowId"])
+    let keys = Set(target.keys)
+    if keys == ["app"] || keys == ["app", "windowId"] {
+        guard let app = target["app"] as? String, !app.isEmpty else { return false }
+        return keys == ["app"] || positiveInteger(target["windowId"])
+    }
+    if keys == ["pid"] || keys == ["pid", "windowId"] {
+        guard positiveInteger(target["pid"]) else { return false }
+        return keys == ["pid"] || positiveInteger(target["windowId"])
+    }
+    return false
 }
 
 private func validTree(_ value: Any?) -> Bool {
-    guard let tree = value as? [String: Any] else { return false }
-    return positiveInteger(tree["maxDepth"]) && positiveInteger(tree["maxElements"]) && ["full", "leafOnly", "leafCompact"].contains(tree["hintMode"] as? String ?? "")
+    guard let tree = value as? [String: Any],
+          hasExactKeys(tree, ["maxDepth", "maxElements", "hintMode"]) else { return false }
+    return positiveInteger(tree["maxDepth"]) && positiveInteger(tree["maxElements"])
+        && ["full", "leafOnly", "leafCompact"].contains(tree["hintMode"] as? String ?? "")
 }
 
 private func validPoint(_ value: Any?) -> Bool {
-    guard let point = value as? [String: Any], let x = number(point["x"]), let y = number(point["y"]) else { return false }
+    guard let point = value as? [String: Any], hasExactKeys(point, ["x", "y"]),
+          let x = number(point["x"]), let y = number(point["y"]) else { return false }
     return x.isFinite && y.isFinite && x >= 0 && y >= 0
+}
+
+private func validBoolean(_ value: Any?) -> Bool {
+    guard let value = value as? NSNumber else { return false }
+    return CFGetTypeID(value) == CFBooleanGetTypeID()
+}
+
+private func hasExactKeys(_ object: [String: Any], _ expected: Set<String>) -> Bool {
+    Set(object.keys) == expected
 }
 
 private func validID(_ value: Any?) -> Bool {
