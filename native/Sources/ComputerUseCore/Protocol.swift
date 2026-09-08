@@ -2,6 +2,7 @@ import Foundation
 
 public let protocolVersion = 1
 public let maximumTimeoutMilliseconds = 120_000
+public let maximumSafeInteger = 9_007_199_254_740_991
 
 public struct NativeFailure: Error, Equatable {
     public let code: String
@@ -133,7 +134,7 @@ private func validTarget(_ value: Any?) -> Bool {
     guard let target = value as? [String: Any] else { return false }
     let app = target["app"] as? String
     let pid = integer(target["pid"])
-    guard (app != nil) != (pid != nil && pid! > 0) else { return false }
+    guard (app != nil) != (pid != nil && pid! > 0), app?.isEmpty != true else { return false }
     return target["windowId"] == nil || positiveInteger(target["windowId"])
 }
 
@@ -156,7 +157,7 @@ private func positiveInteger(_ value: Any?) -> Bool { (integer(value) ?? 0) > 0 
 private func integer(_ value: Any?) -> Int? {
     guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
     let value = number.doubleValue
-    guard value.isFinite, value.rounded() == value, value <= Double(Int.max), value >= Double(Int.min) else { return nil }
+    guard value.isFinite, value.rounded() == value, abs(value) <= Double(maximumSafeInteger) else { return nil }
     return Int(value)
 }
 private func number(_ value: Any?) -> Double? {

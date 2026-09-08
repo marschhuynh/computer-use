@@ -1,5 +1,6 @@
 import AppKit
 import ComputerUseCore
+import Darwin
 import Foundation
 
 @main
@@ -13,16 +14,52 @@ struct ComputerUseHost {
             write(.failure(code: "PROTOCOL_ERROR", message: "Invalid host invocation"))
             return
         }
-        guard let line = readLine(), let request = WireRequest.decode(data: Data(line.utf8)) else {
+        guard let data = readRequestLine(), let request = WireRequest.decode(data: data) else {
             write(.failure(code: "PROTOCOL_ERROR", message: "Invalid request"))
             return
         }
+
         _ = NSApplication.shared
-        DispatchQueue.main.async {
-            write(NativeService().execute(request))
-            CFRunLoopStop(CFRunLoopGetMain())
+        let session = HostSession(
+            work: { cancellation, completion in
+                DispatchQueue.main.async {
+                    guard !cancellation.isCancelled else { return }
+                    completion(NativeService().execute(request))
+                }
+            },
+            onReply: write,
+            onShutdown: { CFRunLoopStop(CFRunLoopGetMain()) }
+        )
+        let parentObserver = ParentEOFObserver(fileHandle: .standardInput) {
+            session.parentDidClose()
         }
+        parentObserver.start()
+        session.start()
         CFRunLoopRun()
+        parentObserver.stop()
+    }
+
+    private static func readRequestLine() -> Data? {
+        var reader = BoundedLineReader()
+        var buffer = [UInt8](repeating: 0, count: 4_096)
+        while true {
+            let count = buffer.withUnsafeMutableBytes {
+                Darwin.read(FileHandle.standardInput.fileDescriptor, $0.baseAddress, $0.count)
+            }
+            if count < 0 {
+                if errno == EINTR { continue }
+                return nil
+            }
+            let chunk = Data(buffer.prefix(count))
+            switch reader.consume(chunk, endOfFile: count == 0) {
+            case .awaitingInput:
+                continue
+            case let .line(line):
+                return line
+            case .invalid:
+                return nil
+            }
+        }
     }
 
     private static func write(_ reply: WireReply) {
