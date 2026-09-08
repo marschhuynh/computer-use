@@ -14,9 +14,11 @@ const modes = [
   'execution-spawn-failure', 'nonzero-exit', 'success-then-exit-1',
   'never-exits', 'exits-after-receiving-request', 'ignores-sigterm',
   'requires-open-stdin', 'stdout-overflow', 'stderr-overflow',
-  'request-on-stderr', 'reflected-success-data', 'reflected-method',
-  'reflected-verification', 'reflected-visualization', 'reflected-error-message',
-  'reflected-error-details', 'stable-error-code', 'unknown-error-code', 'slow-version',
+  'request-on-stderr', 'reflected-success-data', 'reflected-root-target',
+  'reflected-reordered-subtree', 'reflected-method', 'reflected-verification',
+  'reflected-visualization', 'future-result-values', 'type-result', 'invalid-type-result',
+  'reflected-error-message', 'reflected-error-details', 'reflected-root-error-details',
+  'stable-error-code', 'unknown-error-code', 'slow-version',
 ];
 let fixtureDirectory: string;
 
@@ -32,6 +34,16 @@ function mutationRequest(text: string, timeoutMs = DEFAULT_TIMEOUT_MS): Request 
     snapshotId: '123e4567-e89b-42d3-a456-426614174000',
     ref: 1,
     text,
+  };
+}
+function typeRequest(text: string, timeoutMs = DEFAULT_TIMEOUT_MS): Request {
+  return {
+    schemaVersion: 1,
+    command: 'type',
+    options: { timeoutMs, cursor: 'on' },
+    target: { app: 'TextEdit' },
+    text,
+    allowClipboardReplace: true,
   };
 }
 
@@ -277,6 +289,63 @@ describe('MacOSBackend', { timeout: 25_000 }, () => {
     expect(reply.error.details).toEqual({ safe: 'kept' });
   });
 
+  it('rejects structured supplied text reflected as the complete mutation target', async () => {
+    const text = '{"pin":8472}';
+    const backend = new MacOSBackend({ helper: fixture('reflected-root-target') });
+    const reply = await backend.execute(mutationRequest(text), new AbortController().signal);
+    expect(reply).toEqual({
+      schemaVersion: 1,
+      ok: false,
+      command: 'set-value',
+      error: {
+        code: 'PROTOCOL_ERROR',
+        message: 'Native helper returned an invalid response',
+        details: { mutationStatus: 'potentiallyApplied' },
+      },
+    });
+    expect(JSON.stringify(reply)).not.toContain('8472');
+  });
+
+  it('omits structured supplied text reflected across complete error details but preserves exact mutation status', async () => {
+    const text = '{"pin":8472}';
+    const backend = new MacOSBackend({ helper: fixture('reflected-root-error-details') });
+    const reply = await backend.execute(mutationRequest(text), new AbortController().signal);
+    expect(reply).toEqual({
+      schemaVersion: 1,
+      ok: false,
+      command: 'set-value',
+      error: {
+        code: 'NATIVE_FAILURE',
+        message: 'Useful failure',
+        details: { mutationStatus: 'potentiallyApplied' },
+      },
+    });
+    expect(JSON.stringify(reply)).not.toContain('8472');
+  });
+
+  it('omits a canonical parsed JSON match from a nested subtree regardless of object key order', async () => {
+    const backend = new MacOSBackend({ helper: fixture('reflected-reordered-subtree') });
+    await expect(backend.execute(
+      mutationRequest('{"pin":8472,"label":"private"}'),
+      new AbortController().signal,
+    )).resolves.toEqual({
+      schemaVersion: 1,
+      ok: true,
+      command: 'set-value',
+      data: { target: { app: 'TextEdit' }, method: 'accessibility', verification: 'verified', visualization: 'none' },
+    });
+  });
+
+  it('does not treat a free-form object key alone as reflected supplied text', async () => {
+    const backend = new MacOSBackend({ helper: fixture('reflected-success-data') });
+    await expect(backend.execute(mutationRequest('app'), new AbortController().signal)).resolves.toEqual({
+      schemaVersion: 1,
+      ok: true,
+      command: 'set-value',
+      data: { target: { app: 'TextEdit' }, method: 'accessibility', verification: 'verified', visualization: 'none' },
+    });
+  });
+
   it.each(['target', 'method'])('preserves the required %s field when supplied text collides with its key', async text => {
     const backend = new MacOSBackend({ helper: fixture('reflected-success-data') });
     await expect(backend.execute(mutationRequest(text), new AbortController().signal)).resolves.toEqual({
@@ -319,6 +388,57 @@ describe('MacOSBackend', { timeout: 25_000 }, () => {
       },
     });
     expect(JSON.stringify(reply)).not.toContain(text);
+  });
+
+  it('accepts and projects future non-placeholder mutation result values', async () => {
+    const backend = new MacOSBackend({ helper: fixture('future-result-values') });
+    await expect(backend.execute(mutationRequest('private future value'), new AbortController().signal)).resolves.toEqual({
+      schemaVersion: 1,
+      ok: true,
+      command: 'set-value',
+      data: {
+        target: { app: 'TextEdit' },
+        method: 'unicode-events',
+        verification: 'dispatch-completed',
+        visualization: 'cursor-disabled',
+      },
+    });
+  });
+
+  it('preserves validated clipboard replacement metadata only for type results', async () => {
+    const backend = new MacOSBackend({ helper: fixture('type-result') });
+    await expect(backend.execute(typeRequest('true'), new AbortController().signal)).resolves.toEqual({
+      schemaVersion: 1,
+      ok: true,
+      command: 'type',
+      data: {
+        target: { app: 'TextEdit' },
+        method: 'accessibility',
+        verification: 'verified',
+        visualization: 'none',
+        clipboardReplaced: true,
+      },
+    });
+    await expect(backend.execute(mutationRequest('private'), new AbortController().signal)).resolves.toEqual({
+      schemaVersion: 1,
+      ok: true,
+      command: 'set-value',
+      data: { target: { app: 'TextEdit' }, method: 'accessibility', verification: 'verified', visualization: 'none' },
+    });
+  });
+
+  it('rejects a non-boolean clipboard replacement value for a type result', async () => {
+    const backend = new MacOSBackend({ helper: fixture('invalid-type-result') });
+    await expect(backend.execute(typeRequest('private'), new AbortController().signal)).resolves.toEqual({
+      schemaVersion: 1,
+      ok: false,
+      command: 'type',
+      error: {
+        code: 'PROTOCOL_ERROR',
+        message: 'Native helper returned an invalid response',
+        details: { mutationStatus: 'potentiallyApplied' },
+      },
+    });
   });
 
   it('rejects an unknown helper error code', async () => {

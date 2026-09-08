@@ -30,6 +30,9 @@ if (process.argv.slice(2).includes('--protocol-version')) {
     const validReply = JSON.stringify({ schemaVersion: 1, ok: true, command: request.command, data: request.command === 'apps' ? { apps: [] } : {} });
     let reflectedValue = request.text;
     try { reflectedValue = JSON.parse(request.text); } catch {}
+    const reversedReflectedValue = reflectedValue !== null && typeof reflectedValue === 'object' && !Array.isArray(reflectedValue)
+      ? Object.fromEntries(Object.entries(reflectedValue).reverse())
+      : reflectedValue;
     const writeAndExit = (text, code = 0) => process.stdout.write(text, () => process.exit(code));
 
     switch (mode) {
@@ -62,6 +65,51 @@ if (process.argv.slice(2).includes('--protocol-version')) {
           },
         })}\n`);
         break;
+      case 'reflected-root-target':
+      case 'reflected-reordered-subtree':
+        writeAndExit(`${JSON.stringify({
+          schemaVersion: 1,
+          ok: true,
+          command: request.command,
+          data: {
+            target: mode === 'reflected-root-target'
+              ? reflectedValue
+              : { app: 'TextEdit', reflected: reversedReflectedValue },
+            method: 'accessibility',
+            verification: 'verified',
+            visualization: 'none',
+          },
+        })}\n`);
+        break;
+      case 'future-result-values':
+        writeAndExit(`${JSON.stringify({
+          schemaVersion: 1,
+          ok: true,
+          command: request.command,
+          data: {
+            target: { app: 'TextEdit' },
+            method: 'unicode-events',
+            verification: 'dispatch-completed',
+            visualization: 'cursor-disabled',
+          },
+        })}\n`);
+        break;
+      case 'type-result':
+      case 'invalid-type-result':
+        writeAndExit(`${JSON.stringify({
+          schemaVersion: 1,
+          ok: true,
+          command: request.command,
+          data: {
+            target: { app: 'TextEdit' },
+            method: 'accessibility',
+            verification: 'verified',
+            visualization: 'none',
+            clipboardReplaced: mode === 'type-result' ? true : 'true',
+            unknown: 'not projected',
+          },
+        })}\n`);
+        break;
       case 'reflected-method':
       case 'reflected-verification':
       case 'reflected-visualization': {
@@ -88,6 +136,20 @@ if (process.argv.slice(2).includes('--protocol-version')) {
           ok: false,
           command: request.command,
           error: { code: 'NATIVE_FAILURE', message: 'Useful failure', details: { reason: reflectedValue, safe: 'kept' } },
+        })}\n`);
+        break;
+      case 'reflected-root-error-details':
+        writeAndExit(`${JSON.stringify({
+          schemaVersion: 1,
+          ok: false,
+          command: request.command,
+          error: {
+            code: 'NATIVE_FAILURE',
+            message: 'Useful failure',
+            details: reflectedValue !== null && typeof reflectedValue === 'object' && !Array.isArray(reflectedValue)
+              ? { ...reflectedValue, mutationStatus: 'potentiallyApplied' }
+              : reflectedValue,
+          },
         })}\n`);
         break;
       case 'stable-error-code':

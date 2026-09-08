@@ -12,6 +12,14 @@ const STABLE_ERROR_CODES = new Set([
   'MISSING_DEPENDENCY', 'PERMISSION_DENIED', 'TARGET_NOT_FOUND', 'AMBIGUOUS_TARGET',
   'INELIGIBLE_TARGET', 'STALE_SNAPSHOT', 'STALE_CAPTURE', 'TIMEOUT', 'BUSY', 'INTERRUPTED',
 ]);
+const CONTROLLED_RESULT_VALUES = {
+  method: new Set(['accessibility']),
+  verification: new Set(['verified']),
+  visualization: new Set(['none']),
+};
+
+type ResultField = keyof typeof CONTROLLED_RESULT_VALUES;
+type SuppliedValue = { text: string; parsed?: JsonValue };
 
 type StopReason = 'aborted' | 'timeout' | 'stdout-overflow' | 'stderr-overflow';
 type Invocation = {
@@ -179,30 +187,31 @@ function failure(request: Request, code: string, message: string): Reply {
 function projectReply(value: unknown, request: Request): Reply | undefined {
   if (!isRecord(value) || value.schemaVersion !== 1 || typeof value.ok !== 'boolean'
     || value.command !== request.command) return undefined;
-  const text = suppliedText(request);
+  const supplied = suppliedValue(request);
   if (!value.ok) {
     if (!isRecord(value.error) || typeof value.error.code !== 'string' || typeof value.error.message !== 'string'
       || (value.error.details !== undefined && !isJsonRecord(value.error.details))
       || !STABLE_ERROR_CODES.has(value.error.code)) return undefined;
+    const details = value.error.details === undefined ? undefined : projectDetails(value.error.details, supplied);
     return {
       schemaVersion: 1,
       ok: false,
       command: request.command,
       error: {
         code: value.error.code,
-        message: containsSuppliedText(value.error.message, text) ? '' : value.error.message,
-        ...(value.error.details === undefined ? {} : { details: projectDetails(value.error.details, text) }),
+        message: reflectsSuppliedValue(value.error.message, supplied) ? '' : value.error.message,
+        ...(details === undefined ? {} : { details }),
       },
     };
   }
   if (!isRecord(value.data)) return undefined;
-  const data = projectData(request, value.data, text);
+  const data = projectData(request, value.data, supplied);
   return data === undefined
     ? undefined
     : { schemaVersion: 1, ok: true, command: request.command, data };
 }
 
-function projectData(request: Request, data: Record<string, unknown>, text: string | undefined): Record<string, JsonValue> | undefined {
+function projectData(request: Request, data: Record<string, unknown>, supplied: SuppliedValue | undefined): Record<string, JsonValue> | undefined {
   switch (request.command) {
     case 'doctor': {
       const checks = data.checks;
@@ -255,15 +264,20 @@ function projectData(request: Request, data: Record<string, unknown>, text: stri
     case 'scroll':
     case 'click':
     case 'move':
-    case 'drag':
-      if (!isJsonRecord(data.target) || data.method !== 'accessibility'
-        || data.verification !== 'verified' || data.visualization !== 'none') return undefined;
-      return {
-        target: projectFreeFormRecord(data.target, text),
-        method: data.method,
-        verification: data.verification,
-        visualization: data.visualization,
-      };
+    case 'drag': {
+      if (!isJsonRecord(data.target)) return undefined;
+      const target = projectFreeFormRecord(data.target, supplied);
+      const method = projectResultValue('method', data.method, supplied);
+      const verification = projectResultValue('verification', data.verification, supplied);
+      const visualization = projectResultValue('visualization', data.visualization, supplied);
+      if (target === undefined || method === undefined || verification === undefined || visualization === undefined) return undefined;
+      const projected: Record<string, JsonValue> = { target, method, verification, visualization };
+      if (request.command === 'type' && data.clipboardReplaced !== undefined) {
+        if (typeof data.clipboardReplaced !== 'boolean') return undefined;
+        projected.clipboardReplaced = data.clipboardReplaced;
+      }
+      return projected;
+    }
   }
 }
 
@@ -286,43 +300,75 @@ function isWindow(value: unknown): value is Window {
     && (typeof value.reason === 'string' || value.reason === null);
 }
 
-function suppliedText(request: Request): string | undefined {
-  return (request.command === 'type' || request.command === 'set-value') && request.text.length > 0
-    ? request.text
-    : undefined;
-}
-function containsSuppliedText(value: JsonValue, text: string | undefined): boolean {
-  if (text === undefined) return false;
-  if (typeof value === 'string') return value.includes(text);
-  return JSON.stringify(value)?.includes(text) ?? false;
+function suppliedValue(request: Request): SuppliedValue | undefined {
+  if ((request.command !== 'type' && request.command !== 'set-value') || request.text.length === 0) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(request.text);
+    return isJsonValue(parsed) ? { text: request.text, parsed } : { text: request.text };
+  } catch {
+    return { text: request.text };
+  }
 }
 
-function projectDetails(value: Record<string, JsonValue>, text: string | undefined): Record<string, JsonValue> {
-  const projected = projectFreeFormRecord(value, text);
-  if (value.mutationStatus === 'potentiallyApplied') projected.mutationStatus = 'potentiallyApplied';
-  else delete projected.mutationStatus;
+function reflectsSuppliedValue(value: JsonValue, supplied: SuppliedValue | undefined): boolean {
+  if (supplied === undefined) return false;
+  if (typeof value === 'string' && value.includes(supplied.text)) return true;
+  if ((value === null || typeof value === 'boolean' || typeof value === 'number')
+    && (JSON.stringify(value)?.includes(supplied.text) ?? false)) return true;
+  return supplied.parsed !== undefined && equalJsonValues(value, supplied.parsed);
+}
+
+function equalJsonValues(left: JsonValue, right: JsonValue): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+      && left.every((item, index) => equalJsonValues(item, right[index]));
+  }
+  if (left === null || right === null || typeof left !== 'object' || typeof right !== 'object') return false;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every(key => Object.hasOwn(right, key) && equalJsonValues(left[key], right[key]));
+}
+
+function projectResultValue(field: ResultField, value: unknown, supplied: SuppliedValue | undefined): string | undefined {
+  if (typeof value !== 'string' || value.length === 0) return undefined;
+  if (CONTROLLED_RESULT_VALUES[field].has(value)) return value;
+  return reflectsSuppliedValue(value, supplied) ? undefined : value;
+}
+
+function projectDetails(value: Record<string, JsonValue>, supplied: SuppliedValue | undefined): Record<string, JsonValue> | undefined {
+  const mutationStatus = value.mutationStatus === 'potentiallyApplied' ? 'potentiallyApplied' : undefined;
+  const freeForm: Record<string, JsonValue> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (key !== 'mutationStatus') freeForm[key] = item;
+  }
+  const contaminatedRoot = reflectsSuppliedValue(value, supplied) || reflectsSuppliedValue(freeForm, supplied);
+  const projected = contaminatedRoot ? undefined : projectFreeFormRecord(freeForm, supplied);
+  if (projected === undefined) return mutationStatus === undefined ? undefined : { mutationStatus };
+  if (mutationStatus !== undefined) projected.mutationStatus = mutationStatus;
   return projected;
 }
 
-function projectFreeFormRecord(value: Record<string, JsonValue>, text: string | undefined): Record<string, JsonValue> {
+function projectFreeFormRecord(value: Record<string, JsonValue>, supplied: SuppliedValue | undefined): Record<string, JsonValue> | undefined {
+  if (reflectsSuppliedValue(value, supplied)) return undefined;
   const projected: Record<string, JsonValue> = {};
   for (const [key, item] of Object.entries(value)) {
-    if (text !== undefined && key.includes(text)) continue;
-    const projectedItem = projectFreeFormValue(item, text);
+    const projectedItem = projectFreeFormValue(item, supplied);
     if (projectedItem !== undefined) projected[key] = projectedItem;
   }
   return projected;
 }
 
-function projectFreeFormValue(value: JsonValue, text: string | undefined): JsonValue | undefined {
-  if (containsSuppliedText(value, text)) return undefined;
+function projectFreeFormValue(value: JsonValue, supplied: SuppliedValue | undefined): JsonValue | undefined {
+  if (reflectsSuppliedValue(value, supplied)) return undefined;
   if (Array.isArray(value)) {
     return value.flatMap(item => {
-      const projected = projectFreeFormValue(item, text);
+      const projected = projectFreeFormValue(item, supplied);
       return projected === undefined ? [] : [projected];
     });
   }
-  if (value !== null && typeof value === 'object') return projectFreeFormRecord(value, text);
+  if (value !== null && typeof value === 'object') return projectFreeFormRecord(value, supplied);
   return value;
 }
 
