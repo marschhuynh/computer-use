@@ -1,0 +1,17 @@
+{
+  "name": "nuvin-computer-use",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone restoration of the ComputerUseTool from marschhuynh/nuvin-cli (macOS accessibility-tree + screenshot automation)",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "ax-helper": "make ax-helper"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
