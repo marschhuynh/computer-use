@@ -17,6 +17,22 @@ public struct TreeOptions: Codable, Equatable {
     }
 }
 
+enum AXReadResult<Value> {
+    case value(Value)
+    case unavailable
+    case failure
+}
+
+extension AXReadResult: Equatable where Value: Equatable {}
+
+struct AXTreeReader<Element> {
+    let string: (Element, String) -> AXReadResult<String>
+    let bool: (Element, String) -> AXReadResult<Bool>
+    let children: (Element) -> AXReadResult<[Element]>
+    let actions: (Element) -> AXReadResult<[String]>
+    let bounds: (Element) -> AXReadResult<WindowBounds>
+}
+
 public struct AXTreeInputNode: Equatable {
     public let role: String
     public let subrole: String?
@@ -147,6 +163,115 @@ public enum AXTree {
         walk(root, path: [], depth: 0, options: options, nodes: &nodes, boundaries: &boundaries)
         let refs = buildRefs(nodes: nodes, boundaries: boundaries, mode: options.hintMode)
         return AXTreeSnapshot(target: target, treeOptions: options, evidence: AXTreeEvidence(nodes: nodes, truncation: boundaries, refs: refs))
+    }
+
+    static func readSnapshot<Element>(
+        target: ResolvedTarget,
+        options: TreeOptions,
+        root: Element,
+        reader: AXTreeReader<Element>
+    ) throws -> (snapshot: AXTreeSnapshot, elementsByRef: [Int: Element]) {
+        var visited = 0
+        var elementsByPath: [[Int]: Element] = [:]
+        let input = try readNode(
+            root,
+            path: [],
+            depth: 0,
+            options: options,
+            reader: reader,
+            visited: &visited,
+            elementsByPath: &elementsByPath
+        )
+        let snapshot = snapshot(target: target, options: options, root: input)
+        var elementsByRef: [Int: Element] = [:]
+        for ref in snapshot.evidence.refs {
+            guard let element = elementsByPath[ref.path] else { throw observationFailure() }
+            elementsByRef[ref.ref] = element
+        }
+        return (snapshot, elementsByRef)
+    }
+
+    private static func readNode<Element>(
+        _ element: Element,
+        path: [Int],
+        depth: Int,
+        options: TreeOptions,
+        reader: AXTreeReader<Element>,
+        visited: inout Int,
+        elementsByPath: inout [[Int]: Element]
+    ) throws -> AXTreeInputNode {
+        visited += 1
+        elementsByPath[path] = element
+
+        let role = try required(reader.string(element, kAXRoleAttribute))
+        let subrole = try optional(reader.string(element, kAXSubroleAttribute))
+        let identifier = try optional(reader.string(element, kAXIdentifierAttribute))
+        let title = try optional(reader.string(element, kAXTitleAttribute))
+        let label = try optional(reader.string(element, kAXDescriptionAttribute))
+        let value = try optional(reader.string(element, kAXValueAttribute))
+        let enabled = try optional(reader.bool(element, kAXEnabledAttribute))
+        let focused = try optional(reader.bool(element, kAXFocusedAttribute))
+        let selected = try optional(reader.bool(element, kAXSelectedAttribute))
+        let rawChildren = try collection(reader.children(element))
+        let actions = try collection(reader.actions(element))
+        let bounds = try optional(reader.bounds(element))
+
+        var children: [AXTreeInputNode] = []
+        if depth < options.maxDepth {
+            for (index, child) in rawChildren.enumerated() {
+                guard visited < options.maxElements else { break }
+                children.append(try readNode(
+                    child,
+                    path: path + [index],
+                    depth: depth + 1,
+                    options: options,
+                    reader: reader,
+                    visited: &visited,
+                    elementsByPath: &elementsByPath
+                ))
+            }
+        }
+
+        return AXTreeInputNode(
+            role: role,
+            subrole: subrole,
+            identifier: identifier,
+            title: title,
+            label: label,
+            value: value,
+            enabled: enabled,
+            focused: focused,
+            selected: selected,
+            actions: actions,
+            bounds: bounds,
+            children: children,
+            totalChildCount: rawChildren.count
+        )
+    }
+
+    private static func required<Value>(_ result: AXReadResult<Value>) throws -> Value {
+        guard case let .value(value) = result else { throw observationFailure() }
+        return value
+    }
+
+    private static func optional<Value>(_ result: AXReadResult<Value>) throws -> Value? {
+        switch result {
+        case let .value(value): return value
+        case .unavailable: return nil
+        case .failure: throw observationFailure()
+        }
+    }
+
+    private static func collection<Value>(_ result: AXReadResult<[Value]>) throws -> [Value] {
+        switch result {
+        case let .value(values): return values
+        case .unavailable: return []
+        case .failure: throw observationFailure()
+        }
+    }
+
+    private static func observationFailure() -> NativeFailure {
+        NativeFailure("STALE_SNAPSHOT", "Accessibility observation could not be trusted")
     }
 
     public static func capture(target: ResolvedTarget, options: TreeOptions) throws -> AXTreeObservation {
