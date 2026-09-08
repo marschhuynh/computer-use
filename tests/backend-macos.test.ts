@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { MacOSBackend } from '../src/backend/macos.js';
 import { backendForPlatform } from '../src/cli.js';
 import { formatReply } from '../src/cli/output.js';
-import type { Request } from '../src/core/protocol.js';
+import { DEFAULT_TIMEOUT_MS, type Request } from '../src/core/protocol.js';
 
 const mockHost = new URL('../fixtures/cli/mock-host.mjs', import.meta.url);
 const modes = [
@@ -14,16 +14,17 @@ const modes = [
   'execution-spawn-failure', 'nonzero-exit', 'success-then-exit-1',
   'never-exits', 'exits-after-receiving-request', 'ignores-sigterm',
   'requires-open-stdin', 'stdout-overflow', 'stderr-overflow',
-  'request-on-stderr', 'reflected-success-data', 'reflected-error-message',
-  'reflected-error-details', 'stable-error-code', 'slow-version',
+  'request-on-stderr', 'reflected-success-data', 'reflected-method',
+  'reflected-verification', 'reflected-visualization', 'reflected-error-message',
+  'reflected-error-details', 'stable-error-code', 'unknown-error-code', 'slow-version',
 ];
 let fixtureDirectory: string;
 
 function fixture(mode: string): string { return join(fixtureDirectory, mode); }
-function appsRequest(timeoutMs = 5_000): Request {
+function appsRequest(timeoutMs = DEFAULT_TIMEOUT_MS): Request {
   return { schemaVersion: 1, command: 'apps', options: { timeoutMs, cursor: 'on' } };
 }
-function mutationRequest(text: string, timeoutMs = 5_000): Request {
+function mutationRequest(text: string, timeoutMs = DEFAULT_TIMEOUT_MS): Request {
   return {
     schemaVersion: 1,
     command: 'set-value',
@@ -45,7 +46,7 @@ beforeAll(async () => {
 
 afterAll(async () => { await rm(fixtureDirectory, { recursive: true, force: true }); });
 
-describe('MacOSBackend', () => {
+describe('MacOSBackend', { timeout: 25_000 }, () => {
   it('probes the helper and accepts a valid command response', async () => {
     const backend = new MacOSBackend({ helper: fixture('valid-response') });
     await expect(backend.execute(appsRequest(), new AbortController().signal)).resolves.toEqual({
@@ -248,6 +249,34 @@ describe('MacOSBackend', () => {
     });
   });
 
+  it.each([
+    ['null', 'null'],
+    ['an empty array', '[]'],
+    ['a composite array', '[{"pin":8472}]'],
+    ['structured JSON', '{"pin":8472}'],
+  ])('omits supplied text represented as JSON %s from nested free-form target data', async (_label, text) => {
+    const backend = new MacOSBackend({ helper: fixture('reflected-success-data') });
+    await expect(backend.execute(mutationRequest(text), new AbortController().signal)).resolves.toEqual({
+      schemaVersion: 1,
+      ok: true,
+      command: 'set-value',
+      data: { target: { app: 'TextEdit' }, method: 'accessibility', verification: 'verified', visualization: 'none' },
+    });
+  });
+
+  it.each([
+    ['null', 'null'],
+    ['an empty array', '[]'],
+    ['a composite array', '[{"pin":8472}]'],
+    ['structured JSON', '{"pin":8472}'],
+  ])('omits supplied text represented as JSON %s from free-form error details', async (_label, text) => {
+    const backend = new MacOSBackend({ helper: fixture('reflected-error-details') });
+    const reply = await backend.execute(mutationRequest(text), new AbortController().signal);
+    expect(reply).toMatchObject({ ok: false, error: { code: 'NATIVE_FAILURE', message: 'Useful failure' } });
+    if (reply.ok) throw new Error('Expected failure');
+    expect(reply.error.details).toEqual({ safe: 'kept' });
+  });
+
   it.each(['target', 'method'])('preserves the required %s field when supplied text collides with its key', async text => {
     const backend = new MacOSBackend({ helper: fixture('reflected-success-data') });
     await expect(backend.execute(mutationRequest(text), new AbortController().signal)).resolves.toEqual({
@@ -258,14 +287,65 @@ describe('MacOSBackend', () => {
     });
   });
 
-  it('preserves a controlled semantic value when supplied text collides with it', async () => {
+  it.each([
+    ['method', 'accessibility'],
+    ['verification', 'verified'],
+    ['visualization', 'none'],
+  ])('preserves the known %s value when supplied text collides with it', async (_field, text) => {
     const backend = new MacOSBackend({ helper: fixture('reflected-success-data') });
-    await expect(backend.execute(mutationRequest('accessibility'), new AbortController().signal)).resolves.toEqual({
+    await expect(backend.execute(mutationRequest(text), new AbortController().signal)).resolves.toEqual({
       schemaVersion: 1,
       ok: true,
       command: 'set-value',
       data: { target: { app: 'TextEdit' }, method: 'accessibility', verification: 'verified', visualization: 'none' },
     });
+  });
+
+  it.each([
+    ['method', 'reflected-method', 'private-method-secret-4312'],
+    ['verification', 'reflected-verification', 'private-verification-secret-5823'],
+    ['visualization', 'reflected-visualization', 'private-visualization-secret-7964'],
+  ])('rejects supplied text in the %s success field', async (_field, mode, text) => {
+    const backend = new MacOSBackend({ helper: fixture(mode) });
+    const reply = await backend.execute(mutationRequest(text), new AbortController().signal);
+    expect(reply).toEqual({
+      schemaVersion: 1,
+      ok: false,
+      command: 'set-value',
+      error: {
+        code: 'PROTOCOL_ERROR',
+        message: 'Native helper returned an invalid response',
+        details: { mutationStatus: 'potentiallyApplied' },
+      },
+    });
+    expect(JSON.stringify(reply)).not.toContain(text);
+  });
+
+  it('rejects an unknown helper error code', async () => {
+    const backend = new MacOSBackend({ helper: fixture('unknown-error-code') });
+    await expect(backend.execute(appsRequest(), new AbortController().signal)).resolves.toEqual({
+      schemaVersion: 1,
+      ok: false,
+      command: 'apps',
+      error: { code: 'PROTOCOL_ERROR', message: 'Native helper returned an invalid response' },
+    });
+  });
+
+  it('rejects a supplied-text helper error code with post-dispatch mutation uncertainty', async () => {
+    const text = 'private-error-code-secret-9185';
+    const backend = new MacOSBackend({ helper: fixture('unknown-error-code') });
+    const reply = await backend.execute(mutationRequest(text), new AbortController().signal);
+    expect(reply).toEqual({
+      schemaVersion: 1,
+      ok: false,
+      command: 'set-value',
+      error: {
+        code: 'PROTOCOL_ERROR',
+        message: 'Native helper returned an invalid response',
+        details: { mutationStatus: 'potentiallyApplied' },
+      },
+    });
+    expect(JSON.stringify(reply)).not.toContain(text);
   });
 
   it('preserves a stable error code and exact mutation status when supplied text collides with the code', async () => {

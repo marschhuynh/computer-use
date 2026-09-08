@@ -28,9 +28,8 @@ if (process.argv.slice(2).includes('--protocol-version')) {
     process.stdin.pause();
     const request = JSON.parse(requestText);
     const validReply = JSON.stringify({ schemaVersion: 1, ok: true, command: request.command, data: request.command === 'apps' ? { apps: [] } : {} });
-    const reflectedValue = request.text === 'true'
-      ? true
-      : (/^[0-9]+$/.test(request.text) ? Number(request.text) : request.text);
+    let reflectedValue = request.text;
+    try { reflectedValue = JSON.parse(request.text); } catch {}
     const writeAndExit = (text, code = 0) => process.stdout.write(text, () => process.exit(code));
 
     switch (mode) {
@@ -63,6 +62,23 @@ if (process.argv.slice(2).includes('--protocol-version')) {
           },
         })}\n`);
         break;
+      case 'reflected-method':
+      case 'reflected-verification':
+      case 'reflected-visualization': {
+        const field = mode.slice('reflected-'.length);
+        writeAndExit(`${JSON.stringify({
+          schemaVersion: 1,
+          ok: true,
+          command: request.command,
+          data: {
+            target: { app: 'TextEdit' },
+            method: field === 'method' ? request.text : 'accessibility',
+            verification: field === 'verification' ? request.text : 'verified',
+            visualization: field === 'visualization' ? request.text : 'none',
+          },
+        })}\n`);
+        break;
+      }
       case 'reflected-error-message':
         writeAndExit(`${JSON.stringify({ schemaVersion: 1, ok: false, command: request.command, error: { code: 'NATIVE_FAILURE', message: request.text } })}\n`);
         break;
@@ -71,7 +87,7 @@ if (process.argv.slice(2).includes('--protocol-version')) {
           schemaVersion: 1,
           ok: false,
           command: request.command,
-          error: { code: 'NATIVE_FAILURE', message: 'Useful failure', details: { reason: request.text, safe: 'kept' } },
+          error: { code: 'NATIVE_FAILURE', message: 'Useful failure', details: { reason: reflectedValue, safe: 'kept' } },
         })}\n`);
         break;
       case 'stable-error-code':
@@ -84,6 +100,14 @@ if (process.argv.slice(2).includes('--protocol-version')) {
             message: 'Unsupported action',
             details: { reflected: request.text, mutationStatus: 'potentiallyApplied', safe: 'kept' },
           },
+        })}\n`);
+        break;
+      case 'unknown-error-code':
+        writeAndExit(`${JSON.stringify({
+          schemaVersion: 1,
+          ok: false,
+          command: request.command,
+          error: { code: request.text ?? 'UNKNOWN_HELPER_CODE', message: 'Unknown helper failure' },
         })}\n`);
         break;
       case 'nonzero-exit':

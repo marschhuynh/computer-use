@@ -6,6 +6,12 @@ const PROTOCOL_VERSION = '1';
 const MAX_STDOUT_BYTES = 16 * 1024 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
 const CLEANUP_GRACE_MS = 2_000;
+const STABLE_ERROR_CODES = new Set([
+  'NATIVE_FAILURE', 'PROTOCOL_ERROR', 'UNSUPPORTED_ACTION', 'EXECUTION_UNCERTAIN',
+  'INVALID_ARGUMENT', 'UNSUPPORTED_PLATFORM', 'MISSING_HELPER', 'HELPER_VERSION_MISMATCH',
+  'MISSING_DEPENDENCY', 'PERMISSION_DENIED', 'TARGET_NOT_FOUND', 'AMBIGUOUS_TARGET',
+  'INELIGIBLE_TARGET', 'STALE_SNAPSHOT', 'STALE_CAPTURE', 'TIMEOUT', 'BUSY', 'INTERRUPTED',
+]);
 
 type StopReason = 'aborted' | 'timeout' | 'stdout-overflow' | 'stderr-overflow';
 type Invocation = {
@@ -176,7 +182,8 @@ function projectReply(value: unknown, request: Request): Reply | undefined {
   const text = suppliedText(request);
   if (!value.ok) {
     if (!isRecord(value.error) || typeof value.error.code !== 'string' || typeof value.error.message !== 'string'
-      || (value.error.details !== undefined && !isJsonRecord(value.error.details))) return undefined;
+      || (value.error.details !== undefined && !isJsonRecord(value.error.details))
+      || !STABLE_ERROR_CODES.has(value.error.code)) return undefined;
     return {
       schemaVersion: 1,
       ok: false,
@@ -249,8 +256,8 @@ function projectData(request: Request, data: Record<string, unknown>, text: stri
     case 'click':
     case 'move':
     case 'drag':
-      if (!isJsonRecord(data.target) || typeof data.method !== 'string'
-        || typeof data.verification !== 'string' || typeof data.visualization !== 'string') return undefined;
+      if (!isJsonRecord(data.target) || data.method !== 'accessibility'
+        || data.verification !== 'verified' || data.visualization !== 'none') return undefined;
       return {
         target: projectFreeFormRecord(data.target, text),
         method: data.method,
@@ -284,9 +291,10 @@ function suppliedText(request: Request): string | undefined {
     ? request.text
     : undefined;
 }
-function containsSuppliedText(value: string | number | boolean, text: string | undefined): boolean {
+function containsSuppliedText(value: JsonValue, text: string | undefined): boolean {
   if (text === undefined) return false;
-  return String(value).includes(text);
+  if (typeof value === 'string') return value.includes(text);
+  return JSON.stringify(value)?.includes(text) ?? false;
 }
 
 function projectDetails(value: Record<string, JsonValue>, text: string | undefined): Record<string, JsonValue> {
@@ -307,16 +315,14 @@ function projectFreeFormRecord(value: Record<string, JsonValue>, text: string | 
 }
 
 function projectFreeFormValue(value: JsonValue, text: string | undefined): JsonValue | undefined {
-  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-    return containsSuppliedText(value, text) ? undefined : value;
-  }
+  if (containsSuppliedText(value, text)) return undefined;
   if (Array.isArray(value)) {
     return value.flatMap(item => {
       const projected = projectFreeFormValue(item, text);
       return projected === undefined ? [] : [projected];
     });
   }
-  if (value !== null) return projectFreeFormRecord(value, text);
+  if (value !== null && typeof value === 'object') return projectFreeFormRecord(value, text);
   return value;
 }
 
