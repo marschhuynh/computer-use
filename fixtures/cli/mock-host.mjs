@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { unlink } from 'node:fs/promises';
 import { basename } from 'node:path';
 
 const mode = basename(process.argv[1]);
@@ -11,6 +12,7 @@ if (process.argv.slice(2).includes('--protocol-version')) {
   } else if (mode === 'slow-version') {
     setTimeout(() => writeVersion(1), 100);
   } else {
+    if (mode === 'execution-spawn-failure') await unlink(process.argv[1]);
     writeVersion(1);
   }
 } else {
@@ -37,6 +39,37 @@ if (process.argv.slice(2).includes('--protocol-version')) {
         break;
       case 'invalid-response-data':
         writeAndExit(`${JSON.stringify({ schemaVersion: 1, ok: true, command: request.command, data: { apps: 'not-an-array' } })}\n`);
+        break;
+      case 'failure-missing-command':
+        writeAndExit(`${JSON.stringify({ schemaVersion: 1, ok: false, error: { code: 'NATIVE_FAILURE', message: 'failed' } })}\n`);
+        break;
+      case 'failure-wrong-command':
+        writeAndExit(`${JSON.stringify({ schemaVersion: 1, ok: false, command: 'doctor', error: { code: 'NATIVE_FAILURE', message: 'failed' } })}\n`);
+        break;
+      case 'reflected-success-data':
+        writeAndExit(`${JSON.stringify({
+          schemaVersion: 1,
+          ok: true,
+          command: request.command,
+          data: {
+            target: { app: 'TextEdit', reflected: request.text },
+            method: 'accessibility',
+            verification: 'verified',
+            visualization: 'none',
+            reflected: request.text,
+          },
+        })}\n`);
+        break;
+      case 'reflected-error-message':
+        writeAndExit(`${JSON.stringify({ schemaVersion: 1, ok: false, command: request.command, error: { code: 'NATIVE_FAILURE', message: request.text } })}\n`);
+        break;
+      case 'reflected-error-details':
+        writeAndExit(`${JSON.stringify({
+          schemaVersion: 1,
+          ok: false,
+          command: request.command,
+          error: { code: 'NATIVE_FAILURE', message: 'Useful failure', details: { reason: request.text, safe: 'kept' } },
+        })}\n`);
         break;
       case 'nonzero-exit':
         process.exit(1);

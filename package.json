@@ -13,10 +13,11 @@
   "os": ["darwin"],
   "files": ["dist/", "native/", "docs/"],
   "scripts": {
-    "build:ts": "tsc -p tsconfig.build.json",
+    "build:ts": "node scripts/clean-dist.mjs && tsc -p tsconfig.build.json",
     "build:native": "node scripts/build-native.mjs",
     "build": "npm run build:ts && npm run build:native",
     "native-tests": "node scripts/native-tests.mjs",
+    "test:build-hygiene": "node scripts/test-build-hygiene.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "ax-helper": "make ax-helper"

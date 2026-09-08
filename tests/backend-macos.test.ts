@@ -4,15 +4,18 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { MacOSBackend } from '../src/backend/macos.js';
 import { backendForPlatform } from '../src/cli.js';
+import { formatReply } from '../src/cli/output.js';
 import type { Request } from '../src/core/protocol.js';
 
 const mockHost = new URL('../fixtures/cli/mock-host.mjs', import.meta.url);
 const modes = [
   'valid-response', 'invalid-json', 'wrong-command', 'invalid-response-data',
-  'incompatible-version', 'nonzero-exit', 'success-then-exit-1',
+  'failure-missing-command', 'failure-wrong-command', 'incompatible-version',
+  'execution-spawn-failure', 'nonzero-exit', 'success-then-exit-1',
   'never-exits', 'exits-after-receiving-request', 'ignores-sigterm',
   'requires-open-stdin', 'stdout-overflow', 'stderr-overflow',
-  'request-on-stderr', 'slow-version',
+  'request-on-stderr', 'reflected-success-data', 'reflected-error-message',
+  'reflected-error-details', 'slow-version',
 ];
 let fixtureDirectory: string;
 
@@ -66,6 +69,13 @@ describe('MacOSBackend', () => {
     });
   });
 
+  it.each(['failure-missing-command', 'failure-wrong-command'])('rejects an uncorrelated failure reply from %s', async mode => {
+    const backend = new MacOSBackend({ helper: fixture(mode) });
+    await expect(backend.execute(appsRequest(), new AbortController().signal)).resolves.toMatchObject({
+      ok: false, command: 'apps', error: { code: 'PROTOCOL_ERROR' },
+    });
+  });
+
   it('rejects an incompatible helper before sending a request', async () => {
     const backend = new MacOSBackend({ helper: fixture('incompatible-version') });
     await expect(backend.execute(appsRequest(), new AbortController().signal)).resolves.toMatchObject({
@@ -80,6 +90,18 @@ describe('MacOSBackend', () => {
     });
   });
 
+  it.each([
+    ['version mismatch', 'incompatible-version', 'HELPER_VERSION_MISMATCH', 5_000],
+    ['version-probe spawn failure', 'does-not-exist', 'MISSING_HELPER', 5_000],
+    ['version-probe timeout', 'slow-version', 'TIMEOUT', 30],
+    ['execution spawn failure', 'execution-spawn-failure', 'MISSING_HELPER', 5_000],
+  ])('does not mark a mutation potentially applied after a pre-dispatch %s', async (_label, mode, code, timeoutMs) => {
+    const backend = new MacOSBackend({ helper: fixture(mode) });
+    const reply = await backend.execute(mutationRequest('private pre-dispatch value', timeoutMs), new AbortController().signal);
+    expect(reply).toMatchObject({ ok: false, error: { code } });
+    if (!reply.ok) expect(reply.error.details).toBeUndefined();
+  });
+
   it('reports a nonzero request exit', async () => {
     const backend = new MacOSBackend({ helper: fixture('nonzero-exit') });
     await expect(backend.execute(appsRequest(), new AbortController().signal)).resolves.toMatchObject({
@@ -91,6 +113,25 @@ describe('MacOSBackend', () => {
     const backend = new MacOSBackend({ helper: fixture('success-then-exit-1') });
     const reply = await backend.execute(appsRequest(), new AbortController().signal);
     expect(reply).toMatchObject({ ok: false, error: { code: 'NATIVE_FAILURE' } });
+  });
+
+  it.each([
+    'nonzero-exit',
+    'success-then-exit-1',
+    'invalid-json',
+    'wrong-command',
+    'invalid-response-data',
+    'failure-missing-command',
+    'failure-wrong-command',
+    'exits-after-receiving-request',
+    'stdout-overflow',
+    'stderr-overflow',
+  ])('marks a synthetic post-dispatch mutation failure from %s as potentially applied', async mode => {
+    const backend = new MacOSBackend({ helper: fixture(mode) });
+    const reply = await backend.execute(mutationRequest('private uncertain value'), new AbortController().signal);
+    expect(reply).toMatchObject({ ok: false });
+    if (reply.ok) throw new Error('Expected failure');
+    expect(reply.error.details).toEqual({ mutationStatus: 'potentiallyApplied' });
   });
 
   it('rejects a zero exit without a response', async () => {
@@ -130,6 +171,16 @@ describe('MacOSBackend', () => {
     await expect(execution).resolves.toMatchObject({ ok: false, error: { code: 'INTERRUPTED' } });
   });
 
+  it('forces a SIGTERM-resistant child to exit after caller cancellation', async () => {
+    const controller = new AbortController();
+    const backend = new MacOSBackend({ helper: fixture('ignores-sigterm') });
+    const started = performance.now();
+    const execution = backend.execute(appsRequest(5_000), controller.signal);
+    setTimeout(() => controller.abort(), 1_000);
+    await expect(execution).resolves.toMatchObject({ ok: false, error: { code: 'INTERRUPTED' } });
+    expect(performance.now() - started).toBeGreaterThanOrEqual(2_900);
+  }, 8_000);
+
   it.each(['stdout-overflow', 'stderr-overflow'])('treats %s as protocol failure instead of truncated success', async mode => {
     const backend = new MacOSBackend({ helper: fixture(mode) });
     await expect(backend.execute(appsRequest(), new AbortController().signal)).resolves.toMatchObject({
@@ -155,6 +206,29 @@ describe('MacOSBackend', () => {
     });
     expect(JSON.stringify(reply)).not.toContain(text);
   }, 8_000);
+
+  it.each([
+    ['reflected success data', 'reflected-success-data'],
+    ['reflected error message', 'reflected-error-message'],
+    ['reflected error details', 'reflected-error-details'],
+  ])('does not expose supplied text from %s at the CLI reply boundary', async (_label, mode) => {
+    const text = `private reflected value ${mode}`;
+    const backend = new MacOSBackend({ helper: fixture(mode) });
+    const reply = await backend.execute(mutationRequest(text), new AbortController().signal);
+    expect(formatReply(reply, true)).not.toContain(text);
+    expect(formatReply(reply, false)).not.toContain(text);
+    if (mode === 'reflected-success-data') {
+      expect(reply).toEqual({
+        schemaVersion: 1,
+        ok: true,
+        command: 'set-value',
+        data: { target: { app: 'TextEdit', reflected: '' }, method: 'accessibility', verification: 'verified', visualization: 'none' },
+      });
+    }
+    if (mode === 'reflected-error-details') {
+      expect(reply).toMatchObject({ ok: false, error: { code: 'NATIVE_FAILURE', message: 'Useful failure', details: { safe: 'kept' } } });
+    }
+  });
 
   it('returns UNSUPPORTED_PLATFORM for native commands on non-macOS systems', async () => {
     const backend = backendForPlatform('linux');

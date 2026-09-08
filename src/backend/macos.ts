@@ -13,6 +13,7 @@ type Invocation = {
   signal: NodeJS.Signals | null;
   stdout: Buffer;
   stderr: Buffer;
+  requestDispatched: boolean;
   stopReason?: StopReason;
   spawnError?: NodeJS.ErrnoException;
 };
@@ -33,9 +34,9 @@ export class MacOSBackend implements Backend {
 
     const deadline = performance.now() + request.options.timeoutMs;
     const probe = await invoke(this.#helper, ['--protocol-version'], undefined, signal, deadline);
-    const probeFailure = invocationFailure(request, probe, false);
+    const probeFailure = invocationFailure(request, probe);
     if (probeFailure !== undefined) return probeFailure;
-    if (probe.code !== 0) return failure(request, 'NATIVE_FAILURE', 'Native helper version probe failed');
+    if (probe.code !== 0) return syntheticFailure(request, 'NATIVE_FAILURE', 'Native helper version probe failed', false);
     if (probe.stdout.toString('utf8').trim() !== PROTOCOL_VERSION) {
       return failure(request, 'HELPER_VERSION_MISMATCH', 'Native helper protocol version is incompatible');
     }
@@ -46,17 +47,22 @@ export class MacOSBackend implements Backend {
 
     const nativeRequest: Request = { ...request, options: { ...request.options, timeoutMs: remaining } };
     const execution = await invoke(this.#helper, [], `${JSON.stringify(nativeRequest)}\n`, signal, deadline);
-    const executionFailure = invocationFailure(request, execution, true);
+    const executionFailure = invocationFailure(request, execution);
     if (executionFailure !== undefined) return executionFailure;
-    if (execution.code !== 0) return failure(request, 'NATIVE_FAILURE', 'Native helper execution failed');
+    if (execution.code !== 0) {
+      return syntheticFailure(request, 'NATIVE_FAILURE', 'Native helper execution failed', execution.requestDispatched);
+    }
 
     let value: unknown;
     try { value = JSON.parse(execution.stdout.toString('utf8')); }
-    catch { return failure(request, 'PROTOCOL_ERROR', 'Native helper returned an invalid response'); }
+    catch {
+      return syntheticFailure(request, 'PROTOCOL_ERROR', 'Native helper returned an invalid response', execution.requestDispatched);
+    }
     try {
-      return validReply(value, request) ? value : failure(request, 'PROTOCOL_ERROR', 'Native helper returned an invalid response');
+      return projectReply(value, request)
+        ?? syntheticFailure(request, 'PROTOCOL_ERROR', 'Native helper returned an invalid response', execution.requestDispatched);
     } catch {
-      return failure(request, 'PROTOCOL_ERROR', 'Native helper returned an invalid response');
+      return syntheticFailure(request, 'PROTOCOL_ERROR', 'Native helper returned an invalid response', execution.requestDispatched);
     }
   }
 }
@@ -72,6 +78,7 @@ function invoke(helper: string, args: string[], input: string | undefined, signa
     let spawnError: NodeJS.ErrnoException | undefined;
     let closed = false;
     let forceTimer: NodeJS.Timeout | undefined;
+    let requestDispatched = false;
 
     const requestStop = (reason: StopReason) => {
       if (stopReason !== undefined || closed) return;
@@ -98,6 +105,12 @@ function invoke(helper: string, args: string[], input: string | undefined, signa
     });
     child.stdin.on('error', () => {});
     child.once('error', error => { spawnError = error; });
+    child.once('spawn', () => {
+      if (input !== undefined && stopReason === undefined) {
+        requestDispatched = true;
+        child.stdin.write(input);
+      }
+    });
     child.once('close', (code, exitSignal) => {
       closed = true;
       clearTimeout(deadlineTimer);
@@ -109,34 +122,35 @@ function invoke(helper: string, args: string[], input: string | undefined, signa
         signal: exitSignal,
         stdout: Buffer.concat(stdout),
         stderr: Buffer.concat(stderr),
+        requestDispatched,
         ...(stopReason === undefined ? {} : { stopReason }),
         ...(spawnError === undefined ? {} : { spawnError }),
       });
     });
 
     if (signal.aborted) requestStop('aborted');
-    else if (input !== undefined) child.stdin.write(input);
   });
 }
 
-function invocationFailure(request: Request, invocation: Invocation, requestWasSent: boolean): Reply | undefined {
+function invocationFailure(request: Request, invocation: Invocation): Reply | undefined {
   if (invocation.spawnError !== undefined) {
     const code = invocation.spawnError.code;
     return code === 'ENOENT' || code === 'ENOTDIR'
-      ? failure(request, 'MISSING_HELPER', 'Native helper was not found')
-      : failure(request, 'NATIVE_FAILURE', 'Unable to start native helper');
+      ? syntheticFailure(request, 'MISSING_HELPER', 'Native helper was not found', invocation.requestDispatched)
+      : syntheticFailure(request, 'NATIVE_FAILURE', 'Unable to start native helper', invocation.requestDispatched);
   }
   switch (invocation.stopReason) {
-    case 'aborted': return cancellationFailure(request, 'INTERRUPTED', 'Interrupted', requestWasSent);
-    case 'timeout': return cancellationFailure(request, 'TIMEOUT', 'Timed out', requestWasSent);
+    case 'aborted': return syntheticFailure(request, 'INTERRUPTED', 'Interrupted', invocation.requestDispatched);
+    case 'timeout': return syntheticFailure(request, 'TIMEOUT', 'Timed out', invocation.requestDispatched);
     case 'stdout-overflow':
-    case 'stderr-overflow': return failure(request, 'PROTOCOL_ERROR', 'Native helper output exceeded the protocol limit');
+    case 'stderr-overflow':
+      return syntheticFailure(request, 'PROTOCOL_ERROR', 'Native helper output exceeded the protocol limit', invocation.requestDispatched);
     case undefined: return undefined;
   }
 }
 
-function cancellationFailure(request: Request, code: string, message: string, requestWasSent: boolean): Reply {
-  if (requestWasSent && mutatesDesktop(request.command)) {
+function syntheticFailure(request: Request, code: string, message: string, requestDispatched: boolean): Reply {
+  if (requestDispatched && mutatesDesktop(request.command)) {
     return {
       schemaVersion: 1,
       ok: false,
@@ -156,43 +170,77 @@ function failure(request: Request, code: string, message: string): Reply {
   return { schemaVersion: 1, ok: false, command: request.command, error: { code, message } };
 }
 
-function validReply(value: unknown, request: Request): value is Reply {
-  if (!isRecord(value) || value.schemaVersion !== 1 || typeof value.ok !== 'boolean') return false;
-  if (value.command !== undefined && value.command !== request.command) return false;
-  if (value.ok) {
-    return value.command === request.command && isRecord(value.data) && validData(request, value.data);
+function projectReply(value: unknown, request: Request): Reply | undefined {
+  if (!isRecord(value) || value.schemaVersion !== 1 || typeof value.ok !== 'boolean'
+    || value.command !== request.command) return undefined;
+  const text = suppliedText(request);
+  if (!value.ok) {
+    if (!isRecord(value.error) || typeof value.error.code !== 'string' || typeof value.error.message !== 'string'
+      || (value.error.details !== undefined && !isJsonRecord(value.error.details))) return undefined;
+    return {
+      schemaVersion: 1,
+      ok: false,
+      command: request.command,
+      error: {
+        code: sanitizeString(value.error.code, text),
+        message: sanitizeString(value.error.message, text),
+        ...(value.error.details === undefined ? {} : { details: sanitizeRecord(value.error.details, text) }),
+      },
+    };
   }
-  return isRecord(value.error)
-    && typeof value.error.code === 'string'
-    && typeof value.error.message === 'string'
-    && (value.error.details === undefined || isJsonRecord(value.error.details));
+  if (!isRecord(value.data)) return undefined;
+  const data = projectData(request, value.data);
+  return data === undefined
+    ? undefined
+    : { schemaVersion: 1, ok: true, command: request.command, data: sanitizeRecord(data, text) };
 }
 
-function validData(request: Request, data: Record<string, unknown>): boolean {
+function projectData(request: Request, data: Record<string, unknown>): Record<string, JsonValue> | undefined {
   switch (request.command) {
-    case 'doctor':
-      return typeof data.ready === 'boolean' && Array.isArray(data.checks) && data.checks.every(check =>
-        isRecord(check) && typeof check.name === 'string' && typeof check.message === 'string'
-          && (check.status === 'ok' || check.status === 'missing' || check.status === 'denied' || check.status === 'unknown'));
-    case 'apps':
-      return Array.isArray(data.apps) && data.apps.every(app => isRecord(app)
-        && typeof app.name === 'string' && positiveSafeInteger(app.pid)
-        && (typeof app.bundleId === 'string' || app.bundleId === null));
-    case 'windows':
-      return Array.isArray(data.windows) && data.windows.every(window => isRecord(window)
-        && positiveSafeInteger(window.id) && typeof window.title === 'string'
-        && validBounds(window.bounds) && typeof window.eligible === 'boolean'
-        && (typeof window.reason === 'string' || window.reason === null));
+    case 'doctor': {
+      const checks = data.checks;
+      if (typeof data.ready !== 'boolean' || !Array.isArray(checks) || !checks.every(isDoctorCheck)) return undefined;
+      return { ready: data.ready, checks: checks.map(check => ({ name: check.name, status: check.status, message: check.message })) };
+    }
+    case 'apps': {
+      const apps = data.apps;
+      if (!Array.isArray(apps) || !apps.every(isApp)) return undefined;
+      return { apps: apps.map(app => ({ name: app.name, pid: app.pid, bundleId: app.bundleId })) };
+    }
+    case 'windows': {
+      const windows = data.windows;
+      if (!Array.isArray(windows) || !windows.every(isWindow)) return undefined;
+      return { windows: windows.map(window => ({
+        id: window.id,
+        title: window.title,
+        bounds: { x: window.bounds.x, y: window.bounds.y, width: window.bounds.width, height: window.bounds.height },
+        eligible: window.eligible,
+        reason: window.reason,
+      })) };
+    }
     case 'snapshot':
-      return typeof data.snapshotId === 'string' && isRecord(data.target) && isJsonRecord(data.target)
-        && isRecord(data.tree) && isJsonRecord(data.tree) && typeof data.truncated === 'boolean'
-        && typeof data.createdAt === 'string' && typeof data.expiresAt === 'string';
-    case 'screenshot':
-      return typeof data.captureId === 'string' && isRecord(data.target) && isJsonRecord(data.target)
-        && typeof data.path === 'string' && nonnegativeFiniteNumber(data.width) && nonnegativeFiniteNumber(data.height)
-        && typeof data.createdAt === 'string' && typeof data.expiresAt === 'string'
-        && (!request.annotated || (typeof data.snapshotId === 'string' && isRecord(data.tree)
-          && isJsonRecord(data.tree) && typeof data.truncated === 'boolean'));
+      if (typeof data.snapshotId !== 'string' || !isJsonRecord(data.target) || !isJsonRecord(data.tree)
+        || typeof data.truncated !== 'boolean' || typeof data.createdAt !== 'string' || typeof data.expiresAt !== 'string') return undefined;
+      return {
+        snapshotId: data.snapshotId, target: data.target, tree: data.tree, truncated: data.truncated,
+        createdAt: data.createdAt, expiresAt: data.expiresAt,
+      };
+    case 'screenshot': {
+      if (typeof data.captureId !== 'string' || !isJsonRecord(data.target) || typeof data.path !== 'string'
+        || !nonnegativeFiniteNumber(data.width) || !nonnegativeFiniteNumber(data.height)
+        || typeof data.createdAt !== 'string' || typeof data.expiresAt !== 'string') return undefined;
+      const projected: Record<string, JsonValue> = {
+        captureId: data.captureId, target: data.target, path: data.path, width: data.width, height: data.height,
+        createdAt: data.createdAt, expiresAt: data.expiresAt,
+      };
+      if (request.annotated) {
+        if (typeof data.snapshotId !== 'string' || !isJsonRecord(data.tree) || typeof data.truncated !== 'boolean') return undefined;
+        projected.snapshotId = data.snapshotId;
+        projected.tree = data.tree;
+        projected.truncated = data.truncated;
+      }
+      return projected;
+    }
     case 'press':
     case 'set-value':
     case 'type':
@@ -201,21 +249,59 @@ function validData(request: Request, data: Record<string, unknown>): boolean {
     case 'click':
     case 'move':
     case 'drag':
-      return isRecord(data.target) && isJsonRecord(data.target) && typeof data.method === 'string'
-        && typeof data.verification === 'string' && typeof data.visualization === 'string';
+      if (!isJsonRecord(data.target) || typeof data.method !== 'string'
+        || typeof data.verification !== 'string' || typeof data.visualization !== 'string') return undefined;
+      return { target: data.target, method: data.method, verification: data.verification, visualization: data.visualization };
   }
 }
 
-function validBounds(value: unknown): boolean {
+type DoctorCheck = { name: string; status: 'ok' | 'missing' | 'denied' | 'unknown'; message: string };
+type App = { name: string; pid: number; bundleId: string | null };
+type Bounds = { x: number; y: number; width: number; height: number };
+type Window = { id: number; title: string; bounds: Bounds; eligible: boolean; reason: string | null };
+
+function isDoctorCheck(value: unknown): value is DoctorCheck {
+  return isRecord(value) && typeof value.name === 'string' && typeof value.message === 'string'
+    && (value.status === 'ok' || value.status === 'missing' || value.status === 'denied' || value.status === 'unknown');
+}
+function isApp(value: unknown): value is App {
+  return isRecord(value) && typeof value.name === 'string' && positiveSafeInteger(value.pid)
+    && (typeof value.bundleId === 'string' || value.bundleId === null);
+}
+function isWindow(value: unknown): value is Window {
+  return isRecord(value) && positiveSafeInteger(value.id) && typeof value.title === 'string'
+    && validBounds(value.bounds) && typeof value.eligible === 'boolean'
+    && (typeof value.reason === 'string' || value.reason === null);
+}
+
+function suppliedText(request: Request): string | undefined {
+  return (request.command === 'type' || request.command === 'set-value') && request.text.length > 0
+    ? request.text
+    : undefined;
+}
+function sanitizeString(value: string, text: string | undefined): string {
+  return text === undefined ? value : value.split(text).join('');
+}
+function sanitizeRecord(value: Record<string, JsonValue>, text: string | undefined): Record<string, JsonValue> {
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [sanitizeString(key, text), sanitizeJson(item, text)]));
+}
+function sanitizeJson(value: JsonValue, text: string | undefined): JsonValue {
+  if (typeof value === 'string') return sanitizeString(value, text);
+  if (Array.isArray(value)) return value.map(item => sanitizeJson(item, text));
+  if (value !== null && typeof value === 'object') return sanitizeRecord(value, text);
+  return value;
+}
+
+function validBounds(value: unknown): value is Bounds {
   return isRecord(value) && finiteNumber(value.x) && finiteNumber(value.y)
     && nonnegativeFiniteNumber(value.width) && nonnegativeFiniteNumber(value.height);
 }
 
-function positiveSafeInteger(value: unknown): boolean {
+function positiveSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 }
 function finiteNumber(value: unknown): boolean { return typeof value === 'number' && Number.isFinite(value); }
-function nonnegativeFiniteNumber(value: unknown): boolean {
+function nonnegativeFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 function isRecord(value: unknown): value is Record<string, unknown> {
