@@ -4,7 +4,16 @@
   "private": true,
   "type": "module",
   "description": "Standalone restoration of the ComputerUseTool from marschhuynh/nuvin-cli (macOS accessibility-tree + screenshot automation)",
+  "bin": {
+    "nuvin-computer-use": "dist/cli.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "os": ["darwin"],
+  "files": ["dist/", "native/", "docs/"],
   "scripts": {
+    "build:ts": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "ax-helper": "make ax-helper"
