@@ -59,6 +59,91 @@ final class SnapshotTests: XCTestCase {
         XCTAssertTrue(snapshot.truncated)
     }
 
+    func testProducerRefsRespectDepthBoundaryInEveryHintMode() throws {
+        let target = try treeFixture("save-cancel").target
+        let input = truncationPolicyInput()
+        let expected: [HintMode: [[Int]]] = [
+            .full: [[], [1]],
+            .leafOnly: [[1]],
+            .leafCompact: [[1]]
+        ]
+
+        for mode in [HintMode.full, .leafOnly, .leafCompact] {
+            let options = TreeOptions(maxDepth: 1, maxElements: 20, hintMode: mode)
+            let snapshot = AXTree.snapshot(target: target, options: options, root: input)
+
+            XCTAssertEqual(snapshot.evidence.truncation, [
+                AXTraversalBoundary(
+                    path: [0],
+                    reason: .maxDepth,
+                    observedChildren: 0,
+                    totalChildren: 1
+                )
+            ], mode.rawValue)
+            XCTAssertEqual(snapshot.evidence.refs.map(\.path), expected[mode], mode.rawValue)
+            XCTAssertNoThrow(try AXEvidencePolicy.validate(snapshot.evidence, options: options), mode.rawValue)
+        }
+    }
+
+    func testRootMaxElementsBoundaryProducesNoRefsInEveryHintMode() throws {
+        let target = try treeFixture("save-cancel").target
+        let input = truncationPolicyInput()
+
+        for mode in [HintMode.full, .leafOnly, .leafCompact] {
+            let options = TreeOptions(maxDepth: 8, maxElements: 2, hintMode: mode)
+            let snapshot = AXTree.snapshot(target: target, options: options, root: input)
+
+            XCTAssertEqual(snapshot.evidence.truncation, [
+                AXTraversalBoundary(
+                    path: [0],
+                    reason: .maxElements,
+                    observedChildren: 0,
+                    totalChildren: 1
+                ),
+                AXTraversalBoundary(
+                    path: [],
+                    reason: .maxElements,
+                    observedChildren: 1,
+                    totalChildren: 2
+                )
+            ], mode.rawValue)
+            XCTAssertEqual(snapshot.evidence.refs, [], mode.rawValue)
+            XCTAssertNoThrow(try AXEvidencePolicy.validate(snapshot.evidence, options: options), mode.rawValue)
+        }
+    }
+
+    func testEvidencePolicyRejectsDuplicateBoundariesAndModeIncoherentRefs() throws {
+        let target = try treeFixture("save-cancel").target
+        let truncatedOptions = TreeOptions(maxDepth: 8, maxElements: 2, hintMode: .full)
+        let truncated = AXTree.snapshot(target: target, options: truncatedOptions, root: truncationPolicyInput())
+        let firstBoundary = try XCTUnwrap(truncated.evidence.truncation.first)
+        let duplicateBoundaryEvidence = AXTreeEvidence(
+            nodes: truncated.evidence.nodes,
+            truncation: [firstBoundary, firstBoundary],
+            refs: truncated.evidence.refs
+        )
+
+        XCTAssertThrowsError(try AXEvidencePolicy.validate(duplicateBoundaryEvidence, options: truncatedOptions)) {
+            XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
+        }
+
+        let completeOptions = TreeOptions(maxDepth: 8, maxElements: 20, hintMode: .full)
+        let complete = AXTree.snapshot(
+            target: target,
+            options: completeOptions,
+            root: AXTreeInputNode(role: "AXWindow")
+        )
+        let missingRefEvidence = AXTreeEvidence(
+            nodes: complete.evidence.nodes,
+            truncation: complete.evidence.truncation,
+            refs: []
+        )
+
+        XCTAssertThrowsError(try AXEvidencePolicy.validate(missingRefEvidence, options: completeOptions)) {
+            XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
+        }
+    }
+
     func testFullEvidenceDoesNotDependOnDisplayHintFormatting() throws {
         let target = try treeFixture("save-cancel").target
         let input = AXTreeInputNode(role: "AXWindow", title: "Document", bounds: target.bounds, children: [
@@ -158,4 +243,21 @@ private func temporaryDirectory() -> URL {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
     try! FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
     return url
+}
+
+private func truncationPolicyInput() -> AXTreeInputNode {
+    AXTreeInputNode(
+        role: "AXWindow",
+        actions: ["AXRaise"],
+        children: [
+            AXTreeInputNode(
+                role: "AXGroup",
+                actions: ["AXPress"],
+                children: [
+                    AXTreeInputNode(role: "AXButton", title: "Deep", actions: ["AXPress"])
+                ]
+            ),
+            AXTreeInputNode(role: "AXButton", title: "Safe sibling", actions: ["AXPress"])
+        ]
+    )
 }

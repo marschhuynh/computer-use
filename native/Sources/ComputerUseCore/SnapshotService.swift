@@ -98,6 +98,8 @@ public final class SnapshotService {
     }
 
     static func validateEvidence(_ recorded: AXTreeSnapshot, live: AXTreeSnapshot, ref: Int) throws -> AXRefEvidence {
+        try AXEvidencePolicy.validate(recorded.evidence, options: recorded.treeOptions)
+        try AXEvidencePolicy.validate(live.evidence, options: live.treeOptions)
         guard recorded.target == live.target,
               recorded.treeOptions == live.treeOptions,
               recorded.evidence.nodes == live.evidence.nodes,
