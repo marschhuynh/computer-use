@@ -7,5 +7,12 @@
     "outDir": "dist",
     "noEmit": false,
     "declaration": false
-  }
+  },
+  "include": [
+    "src/cli.ts",
+    "src/cli/**/*.ts",
+    "src/core/**/*.ts",
+    "src/backend/**/*.ts"
+  ],
+  "exclude": ["node_modules", "**/*.test.ts"]
 }

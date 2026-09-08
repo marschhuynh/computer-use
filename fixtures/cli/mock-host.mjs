@@ -1,0 +1,79 @@
+#!/usr/bin/env node
+import { basename } from 'node:path';
+
+const mode = basename(process.argv[1]);
+if (mode === 'ignores-sigterm') process.on('SIGTERM', () => {});
+
+if (process.argv.slice(2).includes('--protocol-version')) {
+  const writeVersion = version => process.stdout.write(`${version}\n`, () => process.exit(0));
+  if (mode === 'incompatible-version') {
+    writeVersion(2);
+  } else if (mode === 'slow-version') {
+    setTimeout(() => writeVersion(1), 100);
+  } else {
+    writeVersion(1);
+  }
+} else {
+  let input = '';
+  let stdinEnded = false;
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('end', () => { stdinEnded = true; });
+  process.stdin.on('data', chunk => {
+    input += chunk;
+    const newline = input.indexOf('\n');
+    if (newline === -1) return;
+    const requestText = input.slice(0, newline);
+    process.stdin.pause();
+    const request = JSON.parse(requestText);
+    const validReply = JSON.stringify({ schemaVersion: 1, ok: true, command: request.command, data: request.command === 'apps' ? { apps: [] } : {} });
+    const writeAndExit = (text, code = 0) => process.stdout.write(text, () => process.exit(code));
+
+    switch (mode) {
+      case 'invalid-json':
+        writeAndExit('not json\n');
+        break;
+      case 'wrong-command':
+        writeAndExit(`${JSON.stringify({ schemaVersion: 1, ok: true, command: 'doctor', data: { ready: true, checks: [] } })}\n`);
+        break;
+      case 'invalid-response-data':
+        writeAndExit(`${JSON.stringify({ schemaVersion: 1, ok: true, command: request.command, data: { apps: 'not-an-array' } })}\n`);
+        break;
+      case 'nonzero-exit':
+        process.exit(1);
+        break;
+      case 'success-then-exit-1':
+        writeAndExit(`${validReply}\n`, 1);
+        break;
+      case 'never-exits':
+        setInterval(() => {}, 1_000);
+        break;
+      case 'exits-after-receiving-request':
+        process.exit(0);
+        break;
+      case 'ignores-sigterm':
+        setInterval(() => {}, 1_000);
+        break;
+      case 'requires-open-stdin':
+        setTimeout(() => {
+          if (stdinEnded) process.exit(1);
+          else writeAndExit(`${validReply}\n`);
+        }, 30);
+        break;
+      case 'stdout-overflow':
+        process.stdout.write(Buffer.alloc(16 * 1024 * 1024 + 1, 120));
+        setInterval(() => {}, 1_000);
+        break;
+      case 'stderr-overflow':
+        process.stderr.write(Buffer.alloc(64 * 1024 + 1, 120));
+        process.stdout.write(`${validReply}\n`);
+        setInterval(() => {}, 1_000);
+        break;
+      case 'request-on-stderr':
+        process.stderr.write(requestText, () => process.exit(1));
+        break;
+      default:
+        writeAndExit(`${validReply}\n`);
+    }
+  });
+  process.stdin.resume();
+}

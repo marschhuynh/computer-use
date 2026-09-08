@@ -109,6 +109,26 @@ describe('run', () => {
     expect(JSON.parse(deps.stdout[0])).toMatchObject({ ok: false, error: { code: 'TIMEOUT' } });
   });
 
+  it('waits for deadline cleanup and preserves mutation uncertainty', async () => {
+    let cleaned = false;
+    const backend: Backend = { execute: async (request, signal) => {
+      await new Promise<void>(resolve => signal.addEventListener('abort', () => {
+        setTimeout(() => { cleaned = true; resolve(); }, 5);
+      }, { once: true }));
+      return {
+        schemaVersion: 1, ok: false, command: request.command,
+        error: { code: 'INTERRUPTED', message: 'Interrupted', details: { mutationStatus: 'potentiallyApplied' } },
+      };
+    } };
+    const deps = dependencies(backend);
+
+    await expect(run(['type', '--app', 'TextEdit', '--text', 'private', '--timeout', '10', '--json'], deps)).resolves.toBe(6);
+    expect(cleaned).toBe(true);
+    expect(JSON.parse(deps.stdout[0])).toMatchObject({
+      error: { code: 'TIMEOUT', details: { mutationStatus: 'potentiallyApplied' } },
+    });
+  });
+
   it('validates strict record IDs before reading input', async () => {
     const readText = vi.fn(async () => 'input');
     const deps = dependencies({ execute: async request => success(request.command) }, { readText });

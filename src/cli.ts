@@ -1,14 +1,18 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
+import { MacOSBackend } from './backend/macos.js';
 import { run } from './cli/run.js';
 import type { Backend, Reply, Request } from './core/protocol.js';
 
-const unavailableBackend: Backend = {
-  async execute(request: Request): Promise<Reply> {
-    return { schemaVersion: 1, ok: false, command: request.command, error: { code: 'MISSING_HELPER', message: 'The native backend is not installed yet' } };
-  },
-};
+export function backendForPlatform(platform: NodeJS.Platform = process.platform): Backend {
+  if (platform === 'darwin') return new MacOSBackend();
+  return {
+    async execute(request: Request): Promise<Reply> {
+      return { schemaVersion: 1, ok: false, command: request.command, error: { code: 'UNSUPPORTED_PLATFORM', message: 'Native commands require macOS' } };
+    },
+  };
+}
 
 async function main(): Promise<void> {
   const controller = new AbortController();
@@ -16,7 +20,7 @@ async function main(): Promise<void> {
   process.once('SIGINT', interrupt);
   process.once('SIGTERM', interrupt);
   process.exitCode = await run(process.argv.slice(2), {
-    backend: unavailableBackend,
+    backend: backendForPlatform(),
     signal: controller.signal,
     readText: (path, signal) => path === '-' ? readStdin(signal) : readFile(path, { encoding: 'utf8', signal }),
     writeStdout: text => process.stdout.write(text),

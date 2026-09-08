@@ -1,4 +1,4 @@
-import { formatReply, exitCode } from './output.js';
+import { exitCode, formatReply } from './output.js';
 import { parse, type ParsedInvocation, type TextSource } from './parse.js';
 import type { Backend, Reply, Request } from '../core/protocol.js';
 
@@ -13,6 +13,13 @@ function failure(code: string, message: string, command?: Request['command']): R
     ? { schemaVersion: 1, ok: false, error: { code, message } }
     : { schemaVersion: 1, ok: false, command, error: { code, message } };
 }
+function cancellationFailure(code: string, message: string, command: Request['command'], backendReply: Reply): Reply {
+  const potentiallyApplied = !backendReply.ok && backendReply.error.details?.mutationStatus === 'potentiallyApplied';
+  return {
+    schemaVersion: 1, ok: false, command,
+    error: { code, message, ...(potentiallyApplied ? { details: { mutationStatus: 'potentiallyApplied' } } : {}) },
+  };
+}
 function requestedJson(argv: string[]): boolean { return argv.includes('--json'); }
 function writeReply(reply: Reply, json: boolean, deps: RunDependencies): number {
   const output = formatReply(reply, json);
@@ -21,17 +28,6 @@ function writeReply(reply: Reply, json: boolean, deps: RunDependencies): number 
 }
 function commandOf(invocation: ParsedInvocation): Request['command'] | undefined {
   return invocation.kind === 'command' ? invocation.request.command : undefined;
-}
-
-function executeWithDeadline(backend: Backend, request: Request, signal: AbortSignal): Promise<Reply> {
-  return new Promise((resolve, reject) => {
-    const abort = () => reject(new Error('Aborted'));
-    if (signal.aborted) abort(); else signal.addEventListener('abort', abort, { once: true });
-    void backend.execute(request, signal).then(
-      reply => { signal.removeEventListener('abort', abort); resolve(reply); },
-      error => { signal.removeEventListener('abort', abort); reject(error); },
-    );
-  });
 }
 
 export async function run(argv: string[], deps: RunDependencies): Promise<number> {
@@ -71,7 +67,12 @@ export async function run(argv: string[], deps: RunDependencies): Promise<number
     if (deps.signal.aborted) return writeReply(failure('INTERRUPTED', 'Interrupted', request.command), invocation.json, deps);
     if (remaining < 1 || deadlineController.signal.aborted) return writeReply(failure('TIMEOUT', 'Timed out', request.command), invocation.json, deps);
     request = { ...request, options: { ...request.options, timeoutMs: remaining } };
-    try { return writeReply(await executeWithDeadline(deps.backend, request, deadlineController.signal), invocation.json, deps); }
+    try {
+      const reply = await deps.backend.execute(request, deadlineController.signal);
+      if (deps.signal.aborted) return writeReply(cancellationFailure('INTERRUPTED', 'Interrupted', request.command, reply), invocation.json, deps);
+      if (deadlineController.signal.aborted) return writeReply(cancellationFailure('TIMEOUT', 'Timed out', request.command, reply), invocation.json, deps);
+      return writeReply(reply, invocation.json, deps);
+    }
     catch {
       if (deps.signal.aborted) return writeReply(failure('INTERRUPTED', 'Interrupted', request.command), invocation.json, deps);
       if (deadlineController.signal.aborted) return writeReply(failure('TIMEOUT', 'Timed out', request.command), invocation.json, deps);
