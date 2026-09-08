@@ -3,7 +3,23 @@ import { run, type RunDependencies } from '../src/cli/run.js';
 import type { Backend, Reply, Request } from '../src/core/protocol.js';
 
 const snapshotId = '123e4567-e89b-42d3-a456-426614174000';
-const success = (command: Request['command']): Reply => ({ schemaVersion: 1, ok: true, command, data: {} });
+const target = { app: 'TextEdit' };
+const tree = { elements: [] };
+const mutation = { target, method: 'accessibility', verification: 'verified', visualization: 'none' };
+
+function success(command: Request['command']): Reply {
+  const data = (() => {
+    switch (command) {
+      case 'doctor': return { ready: true, checks: [{ name: 'accessibility', status: 'ok', message: 'Available' }] };
+      case 'apps': return { apps: [{ name: 'TextEdit', pid: 42, bundleId: 'com.apple.TextEdit' }] };
+      case 'windows': return { windows: [{ id: 7, title: 'Document', bounds: { x: 0, y: 0, width: 800, height: 600 }, eligible: true, reason: null }] };
+      case 'snapshot': return { snapshotId, target, tree, truncated: false, createdAt: '2026-09-08T00:00:00.000Z', expiresAt: '2026-09-08T00:01:00.000Z' };
+      case 'screenshot': return { captureId: snapshotId, target, path: '/tmp/capture.png', width: 800, height: 600, createdAt: '2026-09-08T00:00:00.000Z', expiresAt: '2026-09-08T00:01:00.000Z', snapshotId, tree, truncated: false };
+      case 'press': case 'set-value': case 'type': case 'key': case 'scroll': case 'click': case 'move': case 'drag': return mutation;
+    }
+  })();
+  return { schemaVersion: 1, ok: true, command, data };
+}
 
 function dependencies(backend: Backend, overrides: Partial<RunDependencies> = {}): RunDependencies & { stdout: string[]; stderr: string[] } {
   const stdout: string[] = [];
@@ -77,6 +93,20 @@ describe('run', () => {
     } });
     await run(['type', '--app', 'TextEdit', '--text-file', '-', '--timeout', '100', '--json'], deps);
     expect(execute.mock.calls[0][0].options.timeoutMs).toBeLessThan(100);
+  });
+
+  it('returns TIMEOUT when a backend ignores the deadline signal', async () => {
+    let backendSignal: AbortSignal | undefined;
+    const backend: Backend = { execute: async (_request, signal) => {
+      backendSignal = signal;
+      await new Promise(resolve => setTimeout(resolve, 30));
+      return success('apps');
+    } };
+    const deps = dependencies(backend);
+
+    await expect(run(['apps', '--timeout', '10', '--json'], deps)).resolves.toBe(6);
+    expect(backendSignal?.aborted).toBe(true);
+    expect(JSON.parse(deps.stdout[0])).toMatchObject({ ok: false, error: { code: 'TIMEOUT' } });
   });
 
   it('validates strict record IDs before reading input', async () => {

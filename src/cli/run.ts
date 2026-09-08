@@ -23,6 +23,17 @@ function commandOf(invocation: ParsedInvocation): Request['command'] | undefined
   return invocation.kind === 'command' ? invocation.request.command : undefined;
 }
 
+function executeWithDeadline(backend: Backend, request: Request, signal: AbortSignal): Promise<Reply> {
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(new Error('Aborted'));
+    if (signal.aborted) abort(); else signal.addEventListener('abort', abort, { once: true });
+    void backend.execute(request, signal).then(
+      reply => { signal.removeEventListener('abort', abort); resolve(reply); },
+      error => { signal.removeEventListener('abort', abort); reject(error); },
+    );
+  });
+}
+
 export async function run(argv: string[], deps: RunDependencies): Promise<number> {
   let invocation: ParsedInvocation;
   try { invocation = parse(argv); }
@@ -60,7 +71,7 @@ export async function run(argv: string[], deps: RunDependencies): Promise<number
     if (deps.signal.aborted) return writeReply(failure('INTERRUPTED', 'Interrupted', request.command), invocation.json, deps);
     if (remaining < 1 || deadlineController.signal.aborted) return writeReply(failure('TIMEOUT', 'Timed out', request.command), invocation.json, deps);
     request = { ...request, options: { ...request.options, timeoutMs: remaining } };
-    try { return writeReply(await deps.backend.execute(request, deadlineController.signal), invocation.json, deps); }
+    try { return writeReply(await executeWithDeadline(deps.backend, request, deadlineController.signal), invocation.json, deps); }
     catch {
       if (deps.signal.aborted) return writeReply(failure('INTERRUPTED', 'Interrupted', request.command), invocation.json, deps);
       if (deadlineController.signal.aborted) return writeReply(failure('TIMEOUT', 'Timed out', request.command), invocation.json, deps);
