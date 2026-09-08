@@ -67,6 +67,46 @@ final class AXTrustTests: XCTestCase {
             XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
         }
     }
+
+    func testCannotCompleteIsFailureWhileMissingAndUnsupportedAreUnavailable() {
+        XCTAssertEqual(axReadDisposition(for: .success), .value)
+        XCTAssertEqual(axReadDisposition(for: .cannotComplete), .failure)
+        XCTAssertEqual(axReadDisposition(for: .failure), .failure)
+        XCTAssertEqual(axReadDisposition(for: .invalidUIElement), .failure)
+        XCTAssertEqual(axReadDisposition(for: .apiDisabled), .failure)
+        XCTAssertEqual(axReadDisposition(for: .noValue), .unavailable)
+        XCTAssertEqual(axReadDisposition(for: .attributeUnsupported), .unavailable)
+    }
+
+    func testSuccessfulWrongCFTypeAndMissingValueAreFailures() {
+        let number: CFTypeRef = NSNumber(value: 7)
+        let wrongType: AXReadResult<String> = axReadResult(
+            status: .success,
+            value: number,
+            expectedTypeID: CFStringGetTypeID(),
+            decode: { $0 as? String }
+        )
+        let missing: AXReadResult<String> = axReadResult(
+            status: .success,
+            value: nil,
+            expectedTypeID: CFStringGetTypeID(),
+            decode: { $0 as? String }
+        )
+
+        XCTAssertEqual(wrongType, .failure)
+        XCTAssertEqual(missing, .failure)
+    }
+
+    func testMalformedArrayMemberIsAReadFailure() {
+        let values: [AnyObject] = [NSString(string: "AXPress"), NSNumber(value: 7)]
+        let decoded: [String]? = decodeAXArray(
+            values,
+            expectedElementTypeID: CFStringGetTypeID(),
+            decode: { $0 as? String }
+        )
+
+        XCTAssertNil(decoded)
+    }
 }
 
 private let axFailureCases = [
