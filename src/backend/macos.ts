@@ -182,20 +182,20 @@ function projectReply(value: unknown, request: Request): Reply | undefined {
       ok: false,
       command: request.command,
       error: {
-        code: sanitizeString(value.error.code, text),
-        message: sanitizeString(value.error.message, text),
-        ...(value.error.details === undefined ? {} : { details: sanitizeRecord(value.error.details, text) }),
+        code: value.error.code,
+        message: containsSuppliedText(value.error.message, text) ? '' : value.error.message,
+        ...(value.error.details === undefined ? {} : { details: projectDetails(value.error.details, text) }),
       },
     };
   }
   if (!isRecord(value.data)) return undefined;
-  const data = projectData(request, value.data);
+  const data = projectData(request, value.data, text);
   return data === undefined
     ? undefined
-    : { schemaVersion: 1, ok: true, command: request.command, data: sanitizeRecord(data, text) };
+    : { schemaVersion: 1, ok: true, command: request.command, data };
 }
 
-function projectData(request: Request, data: Record<string, unknown>): Record<string, JsonValue> | undefined {
+function projectData(request: Request, data: Record<string, unknown>, text: string | undefined): Record<string, JsonValue> | undefined {
   switch (request.command) {
     case 'doctor': {
       const checks = data.checks;
@@ -251,7 +251,12 @@ function projectData(request: Request, data: Record<string, unknown>): Record<st
     case 'drag':
       if (!isJsonRecord(data.target) || typeof data.method !== 'string'
         || typeof data.verification !== 'string' || typeof data.visualization !== 'string') return undefined;
-      return { target: data.target, method: data.method, verification: data.verification, visualization: data.visualization };
+      return {
+        target: projectFreeFormRecord(data.target, text),
+        method: data.method,
+        verification: data.verification,
+        visualization: data.visualization,
+      };
   }
 }
 
@@ -279,16 +284,39 @@ function suppliedText(request: Request): string | undefined {
     ? request.text
     : undefined;
 }
-function sanitizeString(value: string, text: string | undefined): string {
-  return text === undefined ? value : value.split(text).join('');
+function containsSuppliedText(value: string | number | boolean, text: string | undefined): boolean {
+  if (text === undefined) return false;
+  return String(value).includes(text);
 }
-function sanitizeRecord(value: Record<string, JsonValue>, text: string | undefined): Record<string, JsonValue> {
-  return Object.fromEntries(Object.entries(value).map(([key, item]) => [sanitizeString(key, text), sanitizeJson(item, text)]));
+
+function projectDetails(value: Record<string, JsonValue>, text: string | undefined): Record<string, JsonValue> {
+  const projected = projectFreeFormRecord(value, text);
+  if (value.mutationStatus === 'potentiallyApplied') projected.mutationStatus = 'potentiallyApplied';
+  else delete projected.mutationStatus;
+  return projected;
 }
-function sanitizeJson(value: JsonValue, text: string | undefined): JsonValue {
-  if (typeof value === 'string') return sanitizeString(value, text);
-  if (Array.isArray(value)) return value.map(item => sanitizeJson(item, text));
-  if (value !== null && typeof value === 'object') return sanitizeRecord(value, text);
+
+function projectFreeFormRecord(value: Record<string, JsonValue>, text: string | undefined): Record<string, JsonValue> {
+  const projected: Record<string, JsonValue> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (text !== undefined && key.includes(text)) continue;
+    const projectedItem = projectFreeFormValue(item, text);
+    if (projectedItem !== undefined) projected[key] = projectedItem;
+  }
+  return projected;
+}
+
+function projectFreeFormValue(value: JsonValue, text: string | undefined): JsonValue | undefined {
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return containsSuppliedText(value, text) ? undefined : value;
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap(item => {
+      const projected = projectFreeFormValue(item, text);
+      return projected === undefined ? [] : [projected];
+    });
+  }
+  if (value !== null) return projectFreeFormRecord(value, text);
   return value;
 }
 

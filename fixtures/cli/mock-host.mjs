@@ -28,6 +28,9 @@ if (process.argv.slice(2).includes('--protocol-version')) {
     process.stdin.pause();
     const request = JSON.parse(requestText);
     const validReply = JSON.stringify({ schemaVersion: 1, ok: true, command: request.command, data: request.command === 'apps' ? { apps: [] } : {} });
+    const reflectedValue = request.text === 'true'
+      ? true
+      : (/^[0-9]+$/.test(request.text) ? Number(request.text) : request.text);
     const writeAndExit = (text, code = 0) => process.stdout.write(text, () => process.exit(code));
 
     switch (mode) {
@@ -52,7 +55,7 @@ if (process.argv.slice(2).includes('--protocol-version')) {
           ok: true,
           command: request.command,
           data: {
-            target: { app: 'TextEdit', reflected: request.text },
+            target: { app: 'TextEdit', reflected: reflectedValue },
             method: 'accessibility',
             verification: 'verified',
             visualization: 'none',
@@ -69,6 +72,18 @@ if (process.argv.slice(2).includes('--protocol-version')) {
           ok: false,
           command: request.command,
           error: { code: 'NATIVE_FAILURE', message: 'Useful failure', details: { reason: request.text, safe: 'kept' } },
+        })}\n`);
+        break;
+      case 'stable-error-code':
+        writeAndExit(`${JSON.stringify({
+          schemaVersion: 1,
+          ok: false,
+          command: request.command,
+          error: {
+            code: 'UNSUPPORTED_ACTION',
+            message: 'Unsupported action',
+            details: { reflected: request.text, mutationStatus: 'potentiallyApplied', safe: 'kept' },
+          },
         })}\n`);
         break;
       case 'nonzero-exit':

@@ -15,7 +15,7 @@ const modes = [
   'never-exits', 'exits-after-receiving-request', 'ignores-sigterm',
   'requires-open-stdin', 'stdout-overflow', 'stderr-overflow',
   'request-on-stderr', 'reflected-success-data', 'reflected-error-message',
-  'reflected-error-details', 'slow-version',
+  'reflected-error-details', 'stable-error-code', 'slow-version',
 ];
 let fixtureDirectory: string;
 
@@ -222,12 +222,64 @@ describe('MacOSBackend', () => {
         schemaVersion: 1,
         ok: true,
         command: 'set-value',
-        data: { target: { app: 'TextEdit', reflected: '' }, method: 'accessibility', verification: 'verified', visualization: 'none' },
+        data: { target: { app: 'TextEdit' }, method: 'accessibility', verification: 'verified', visualization: 'none' },
       });
     }
-    if (mode === 'reflected-error-details') {
-      expect(reply).toMatchObject({ ok: false, error: { code: 'NATIVE_FAILURE', message: 'Useful failure', details: { safe: 'kept' } } });
+    if (mode === 'reflected-error-message') {
+      expect(reply).toMatchObject({ ok: false, error: { code: 'NATIVE_FAILURE', message: '' } });
     }
+    if (mode === 'reflected-error-details') {
+      expect(reply).toMatchObject({ ok: false, error: { code: 'NATIVE_FAILURE', message: 'Useful failure' } });
+      if (reply.ok) throw new Error('Expected failure');
+      expect(reply.error.details).toEqual({ safe: 'kept' });
+    }
+  });
+
+  it.each([
+    ['numeric', '8472'],
+    ['boolean', 'true'],
+  ])('removes a %s representation of supplied text from nested free-form success data', async (_label, text) => {
+    const backend = new MacOSBackend({ helper: fixture('reflected-success-data') });
+    await expect(backend.execute(mutationRequest(text), new AbortController().signal)).resolves.toEqual({
+      schemaVersion: 1,
+      ok: true,
+      command: 'set-value',
+      data: { target: { app: 'TextEdit' }, method: 'accessibility', verification: 'verified', visualization: 'none' },
+    });
+  });
+
+  it.each(['target', 'method'])('preserves the required %s field when supplied text collides with its key', async text => {
+    const backend = new MacOSBackend({ helper: fixture('reflected-success-data') });
+    await expect(backend.execute(mutationRequest(text), new AbortController().signal)).resolves.toEqual({
+      schemaVersion: 1,
+      ok: true,
+      command: 'set-value',
+      data: { target: { app: 'TextEdit' }, method: 'accessibility', verification: 'verified', visualization: 'none' },
+    });
+  });
+
+  it('preserves a controlled semantic value when supplied text collides with it', async () => {
+    const backend = new MacOSBackend({ helper: fixture('reflected-success-data') });
+    await expect(backend.execute(mutationRequest('accessibility'), new AbortController().signal)).resolves.toEqual({
+      schemaVersion: 1,
+      ok: true,
+      command: 'set-value',
+      data: { target: { app: 'TextEdit' }, method: 'accessibility', verification: 'verified', visualization: 'none' },
+    });
+  });
+
+  it('preserves a stable error code and exact mutation status when supplied text collides with the code', async () => {
+    const backend = new MacOSBackend({ helper: fixture('stable-error-code') });
+    await expect(backend.execute(mutationRequest('UNSUPPORTED_ACTION'), new AbortController().signal)).resolves.toEqual({
+      schemaVersion: 1,
+      ok: false,
+      command: 'set-value',
+      error: {
+        code: 'UNSUPPORTED_ACTION',
+        message: 'Unsupported action',
+        details: { mutationStatus: 'potentiallyApplied', safe: 'kept' },
+      },
+    });
   });
 
   it('returns UNSUPPORTED_PLATFORM for native commands on non-macOS systems', async () => {
