@@ -71,13 +71,14 @@ public final class SnapshotService {
         }
     }
 
-    func withValidatedSnapshotAction<T>(
+    func withValidatedSnapshotAction<Prepared, Result>(
         snapshotID: String,
         ref: Int,
         timeoutMilliseconds: Int,
         stateChanging: Bool,
-        action: (LiveAXElement, ResolvedTarget) throws -> T
-    ) throws -> T {
+        preflight: (LiveAXElement, ResolvedTarget) throws -> Prepared,
+        dispatch: (Prepared) throws -> Result
+    ) throws -> Result {
         let deadline = deadline(after: timeoutMilliseconds)
         return try lock.withLock(deadline: deadline) {
             try requireTime(deadline)
@@ -89,11 +90,12 @@ public final class SnapshotService {
             let recorded = AXTreeSnapshot(target: record.target, treeOptions: record.treeOptions, evidence: record.evidence)
             _ = try Self.validateEvidence(recorded, live: live.snapshot, ref: ref)
             guard let element = live.liveElements[ref] else { throw NativeFailure("STALE_SNAPSHOT", "Live accessibility reference is unavailable") }
+            let prepared = try preflight(element, target)
             try requireTime(deadline)
             if stateChanging {
                 try store.invalidateRecords(for: record.target.identity)
             }
-            return try action(element, target)
+            return try dispatch(prepared)
         }
     }
 

@@ -118,6 +118,281 @@ final class StateStoreTests: XCTestCase {
         XCTAssertFalse(try store.readSnapshot(id: other.id).invalidated)
     }
 
+    func testInvalidationFailsClosedForUnreadableRecognizedRecord() throws {
+        let root = temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = StateStore(rootURL: root)
+        try store.writeSnapshot(snapshotRecord())
+        try store.writeSnapshot(snapshotRecord(id: secondID))
+        let unreadable = root.appendingPathComponent("snapshots/\(secondID).json")
+        chmod(unreadable.path, 0o000)
+
+        XCTAssertThrowsError(try store.invalidateRecords(for: resolvedTarget().identity)) {
+            XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
+        }
+    }
+
+    func testRecordOpenAndReadRetryEINTR() throws {
+        let root = temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try StateStore(rootURL: root).writeSnapshot(snapshotRecord())
+        var openCalls = 0
+        var readCalls = 0
+        let io = StateStoreIO(
+            openRecord: { directory, name in
+                openCalls += 1
+                if openCalls == 1 { return SystemCallResult(value: -1, error: EINTR) }
+                let result = openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+                return SystemCallResult(value: result, error: result < 0 ? errno : 0)
+            },
+            read: { descriptor, buffer, count in
+                readCalls += 1
+                if readCalls == 1 { return SystemCallResult(value: -1, error: EINTR) }
+                let result = Darwin.read(descriptor, buffer, count)
+                return SystemCallResult(value: result, error: result < 0 ? errno : 0)
+            }
+        )
+
+        XCTAssertNoThrow(try StateStore(rootURL: root, now: Date.init, io: io).readSnapshot(id: fixedID))
+        XCTAssertGreaterThanOrEqual(openCalls, 2)
+        XCTAssertGreaterThanOrEqual(readCalls, 2)
+    }
+
+    func testTransientReadFailureCannotBeSkippedDuringInvalidation() throws {
+        let root = temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let writer = StateStore(rootURL: root)
+        try writer.writeSnapshot(snapshotRecord())
+        let io = StateStoreIO(read: { _, _, _ in SystemCallResult(value: -1, error: EIO) })
+        let failingStore = StateStore(rootURL: root, now: Date.init, io: io)
+
+        XCTAssertThrowsError(try failingStore.invalidateRecords(for: resolvedTarget().identity)) {
+            XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
+        }
+        XCTAssertNoThrow(try writer.readSnapshot(id: fixedID))
+    }
+
+    func testRootSymlinkAndPathSwapNeverChmodUnrelatedObject() throws {
+        let parent = temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let outside = parent.appendingPathComponent("outside", isDirectory: true)
+        let symlink = parent.appendingPathComponent("linked-root", isDirectory: true)
+        XCTAssertEqual(mkdir(outside.path, 0o755), 0)
+        XCTAssertEqual(fileMode(outside), 0o755)
+        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: outside)
+        XCTAssertThrowsError(try DesktopLock(rootURL: symlink).withLock(timeoutMilliseconds: 100) {})
+        XCTAssertEqual(fileMode(outside), 0o755)
+
+        let root = parent.appendingPathComponent("root", isDirectory: true)
+        let openedObject = parent.appendingPathComponent("opened", isDirectory: true)
+        XCTAssertEqual(mkdir(root.path, 0o755), 0)
+        let descriptor = try PrivateStateDirectory.openRoot(root) { _ in
+            XCTAssertEqual(rename(root.path, openedObject.path), 0)
+            XCTAssertEqual(mkdir(root.path, 0o755), 0)
+        }
+        close(descriptor)
+        XCTAssertEqual(fileMode(openedObject), 0o700)
+        XCTAssertEqual(fileMode(root), 0o755)
+    }
+
+    func testWriteRejectsEveryMalformedSemanticRecordClass() throws {
+        let target = resolvedTarget()
+        let rootNode = stateNode(
+            path: [],
+            role: "AXWindow",
+            title: target.title,
+            bounds: target.bounds,
+            childCount: 0
+        )
+        let validEvidence = AXTreeEvidence(
+            nodes: [rootNode],
+            truncation: [],
+            refs: [AXRefEvidence(ref: 1, path: [], node: rootNode)]
+        )
+        let childZero = stateNode(path: [0], role: "AXButton", childCount: 0)
+        let childOne = stateNode(path: [1], role: "AXButton", childCount: 0)
+        let parent = stateNode(path: [], role: "AXWindow", childCount: 2)
+        let wrongRefNode = stateNode(path: [], role: "AXButton", childCount: 0)
+        let twoNodeParent = stateNode(path: [], role: "AXWindow", childCount: 1)
+        let twoNodeEvidence = AXTreeEvidence(
+            nodes: [twoNodeParent, childZero],
+            truncation: [],
+            refs: [
+                AXRefEvidence(ref: 1, path: [], node: twoNodeParent),
+                AXRefEvidence(ref: 2, path: [0], node: childZero)
+            ]
+        )
+        let truncatedOptions = TreeOptions(maxDepth: 8, maxElements: 2, hintMode: .full)
+        let truncated = AXTree.snapshot(
+            target: target,
+            options: truncatedOptions,
+            root: stateTruncationInput()
+        )
+        let firstBoundary = try XCTUnwrap(truncated.evidence.truncation.first)
+
+        let cases: [(String, SnapshotRecord)] = [
+            ("target IDs", snapshotRecord(target: resolvedTarget(pid: 0), evidence: validEvidence)),
+            ("tree options", snapshotRecord(
+                treeOptions: TreeOptions(maxDepth: 0, maxElements: 500, hintMode: .full),
+                evidence: validEvidence
+            )),
+            ("negative counts", snapshotRecord(evidence: AXTreeEvidence(
+                nodes: [stateNode(path: [], role: "AXWindow", childCount: -1)],
+                truncation: [],
+                refs: []
+            ))),
+            ("unordered paths", snapshotRecord(evidence: AXTreeEvidence(
+                nodes: [parent, childOne, childZero],
+                truncation: [],
+                refs: []
+            ))),
+            ("duplicate paths", snapshotRecord(evidence: AXTreeEvidence(
+                nodes: [parent, childZero, childZero],
+                truncation: [],
+                refs: []
+            ))),
+            ("non-dense refs", snapshotRecord(evidence: AXTreeEvidence(
+                nodes: [rootNode],
+                truncation: [],
+                refs: [AXRefEvidence(ref: 2, path: [], node: rootNode)]
+            ))),
+            ("mismatched ref evidence", snapshotRecord(evidence: AXTreeEvidence(
+                nodes: [rootNode],
+                truncation: [],
+                refs: [AXRefEvidence(ref: 1, path: [], node: wrongRefNode)]
+            ))),
+            ("full mode missing refs", snapshotRecord(evidence: AXTreeEvidence(
+                nodes: [rootNode],
+                truncation: [],
+                refs: []
+            ))),
+            ("leaf mode unexpected ref", snapshotRecord(
+                treeOptions: TreeOptions(maxDepth: 8, maxElements: 500, hintMode: .leafOnly),
+                evidence: validEvidence
+            )),
+            ("reordered refs", snapshotRecord(evidence: AXTreeEvidence(
+                nodes: twoNodeEvidence.nodes,
+                truncation: [],
+                refs: [twoNodeEvidence.refs[1], twoNodeEvidence.refs[0]]
+            ))),
+            ("duplicate boundaries", snapshotRecord(
+                treeOptions: truncatedOptions,
+                evidence: AXTreeEvidence(
+                    nodes: truncated.evidence.nodes,
+                    truncation: [firstBoundary, firstBoundary],
+                    refs: truncated.evidence.refs
+                )
+            )),
+            ("illegal truncation", snapshotRecord(evidence: AXTreeEvidence(
+                nodes: [rootNode],
+                truncation: [AXTraversalBoundary(
+                    path: [],
+                    reason: .maxDepth,
+                    observedChildren: 1,
+                    totalChildren: 0
+                )],
+                refs: []
+            )))
+        ]
+
+        for (name, record) in cases {
+            let root = temporaryStateDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            XCTAssertThrowsError(try StateStore(rootURL: root).writeSnapshot(record), name) {
+                XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
+            }
+        }
+    }
+
+    func testReadAppliesTheSameSemanticValidationAsWrite() throws {
+        let root = temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = StateStore(rootURL: root)
+        try store.writeSnapshot(snapshotRecord())
+        let path = root.appendingPathComponent("snapshots/\(fixedID).json")
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: path)) as? [String: Any])
+        var target = try XCTUnwrap(object["target"] as? [String: Any])
+        var identity = try XCTUnwrap(target["identity"] as? [String: Any])
+        identity["pid"] = 0
+        target["identity"] = identity
+        object["target"] = target
+        try JSONSerialization.data(withJSONObject: object).write(to: path)
+        chmod(path.path, 0o600)
+
+        XCTAssertThrowsError(try store.readSnapshot(id: fixedID)) {
+            XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
+        }
+    }
+
+    func testLifetimeMustBeExactlyTenMinutes() throws {
+        let cases = [
+            ("before", "2999-01-01T00:09:59.9995Z", false),
+            ("at", "2999-01-01T00:10:00.0000Z", true),
+            ("after", "2999-01-01T00:10:00.0005Z", false)
+        ]
+        for (name, expiration, accepted) in cases {
+            let root = temporaryStateDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let operation = { try StateStore(rootURL: root).writeSnapshot(snapshotRecord(createdAt: "2999-01-01T00:00:00.0000Z", expiresAt: expiration)) }
+            if accepted {
+                XCTAssertNoThrow(try operation(), name)
+            } else {
+                XCTAssertThrowsError(try operation(), name)
+            }
+        }
+    }
+
+    func testTimestampGrammarRejectsMalformedUTCForms() {
+        let malformed = [
+            "2999-01-01T00:00:00.Z",
+            "2999-01-01T00:00:00.١Z",
+            "2999/01/01T00:00:00Z",
+            "٢999-01-01T00:00:00Z",
+            "2999-01-01T00:00:00.1234567890Z",
+            "2999-01-01T00:00:00z",
+            "2999-01-01T00:00:00+00:00"
+        ]
+
+        for value in malformed {
+            let root = temporaryStateDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            XCTAssertThrowsError(try StateStore(rootURL: root).writeSnapshot(snapshotRecord(
+                createdAt: value,
+                expiresAt: "2999-01-01T00:10:00Z"
+            )), value) {
+                XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
+            }
+        }
+    }
+
+    func testLargeValidEvidenceRoundTripsWithoutChangingPolicy() throws {
+        let root = temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let childCount = 10_000
+        let options = TreeOptions(
+            maxDepth: 8,
+            maxElements: childCount + 1,
+            hintMode: .full
+        )
+        let evidence = wideEvidence(childCount: childCount, mode: options.hintMode)
+        let record = snapshotRecord(treeOptions: options, evidence: evidence)
+        let store = StateStore(rootURL: root)
+
+        XCTAssertNoThrow(try store.writeSnapshot(record))
+        XCTAssertEqual(try store.readSnapshot(id: record.id), record)
+    }
+
+    func testExpiryBoundaryRemainsExpiredAtExactExpiration() throws {
+        let root = temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let expiration = Date(timeIntervalSince1970: 600)
+        let store = StateStore(rootURL: root, now: { expiration })
+        try store.writeSnapshot(snapshotRecord(createdAt: "1970-01-01T00:00:00Z", expiresAt: "1970-01-01T00:10:00Z"))
+        XCTAssertThrowsError(try store.readSnapshot(id: fixedID)) {
+            XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
+        }
+    }
+
     func testLockSetupDoesNotCreateSnapshotDirectory() throws {
         let root = temporaryStateDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -188,6 +463,43 @@ final class DesktopLockTests: XCTestCase {
         XCTAssertEqual(owner.terminationStatus, 0)
     }
 
+
+    func testSuccessfulFlockAtDeadlineIsReleasedWithoutRunningBody() throws {
+        let root = temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var times: [UInt64] = [9, 10]
+        var operations: [Int32] = []
+        let lock = DesktopLock(rootURL: root, monotonicNow: { times.removeFirst() }, wait: {}, flock: { _, operation in
+            operations.append(operation)
+            return SystemCallResult(value: 0, error: 0)
+        })
+        var bodyRan = false
+
+        XCTAssertThrowsError(try lock.withLock(deadline: 10) { bodyRan = true }) {
+            XCTAssertEqual(($0 as? NativeFailure)?.code, "BUSY")
+        }
+        XCTAssertFalse(bodyRan)
+        XCTAssertEqual(operations, [LOCK_EX | LOCK_NB, LOCK_UN])
+    }
+
+    func testEINTRRetryChecksDeadlineBeforeAnotherFlockAttempt() throws {
+        let root = temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var times: [UInt64] = [9, 10]
+        var attempts = 0
+        let lock = DesktopLock(rootURL: root, monotonicNow: { times.removeFirst() }, wait: {}, flock: { _, _ in
+            attempts += 1
+            return SystemCallResult(value: -1, error: EINTR)
+        })
+        var bodyRan = false
+
+        XCTAssertThrowsError(try lock.withLock(deadline: 10) { bodyRan = true }) {
+            XCTAssertEqual(($0 as? NativeFailure)?.code, "BUSY")
+        }
+        XCTAssertEqual(attempts, 1)
+        XCTAssertFalse(bodyRan)
+    }
+
     func testSubprocessLockHelper() throws {
         let environment = ProcessInfo.processInfo.environment
         guard let rootPath = environment["LOCK_HELPER_ROOT"], let logPath = environment["LOCK_HELPER_LOG"] else { return }
@@ -215,16 +527,49 @@ private func snapshotRecord(
     target: ResolvedTarget = resolvedTarget(),
     createdAt: String = "2999-01-01T00:00:00Z",
     expiresAt: String = "2999-01-01T00:10:00Z",
+    treeOptions: TreeOptions = TreeOptions(maxDepth: 8, maxElements: 500, hintMode: .full),
+    evidence: AXTreeEvidence? = nil,
     invalidated: Bool = false
 ) -> SnapshotRecord {
-    SnapshotRecord(
+    let rootNode = stateNode(path: [], role: "AXWindow", title: target.title, bounds: target.bounds, childCount: 0)
+    return SnapshotRecord(
         id: id,
         createdAt: createdAt,
         expiresAt: expiresAt,
         target: target,
-        treeOptions: TreeOptions(maxDepth: 8, maxElements: 500, hintMode: .full),
-        evidence: AXTreeEvidence(nodes: [], truncation: [], refs: []),
+        treeOptions: treeOptions,
+        evidence: evidence ?? AXTreeEvidence(nodes: [rootNode], truncation: [], refs: [AXRefEvidence(ref: 1, path: [], node: rootNode)]),
         invalidated: invalidated
+    )
+}
+
+private func stateNode(path: [Int], role: String, title: String? = nil, bounds: WindowBounds? = nil, childCount: Int) -> AXNodeEvidence {
+    AXNodeEvidence(path: path, role: role, subrole: nil, identifier: nil, title: title, label: nil, value: nil, enabled: nil, focused: nil, selected: nil, actions: [], bounds: bounds, childCount: childCount)
+}
+
+private func stateTruncationInput() -> AXTreeInputNode {
+    AXTreeInputNode(
+        role: "AXWindow",
+        children: [
+            AXTreeInputNode(
+                role: "AXGroup",
+                children: [AXTreeInputNode(role: "AXButton")]
+            ),
+            AXTreeInputNode(role: "AXButton")
+        ]
+    )
+}
+
+private func wideEvidence(childCount: Int, mode: HintMode) -> AXTreeEvidence {
+    let root = stateNode(path: [], role: "AXWindow", childCount: childCount)
+    let children = (0..<childCount).map {
+        stateNode(path: [$0], role: "AXButton", childCount: 0)
+    }
+    let nodes = [root] + children
+    return AXTreeEvidence(
+        nodes: nodes,
+        truncation: [],
+        refs: AXEvidencePolicy.deriveRefs(nodes: nodes, boundaries: [], mode: mode)
     )
 }
 

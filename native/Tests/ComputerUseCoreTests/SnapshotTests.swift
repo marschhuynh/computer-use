@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 @testable import ComputerUseCore
 
@@ -27,6 +28,30 @@ final class SnapshotTests: XCTestCase {
 
     func testObservedTruncationBoundaryMustMatch() throws {
         XCTAssertThrowsError(try SnapshotService.validateEvidence(treeFixture("truncated-before"), live: treeFixture("truncated-after"), ref: 2)) {
+            XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
+        }
+    }
+
+    func testMatchingTruncatedEvidenceNeverAuthorizesUnsafeRefInAnyHintMode() throws {
+        let fixture = try treeFixture("truncated-before")
+        for mode in [HintMode.full, .leafOnly, .leafCompact] {
+            let snapshot = AXTreeSnapshot(
+                target: fixture.target,
+                treeOptions: TreeOptions(maxDepth: fixture.treeOptions.maxDepth, maxElements: fixture.treeOptions.maxElements, hintMode: mode),
+                evidence: fixture.evidence
+            )
+            XCTAssertThrowsError(try SnapshotService.validateEvidence(snapshot, live: snapshot, ref: 2), mode.rawValue) {
+                XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
+            }
+        }
+    }
+
+    func testBoundaryAncestorMakesDescendantRefUnsafeEvenWhenEvidenceMatches() throws {
+        let fixture = try treeFixture("truncated-before")
+        XCTAssertTrue(fixture.evidence.truncation.contains { boundary in
+            fixture.evidence.refs[1].path.starts(with: boundary.path)
+        })
+        XCTAssertThrowsError(try SnapshotService.validateEvidence(fixture, live: fixture, ref: 2)) {
             XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
         }
     }
@@ -172,9 +197,11 @@ final class SnapshotTests: XCTestCase {
             AXTreeObservation(snapshot: live, liveElements: [2: LiveAXElement()])
         }, validateTarget: { _ in recorded.target }, now: { now })
 
-        XCTAssertThrowsError(try service.withValidatedSnapshotAction(snapshotID: record.id, ref: 2, timeoutMilliseconds: 1_000, stateChanging: true) { _, _ in
-            XCTFail("action must not run")
-        }) {
+        XCTAssertThrowsError(try service.withValidatedSnapshotAction(snapshotID: record.id, ref: 2, timeoutMilliseconds: 1_000, stateChanging: true, preflight: { _, _ in
+            XCTFail("preflight must not run")
+        }, dispatch: { _ in
+            XCTFail("dispatch must not run")
+        })) {
             XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
         }
         XCTAssertFalse(try store.readSnapshot(id: record.id).invalidated)
@@ -193,16 +220,172 @@ final class SnapshotTests: XCTestCase {
             let service = SnapshotService(lock: DesktopLock(rootURL: root), store: store, resolve: { _ in snapshot.target }, observe: { _, _ in
                 AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
             }, validateTarget: { _ in snapshot.target }, now: { now })
+            var validDuringPreflight = false
             var invalidatedDuringAction = false
 
-            try service.withValidatedSnapshotAction(snapshotID: id, ref: 2, timeoutMilliseconds: 1_000, stateChanging: stateChanging) { _, _ in
+            try service.withValidatedSnapshotAction(snapshotID: id, ref: 2, timeoutMilliseconds: 1_000, stateChanging: stateChanging, preflight: { _, _ in
+                validDuringPreflight = (try? store.readSnapshot(id: id)) != nil
+            }, dispatch: { _ in
                 invalidatedDuringAction = (try? store.readSnapshot(id: id)) == nil
-            }
+            })
+            XCTAssertTrue(validDuringPreflight)
             XCTAssertEqual(invalidatedDuringAction, stateChanging)
             XCTAssertEqual((try? store.readSnapshot(id: id)) == nil, stateChanging)
         }
     }
 
+    func testFailedStateChangingPreparationDoesNotInvalidateOrDispatch() throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let snapshot = try treeFixture("save-cancel")
+        let now = Date(timeIntervalSince1970: 1_788_861_900)
+        let store = StateStore(rootURL: root, now: { now })
+        let record = SnapshotRecord(id: "77777777-7777-4777-8777-777777777777", createdAt: "2026-09-08T10:00:00Z", expiresAt: "2026-09-08T10:10:00Z", target: snapshot.target, treeOptions: snapshot.treeOptions, evidence: snapshot.evidence)
+        try store.writeSnapshot(record)
+        let service = SnapshotService(lock: DesktopLock(rootURL: root), store: store, resolve: { _ in snapshot.target }, observe: { _, _ in
+            AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
+        }, validateTarget: { _ in snapshot.target }, now: { now })
+        var dispatched = false
+
+        XCTAssertThrowsError(try service.withValidatedSnapshotAction(snapshotID: record.id, ref: 2, timeoutMilliseconds: 1_000, stateChanging: true, preflight: { _, _ in
+            throw NativeFailure("INVALID_REQUEST", "Action-specific preparation failed")
+        }, dispatch: { _ in
+            dispatched = true
+        })) {
+            XCTAssertEqual(($0 as? NativeFailure)?.code, "INVALID_REQUEST")
+        }
+        XCTAssertNoThrow(try store.readSnapshot(id: record.id))
+        XCTAssertFalse(dispatched)
+    }
+
+    func testInvalidationFailurePreventsActionDispatch() throws {
+        for contents in [Data("not-json".utf8), Data("{}".utf8)] {
+            let root = temporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let snapshot = try treeFixture("save-cancel")
+            let now = Date(timeIntervalSince1970: 1_788_861_900)
+            let store = StateStore(rootURL: root, now: { now })
+            let record = SnapshotRecord(id: "88888888-8888-4888-8888-888888888888", createdAt: "2026-09-08T10:00:00Z", expiresAt: "2026-09-08T10:10:00Z", target: snapshot.target, treeOptions: snapshot.treeOptions, evidence: snapshot.evidence)
+            try store.writeSnapshot(record)
+            let malformed = root.appendingPathComponent("snapshots/00000000-0000-4000-8000-000000000000.json")
+            try contents.write(to: malformed)
+            chmod(malformed.path, 0o600)
+            let service = SnapshotService(lock: DesktopLock(rootURL: root), store: store, observe: { _, _ in
+                AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
+            }, validateTarget: { _ in snapshot.target }, now: { now })
+            var actionRan = false
+
+            XCTAssertThrowsError(try service.withValidatedSnapshotAction(snapshotID: record.id, ref: 2, timeoutMilliseconds: 1_000, stateChanging: true, preflight: { _, _ in
+                ()
+            }, dispatch: { _ in
+                actionRan = true
+            }))
+            XCTAssertFalse(actionRan)
+        }
+    }
+
+    func testDispatchFailureLeavesAllAppRecordsInvalidated() throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let snapshot = try treeFixture("save-cancel")
+        let now = Date(timeIntervalSince1970: 1_788_861_900)
+        let store = StateStore(rootURL: root, now: { now })
+        let record = SnapshotRecord(id: "99999999-9999-4999-8999-999999999999", createdAt: "2026-09-08T10:00:00Z", expiresAt: "2026-09-08T10:10:00Z", target: snapshot.target, treeOptions: snapshot.treeOptions, evidence: snapshot.evidence)
+        try store.writeSnapshot(record)
+        let service = SnapshotService(lock: DesktopLock(rootURL: root), store: store, observe: { _, _ in
+            AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
+        }, validateTarget: { _ in snapshot.target }, now: { now })
+
+        XCTAssertThrowsError(try service.withValidatedSnapshotAction(snapshotID: record.id, ref: 2, timeoutMilliseconds: 1_000, stateChanging: true, preflight: { _, _ in
+            "prepared"
+        }, dispatch: { prepared in
+            XCTAssertEqual(prepared, "prepared")
+            throw NativeFailure("NATIVE_FAILURE", "Dispatch failed")
+        }))
+        XCTAssertThrowsError(try store.readSnapshot(id: record.id))
+    }
+
+    func testEnumerationFailureAfterPreflightPreventsDispatch() throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let snapshot = try treeFixture("save-cancel")
+        let now = Date(timeIntervalSince1970: 1_788_861_900)
+        var enumerationCount = 0
+        let io = StateStoreIO(directoryNames: { descriptor in
+            enumerationCount += 1
+            if enumerationCount == 1 { return try testDirectoryNames(descriptor) }
+            throw NativeFailure("NATIVE_FAILURE", "Injected enumeration failure")
+        })
+        let store = StateStore(rootURL: root, now: { now }, io: io)
+        let record = SnapshotRecord(id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", createdAt: "2026-09-08T10:00:00Z", expiresAt: "2026-09-08T10:10:00Z", target: snapshot.target, treeOptions: snapshot.treeOptions, evidence: snapshot.evidence)
+        try store.writeSnapshot(record)
+        let service = SnapshotService(lock: DesktopLock(rootURL: root), store: store, observe: { _, _ in
+            AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
+        }, validateTarget: { _ in snapshot.target }, now: { now })
+        var preflightRan = false
+        var dispatchRan = false
+
+        XCTAssertThrowsError(try service.withValidatedSnapshotAction(snapshotID: record.id, ref: 2, timeoutMilliseconds: 1_000, stateChanging: true, preflight: { _, _ in
+            preflightRan = true
+        }, dispatch: { _ in
+            dispatchRan = true
+        }))
+        XCTAssertTrue(preflightRan)
+        XCTAssertFalse(dispatchRan)
+    }
+
+    func testEveryInvalidationPublicationFailurePreventsDispatch() throws {
+        for failure in InvalidationIOFailure.allCases {
+            let root = temporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let snapshot = try treeFixture("save-cancel")
+            let now = Date(timeIntervalSince1970: 1_788_861_900)
+            let record = SnapshotRecord(
+                id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                createdAt: "2026-09-08T10:00:00Z",
+                expiresAt: "2026-09-08T10:10:00Z",
+                target: snapshot.target,
+                treeOptions: snapshot.treeOptions,
+                evidence: snapshot.evidence
+            )
+            try StateStore(rootURL: root, now: { now }).writeSnapshot(record)
+
+            let store = StateStore(
+                rootURL: root,
+                now: { now },
+                io: failingInvalidationIO(failure)
+            )
+            let service = SnapshotService(
+                lock: DesktopLock(rootURL: root),
+                store: store,
+                observe: { _, _ in
+                    AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
+                },
+                validateTarget: { _ in snapshot.target },
+                now: { now }
+            )
+            var preflightRan = false
+            var dispatchRan = false
+
+            XCTAssertThrowsError(try service.withValidatedSnapshotAction(
+                snapshotID: record.id,
+                ref: 2,
+                timeoutMilliseconds: 1_000,
+                stateChanging: true,
+                preflight: { _, _ in
+                    preflightRan = true
+                },
+                dispatch: { _ in
+                    dispatchRan = true
+                }
+            ), failure.rawValue)
+            XCTAssertTrue(preflightRan, failure.rawValue)
+            XCTAssertFalse(dispatchRan, failure.rawValue)
+
+            let remainsValid = (try? StateStore(rootURL: root, now: { now }).readSnapshot(id: record.id)) != nil
+            XCTAssertEqual(remainsValid, failure != .directorySync, failure.rawValue)
+        }
+    }
 
     func testSnapshotNativeDispatchUsesInjectedPureObservation() throws {
         let root = temporaryDirectory()
@@ -245,6 +428,20 @@ private func temporaryDirectory() -> URL {
     return url
 }
 
+private func testDirectoryNames(_ descriptor: Int32) throws -> [String] {
+    let duplicate = dup(descriptor)
+    guard duplicate >= 0, let directory = fdopendir(duplicate) else { throw NativeFailure("NATIVE_FAILURE", "test enumeration failed") }
+    defer { closedir(directory) }
+    var names: [String] = []
+    while let entry = readdir(directory) {
+        let name = withUnsafePointer(to: entry.pointee.d_name) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(NAME_MAX) + 1) { String(cString: $0) }
+        }
+        if name != "." && name != ".." { names.append(name) }
+    }
+    return names.sorted()
+}
+
 private func truncationPolicyInput() -> AXTreeInputNode {
     AXTreeInputNode(
         role: "AXWindow",
@@ -259,5 +456,46 @@ private func truncationPolicyInput() -> AXTreeInputNode {
             ),
             AXTreeInputNode(role: "AXButton", title: "Safe sibling", actions: ["AXPress"])
         ]
+    )
+}
+
+private enum InvalidationIOFailure: String, CaseIterable {
+    case write
+    case fileSync
+    case rename
+    case directorySync
+}
+
+private func failingInvalidationIO(_ failure: InvalidationIOFailure) -> StateStoreIO {
+    var directorySyncCalls = 0
+    return StateStoreIO(
+        write: { descriptor, buffer, count in
+            if failure == .write { return SystemCallResult(value: -1, error: EIO) }
+            let value = Darwin.write(descriptor, buffer, count)
+            return SystemCallResult(value: value, error: value < 0 ? errno : 0)
+        },
+        sync: { descriptor in
+            var info = stat()
+            guard fstat(descriptor, &info) == 0 else {
+                return SystemCallResult(value: -1, error: errno)
+            }
+            let fileType = info.st_mode & S_IFMT
+            if fileType == S_IFREG && failure == .fileSync {
+                return SystemCallResult(value: -1, error: EIO)
+            }
+            if fileType == S_IFDIR {
+                directorySyncCalls += 1
+                if failure == .directorySync && directorySyncCalls == 1 {
+                    return SystemCallResult(value: -1, error: EIO)
+                }
+            }
+            let value = fsync(descriptor)
+            return SystemCallResult(value: value, error: value < 0 ? errno : 0)
+        },
+        renameRecord: { oldDirectory, oldName, newDirectory, newName in
+            if failure == .rename { return SystemCallResult(value: -1, error: EIO) }
+            let value = renameat(oldDirectory, oldName, newDirectory, newName)
+            return SystemCallResult(value: value, error: value < 0 ? errno : 0)
+        }
     )
 }

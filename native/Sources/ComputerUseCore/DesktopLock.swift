@@ -1,6 +1,11 @@
 import Darwin
 import Foundation
 
+struct SystemCallResult<Value> {
+    let value: Value
+    let error: Int32
+}
+
 public final class DesktopLock {
     public static var defaultRootURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -10,6 +15,7 @@ public final class DesktopLock {
     private let rootURL: URL
     private let monotonicNow: () -> UInt64
     private let wait: () -> Void
+    private let flockCall: (Int32, Int32) -> SystemCallResult<Int32>
 
     public init(
         rootURL: URL = DesktopLock.defaultRootURL,
@@ -19,6 +25,22 @@ public final class DesktopLock {
         self.rootURL = rootURL
         self.monotonicNow = monotonicNow
         self.wait = wait
+        flockCall = { descriptor, operation in
+            let value = flock(descriptor, operation)
+            return SystemCallResult(value: value, error: value < 0 ? errno : 0)
+        }
+    }
+
+    init(
+        rootURL: URL,
+        monotonicNow: @escaping () -> UInt64,
+        wait: @escaping () -> Void,
+        flock: @escaping (Int32, Int32) -> SystemCallResult<Int32>
+    ) {
+        self.rootURL = rootURL
+        self.monotonicNow = monotonicNow
+        self.wait = wait
+        flockCall = flock
     }
 
     public func withLock<T>(timeoutMilliseconds: Int, _ body: () throws -> T) throws -> T {
@@ -37,13 +59,23 @@ public final class DesktopLock {
         try verifyPrivateFile(descriptor)
         guard fchmod(descriptor, 0o600) == 0 else { throw stateFailure("Unable to protect the desktop lock") }
 
-        while flock(descriptor, LOCK_EX | LOCK_NB) != 0 {
-            if errno == EINTR { continue }
-            guard errno == EWOULDBLOCK || errno == EAGAIN else { throw stateFailure("Unable to acquire the desktop lock") }
+        while true {
+            guard monotonicNow() < deadline else { throw NativeFailure("BUSY", "Another desktop operation is in progress") }
+            let result = flockCall(descriptor, LOCK_EX | LOCK_NB)
+            if result.value == 0 {
+                guard monotonicNow() < deadline else {
+                    _ = flockCall(descriptor, LOCK_UN)
+                    throw NativeFailure("BUSY", "Another desktop operation is in progress")
+                }
+                break
+            }
+            let lockError = result.error
+            if lockError == EINTR { continue }
+            guard lockError == EWOULDBLOCK || lockError == EAGAIN else { throw stateFailure("Unable to acquire the desktop lock") }
             guard monotonicNow() < deadline else { throw NativeFailure("BUSY", "Another desktop operation is in progress") }
             wait()
         }
-        defer { _ = flock(descriptor, LOCK_UN) }
+        defer { _ = flockCall(descriptor, LOCK_UN) }
         return try body()
     }
 
@@ -66,20 +98,28 @@ private func openLockFile(in rootDescriptor: Int32) throws -> Int32 {
 
 
 struct PrivateStateDirectory {
-    static func openRoot(_ url: URL) throws -> Int32 {
+    static func openRoot(_ url: URL, afterOpen: (Int32) throws -> Void = { _ in }) throws -> Int32 {
         guard url.isFileURL, url.path.hasPrefix("/") else { throw stateFailure("Invalid state directory") }
-        if mkdir(url.path, 0o700) != 0 && errno != EEXIST { throw stateFailure("Unable to create the state directory") }
+        while mkdir(url.path, 0o700) != 0 {
+            if errno == EINTR { continue }
+            guard errno == EEXIST else { throw stateFailure("Unable to create the state directory") }
+            break
+        }
 
-        var pathInfo = stat()
-        guard lstat(url.path, &pathInfo) == 0,
-              (pathInfo.st_mode & S_IFMT) == S_IFDIR,
-              pathInfo.st_uid == geteuid() else { throw stateFailure("Unsafe state directory") }
-        guard chmod(url.path, 0o700) == 0 else { throw stateFailure("Unable to protect the state directory") }
-
-        let descriptor = open(url.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
-        guard descriptor >= 0 else { throw stateFailure("Unable to open the state directory") }
+        let descriptor: Int32
+        while true {
+            let opened = open(url.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+            if opened >= 0 {
+                descriptor = opened
+                break
+            }
+            if errno == EINTR { continue }
+            throw stateFailure("Unable to open the state directory")
+        }
         do {
+            try afterOpen(descriptor)
             try verifyPrivateDirectory(descriptor)
+            guard fchmod(descriptor, 0o700) == 0 else { throw stateFailure("Unable to protect the state directory") }
             return descriptor
         } catch {
             close(descriptor)
