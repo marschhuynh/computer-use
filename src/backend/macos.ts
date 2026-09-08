@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import type { Backend, JsonValue, MutationStatus, Reply, Request } from '../core/protocol.js';
+import { isRecordId } from '../core/validate.js';
 
 const PROTOCOL_VERSION = '1';
 const MAX_STDOUT_BYTES = 16 * 1024 * 1024;
@@ -241,12 +242,7 @@ function projectData(request: Request, data: Record<string, unknown>, supplied: 
       })) };
     }
     case 'snapshot':
-      if (typeof data.snapshotId !== 'string' || !isJsonRecord(data.target) || !isJsonRecord(data.tree)
-        || typeof data.truncated !== 'boolean' || typeof data.createdAt !== 'string' || typeof data.expiresAt !== 'string') return undefined;
-      return {
-        snapshotId: data.snapshotId, target: data.target, tree: data.tree, truncated: data.truncated,
-        createdAt: data.createdAt, expiresAt: data.expiresAt,
-      };
+      return projectSnapshotData(data);
     case 'screenshot': {
       if (typeof data.captureId !== 'string' || !isJsonRecord(data.target) || typeof data.path !== 'string'
         || !nonnegativeFiniteNumber(data.width) || !nonnegativeFiniteNumber(data.height)
@@ -285,6 +281,136 @@ function projectData(request: Request, data: Record<string, unknown>, supplied: 
       return projected;
     }
   }
+}
+
+function projectSnapshotData(data: Record<string, unknown>): Record<string, JsonValue> | undefined {
+  if (typeof data.createdAt !== 'string' || typeof data.expiresAt !== 'string') return undefined;
+  const target = projectSnapshotTarget(data.target);
+  const tree = projectSnapshotTree(data.tree);
+  const createdAt = parseWireTimestamp(data.createdAt);
+  const expiresAt = parseWireTimestamp(data.expiresAt);
+  if (!isRecordId(data.snapshotId) || target === undefined || tree === undefined
+    || typeof data.truncated !== 'boolean' || createdAt === undefined || expiresAt === undefined
+    || expiresAt.seconds !== createdAt.seconds + 10 * 60
+    || expiresAt.nanoseconds !== createdAt.nanoseconds) return undefined;
+  return {
+    snapshotId: data.snapshotId,
+    target,
+    tree,
+    truncated: data.truncated,
+    createdAt: data.createdAt,
+    expiresAt: data.expiresAt,
+  };
+}
+
+function projectSnapshotTarget(value: unknown): Record<string, JsonValue> | undefined {
+  if (!isRecord(value) || !positiveSafeInteger(value.pid) || !isWireTimestamp(value.launchDate)
+    || (typeof value.bundleId !== 'string' && value.bundleId !== null)
+    || !positiveSafeInteger(value.windowId) || typeof value.title !== 'string') return undefined;
+  const bounds = projectBounds(value.bounds);
+  if (bounds === undefined) return undefined;
+  return {
+    pid: value.pid,
+    launchDate: value.launchDate,
+    bundleId: value.bundleId,
+    windowId: value.windowId,
+    title: value.title,
+    bounds,
+  };
+}
+
+function projectSnapshotTree(value: unknown): Record<string, JsonValue> | undefined {
+  if (!isRecord(value) || !Array.isArray(value.elements) || value.elements.length > 1) return undefined;
+  const refs = new Set<number>();
+  const elements: JsonValue[] = [];
+  for (const element of value.elements) {
+    const projected = projectSnapshotNode(element, refs);
+    if (projected === undefined) return undefined;
+    elements.push(projected);
+  }
+  for (let ref = 1; ref <= refs.size; ref += 1) {
+    if (!refs.has(ref)) return undefined;
+  }
+  return { elements };
+}
+
+function projectSnapshotNode(value: unknown, refs: Set<number>): Record<string, JsonValue> | undefined {
+  if (!isRecord(value) || typeof value.role !== 'string' || value.role.length === 0) return undefined;
+  const projected: Record<string, JsonValue> = { role: value.role };
+  if (value.ref !== undefined) {
+    if (!positiveSafeInteger(value.ref) || refs.has(value.ref)) return undefined;
+    refs.add(value.ref);
+    projected.ref = value.ref;
+  }
+  for (const field of ['subrole', 'identifier', 'title', 'label', 'value'] as const) {
+    const item = value[field];
+    if (item !== undefined) {
+      if (typeof item !== 'string') return undefined;
+      projected[field] = item;
+    }
+  }
+  if (value.actions !== undefined) {
+    if (!Array.isArray(value.actions) || !value.actions.every(item => typeof item === 'string')) return undefined;
+    projected.actions = value.actions;
+  }
+  for (const field of ['enabled', 'focused', 'selected'] as const) {
+    const item = value[field];
+    if (item !== undefined) {
+      if (typeof item !== 'boolean') return undefined;
+      projected[field] = item;
+    }
+  }
+  if (value.bounds !== undefined) {
+    const bounds = projectBounds(value.bounds);
+    if (bounds === undefined) return undefined;
+    projected.bounds = bounds;
+  }
+  if (value.children !== undefined) {
+    if (!Array.isArray(value.children)) return undefined;
+    const children: JsonValue[] = [];
+    for (const child of value.children) {
+      const projectedChild = projectSnapshotNode(child, refs);
+      if (projectedChild === undefined) return undefined;
+      children.push(projectedChild);
+    }
+    projected.children = children;
+  }
+  return projected;
+}
+
+function projectBounds(value: unknown): Record<string, JsonValue> | undefined {
+  if (!isRecord(value) || !finiteNumber(value.x) || !finiteNumber(value.y)
+    || !nonnegativeFiniteNumber(value.width) || !nonnegativeFiniteNumber(value.height)) return undefined;
+  return { x: value.x, y: value.y, width: value.width, height: value.height };
+}
+
+type WireTimestamp = { seconds: number; nanoseconds: number };
+
+function parseWireTimestamp(value: unknown): WireTimestamp | undefined {
+  if (typeof value !== 'string') return undefined;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$/.exec(value);
+  if (match === null) return undefined;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, fractionText = ''] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
+  date.setUTCHours(hour, minute, second, 0);
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1
+    || date.getUTCDate() !== day || date.getUTCHours() !== hour
+    || date.getUTCMinutes() !== minute || date.getUTCSeconds() !== second) return undefined;
+  return {
+    seconds: Math.floor(date.getTime() / 1_000),
+    nanoseconds: Number(fractionText.padEnd(9, '0')),
+  };
+}
+
+function isWireTimestamp(value: unknown): value is string {
+  return parseWireTimestamp(value) !== undefined;
 }
 
 type DoctorCheck = { name: string; status: 'ok' | 'missing' | 'denied' | 'unknown'; message: string };
@@ -397,7 +523,9 @@ function validBounds(value: unknown): value is Bounds {
 function positiveSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 }
-function finiteNumber(value: unknown): boolean { return typeof value === 'number' && Number.isFinite(value); }
+function finiteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
 function nonnegativeFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }

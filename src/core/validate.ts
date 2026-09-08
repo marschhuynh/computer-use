@@ -26,7 +26,11 @@ export function pixel(value: string, name: string): number {
   return number;
 }
 
+export function isRecordId(value: unknown): value is string {
+  return typeof value === 'string' && UUID_PATTERN.test(value);
+}
+
 export function recordId(value: string, name: string): string {
-  if (!UUID_PATTERN.test(value)) throw new ArgumentError(`${name} must be a strict UUID`);
+  if (!isRecordId(value)) throw new ArgumentError(`${name} must be a strict UUID`);
   return value;
 }

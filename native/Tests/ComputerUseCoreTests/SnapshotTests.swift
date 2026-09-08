@@ -448,6 +448,34 @@ final class SnapshotTests: XCTestCase {
             "safe": .string("kept")
         ])
     }
+
+    func testSnapshotWireDataMatchesSharedActualProducerFixture() throws {
+        let snapshot = try treeFixture("save-cancel")
+        let record = SnapshotRecord(
+            id: "123e4567-e89b-42d3-a456-426614174000",
+            createdAt: "2026-09-08T10:00:00.000Z",
+            expiresAt: "2026-09-08T10:10:00.000Z",
+            target: snapshot.target,
+            treeOptions: snapshot.treeOptions,
+            evidence: snapshot.evidence
+        )
+        let reply = WireReply.success(
+            command: .snapshot,
+            data: SnapshotResult(record: record, snapshot: snapshot).wireData
+        )
+        let actual = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(reply)) as? NSDictionary
+        )
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let expected = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Data(contentsOf: root.appendingPathComponent("contracts/fixtures/snapshot-reply.json"))
+            ) as? NSDictionary
+        )
+
+        XCTAssertEqual(actual, expected)
+    }
 }
 
 private func treeFixture(_ name: String) throws -> AXTreeSnapshot {

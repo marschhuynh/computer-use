@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { unlink } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 
 const mode = basename(process.argv[1]);
@@ -34,6 +35,12 @@ if (process.argv.slice(2).includes('--protocol-version')) {
       ? Object.fromEntries(Object.entries(reflectedValue).reverse())
       : reflectedValue;
     const writeAndExit = (text, code = 0) => process.stdout.write(text, () => process.exit(code));
+
+    if (mode.startsWith('snapshot-reply-')) {
+      const reply = readFileSync(`${process.argv[1]}.json`, 'utf8').trim();
+      writeAndExit(`${reply}\n`);
+      return;
+    }
 
     switch (mode) {
       case 'invalid-json':

@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "snapshot",
+  "data": {
+    "snapshotId": "123e4567-e89b-42d3-a456-426614174000",
+    "target": {
+      "pid": 42,
+      "launchDate": "2026-09-08T10:00:00Z",
+      "bundleId": "com.example.Editor",
+      "windowId": 7,
+      "title": "Document",
+      "bounds": {"x": 100, "y": 100, "width": 600, "height": 400}
+    },
+    "tree": {
+      "elements": [
+        {
+          "role": "AXWindow",
+          "ref": 1,
+          "title": "Document",
+          "bounds": {"x": 100, "y": 100, "width": 600, "height": 400},
+          "children": [
+            {
+              "role": "AXButton",
+              "ref": 2,
+              "title": "Save",
+              "actions": ["AXPress"],
+              "bounds": {"x": 500, "y": 450, "width": 70, "height": 30}
+            },
+            {
+              "role": "AXButton",
+              "ref": 3,
+              "title": "Cancel",
+              "actions": ["AXPress"],
+              "bounds": {"x": 410, "y": 450, "width": 70, "height": 30}
+            }
+          ]
+        }
+      ]
+    },
+    "truncated": false,
+    "createdAt": "2026-09-08T10:00:00.000Z",
+    "expiresAt": "2026-09-08T10:10:00.000Z"
+  }
+}

@@ -1,4 +1,4 @@
-import { chmod, copyFile, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { chmod, copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -8,6 +8,14 @@ import { formatReply } from '../src/cli/output.js';
 import { DEFAULT_TIMEOUT_MS, type Request } from '../src/core/protocol.js';
 
 const mockHost = new URL('../fixtures/cli/mock-host.mjs', import.meta.url);
+const snapshotReplyModes = [
+  'snapshot-reply-valid',
+  'snapshot-reply-invalid-id',
+  'snapshot-reply-invalid-target',
+  'snapshot-reply-invalid-tree',
+  'snapshot-reply-invalid-created-at',
+  'snapshot-reply-invalid-lifetime',
+];
 const modes = [
   'valid-response', 'invalid-json', 'wrong-command', 'invalid-response-data',
   'failure-missing-command', 'failure-wrong-command', 'incompatible-version',
@@ -19,6 +27,7 @@ const modes = [
   'reflected-visualization', 'future-result-values', 'type-result', 'invalid-type-result',
   'reflected-error-message', 'reflected-error-details', 'reflected-root-error-details',
   'stable-error-code', 'unknown-error-code', 'slow-version', 'mutation-status',
+  ...snapshotReplyModes,
 ];
 let fixtureDirectory: string;
 
@@ -46,6 +55,15 @@ function typeRequest(text: string, timeoutMs = DEFAULT_TIMEOUT_MS): Request {
     allowClipboardReplace: true,
   };
 }
+function snapshotRequest(): Request {
+  return {
+    schemaVersion: 1,
+    command: 'snapshot',
+    options: { timeoutMs: DEFAULT_TIMEOUT_MS, cursor: 'on' },
+    target: { app: 'Editor', windowId: 7 },
+    tree: { maxDepth: 8, maxElements: 500, hintMode: 'full' },
+  };
+}
 
 beforeAll(async () => {
   fixtureDirectory = await mkdtemp(join(tmpdir(), 'nuvin-mock-host-'));
@@ -54,6 +72,27 @@ beforeAll(async () => {
     await copyFile(mockHost, path);
     await chmod(path, 0o755);
   }));
+  const validSnapshotReply = JSON.parse(
+    await readFile(new URL('../contracts/fixtures/snapshot-reply.json', import.meta.url), 'utf8'),
+  ) as Record<string, unknown>;
+  const snapshotReplies: Record<string, Record<string, unknown>> = {
+    'snapshot-reply-valid': structuredClone(validSnapshotReply),
+    'snapshot-reply-invalid-id': structuredClone(validSnapshotReply),
+    'snapshot-reply-invalid-target': structuredClone(validSnapshotReply),
+    'snapshot-reply-invalid-tree': structuredClone(validSnapshotReply),
+    'snapshot-reply-invalid-created-at': structuredClone(validSnapshotReply),
+    'snapshot-reply-invalid-lifetime': structuredClone(validSnapshotReply),
+  };
+  const dataFor = (mode: string) => (snapshotReplies[mode].data as Record<string, unknown>);
+  dataFor('snapshot-reply-invalid-id').snapshotId = 'not-a-uuid';
+  (dataFor('snapshot-reply-invalid-target').target as Record<string, unknown>).pid = 0;
+  const tree = dataFor('snapshot-reply-invalid-tree').tree as { elements: Array<{ children: Array<Record<string, unknown>> }> };
+  tree.elements[0].children[0].ref = 0;
+  dataFor('snapshot-reply-invalid-created-at').createdAt = '2026-09-08 10:00:00';
+  dataFor('snapshot-reply-invalid-lifetime').expiresAt = '2026-09-08T10:11:00.000Z';
+  await Promise.all(Object.entries(snapshotReplies).map(([mode, reply]) =>
+    writeFile(`${fixture(mode)}.json`, `${JSON.stringify(reply)}\n`, { mode: 0o600 }),
+  ));
 });
 
 afterAll(async () => { await rm(fixtureDirectory, { recursive: true, force: true }); });
@@ -65,6 +104,27 @@ describe('MacOSBackend', { timeout: 25_000 }, () => {
       schemaVersion: 1, ok: true, command: 'apps', data: { apps: [] },
     });
   });
+
+  it('accepts the shared snapshot reply emitted by the Swift producer shape', async () => {
+    const expected = JSON.parse(
+      await readFile(new URL('../contracts/fixtures/snapshot-reply.json', import.meta.url), 'utf8'),
+    );
+    const backend = new MacOSBackend({ helper: fixture('snapshot-reply-valid') });
+    await expect(backend.execute(snapshotRequest(), new AbortController().signal)).resolves.toEqual(expected);
+  });
+
+  it.each(snapshotReplyModes.filter(mode => mode !== 'snapshot-reply-valid'))(
+    'rejects malformed snapshot data from %s',
+    async mode => {
+      const backend = new MacOSBackend({ helper: fixture(mode) });
+      await expect(backend.execute(snapshotRequest(), new AbortController().signal)).resolves.toEqual({
+        schemaVersion: 1,
+        ok: false,
+        command: 'snapshot',
+        error: { code: 'PROTOCOL_ERROR', message: 'Native helper returned an invalid response' },
+      });
+    },
+  );
 
   it('keeps request stdin open until the host completes', async () => {
     const backend = new MacOSBackend({ helper: fixture('requires-open-stdin') });
