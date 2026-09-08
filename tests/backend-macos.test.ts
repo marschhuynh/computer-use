@@ -1,4 +1,4 @@
-import { chmod, copyFile, mkdtemp, rm } from 'node:fs/promises';
+import { chmod, copyFile, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -18,7 +18,7 @@ const modes = [
   'reflected-reordered-subtree', 'reflected-method', 'reflected-verification',
   'reflected-visualization', 'future-result-values', 'type-result', 'invalid-type-result',
   'reflected-error-message', 'reflected-error-details', 'reflected-root-error-details',
-  'stable-error-code', 'unknown-error-code', 'slow-version',
+  'stable-error-code', 'unknown-error-code', 'slow-version', 'mutation-status',
 ];
 let fixtureDirectory: string;
 
@@ -147,6 +147,64 @@ describe('MacOSBackend', { timeout: 25_000 }, () => {
     expect(reply.error.details).toEqual({ mutationStatus: 'potentiallyApplied' });
   });
 
+  it('projects exactly the shared native mutation-status spellings', async () => {
+    const fixtures = JSON.parse(
+      await readFile(new URL('../contracts/fixtures/native-replies.json', import.meta.url), 'utf8'),
+    ) as {
+      mutationStatuses: Array<{ name: string; wire: string; public: string | null }>;
+      invalidMutationStatuses: string[];
+    };
+    const backend = new MacOSBackend({ helper: fixture('mutation-status') });
+    for (const status of fixtures.mutationStatuses) {
+      const reply = await backend.execute(mutationRequest(status.wire), new AbortController().signal);
+      expect(reply, status.name).toMatchObject({ ok: false, error: { code: 'NATIVE_FAILURE' } });
+      if (reply.ok) throw new Error('Expected failure');
+      expect(reply.error.details, status.name).toEqual(
+        status.public === null
+          ? { safe: 'kept' }
+          : { safe: 'kept', mutationStatus: status.public },
+      );
+    }
+    for (const status of fixtures.invalidMutationStatuses) {
+      const reply = await backend.execute(mutationRequest(status), new AbortController().signal);
+      expect(reply, status).toEqual({
+        schemaVersion: 1,
+        ok: false,
+        command: 'set-value',
+        error: {
+          code: 'PROTOCOL_ERROR',
+          message: 'Native helper returned an invalid response',
+          details: { mutationStatus: 'potentiallyApplied' },
+        },
+      });
+    }
+  });
+
+  it('conservatively marks a structured mutation failure with missing status', async () => {
+    const backend = new MacOSBackend({ helper: fixture('mutation-status') });
+    const reply = await backend.execute(mutationRequest('__missing__'), new AbortController().signal);
+    expect(reply).toEqual({
+      schemaVersion: 1,
+      ok: false,
+      command: 'set-value',
+      error: {
+        code: 'NATIVE_FAILURE',
+        message: 'Mutation failed',
+        details: { safe: 'kept', mutationStatus: 'potentiallyApplied' },
+      },
+    });
+  });
+
+  it('does not project mutation status for a non-mutating command', async () => {
+    const backend = new MacOSBackend({ helper: fixture('mutation-status') });
+    await expect(backend.execute(appsRequest(), new AbortController().signal)).resolves.toEqual({
+      schemaVersion: 1,
+      ok: false,
+      command: 'apps',
+      error: { code: 'NATIVE_FAILURE', message: 'Mutation failed', details: { safe: 'kept' } },
+    });
+  });
+
   it('rejects a zero exit without a response', async () => {
     const backend = new MacOSBackend({ helper: fixture('exits-after-receiving-request') });
     await expect(backend.execute(appsRequest(), new AbortController().signal)).resolves.toMatchObject({
@@ -244,7 +302,7 @@ describe('MacOSBackend', { timeout: 25_000 }, () => {
     if (mode === 'reflected-error-details') {
       expect(reply).toMatchObject({ ok: false, error: { code: 'NATIVE_FAILURE', message: 'Useful failure' } });
       if (reply.ok) throw new Error('Expected failure');
-      expect(reply.error.details).toEqual({ safe: 'kept' });
+      expect(reply.error.details).toEqual({ safe: 'kept', mutationStatus: 'potentiallyApplied' });
     }
   });
 
@@ -286,7 +344,7 @@ describe('MacOSBackend', { timeout: 25_000 }, () => {
     const reply = await backend.execute(mutationRequest(text), new AbortController().signal);
     expect(reply).toMatchObject({ ok: false, error: { code: 'NATIVE_FAILURE', message: 'Useful failure' } });
     if (reply.ok) throw new Error('Expected failure');
-    expect(reply.error.details).toEqual({ safe: 'kept' });
+    expect(reply.error.details).toEqual({ safe: 'kept', mutationStatus: 'potentiallyApplied' });
   });
 
   it('rejects structured supplied text reflected as the complete mutation target', async () => {

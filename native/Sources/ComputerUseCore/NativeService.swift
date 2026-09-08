@@ -28,7 +28,12 @@ public final class NativeService {
                 return .failure(command: request.command, code: "UNSUPPORTED_ACTION", message: "This command is not implemented by this helper version")
             }
         } catch let failure as NativeFailure {
-            return .failure(command: request.command, code: failure.code, message: failure.message)
+            return .failure(
+                command: request.command,
+                code: failure.code,
+                message: failure.message,
+                details: failure.details
+            )
         } catch {
             return .failure(command: request.command, code: "NATIVE_FAILURE", message: "Native command failed")
         }

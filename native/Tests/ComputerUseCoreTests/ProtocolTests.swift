@@ -59,6 +59,29 @@ final class ProtocolTests: XCTestCase {
             XCTAssertNil(WireRequest.decode(data: try JSONSerialization.data(withJSONObject: request)))
         }
     }
+
+    func testMutationStatusWireSpellingsMatchSharedFixture() throws {
+        let fixture = try contractFixture(named: "native-replies.json")
+        let statuses = try XCTUnwrap(fixture["mutationStatuses"] as? [[String: Any]])
+        let fixtureValues = try statuses.map { try XCTUnwrap($0["wire"] as? String) }
+        let invalidValues = try XCTUnwrap(fixture["invalidMutationStatuses"] as? [String])
+        XCTAssertEqual(Set(fixtureValues), Set(MutationStatus.allCases.map(\.rawValue)))
+        for value in invalidValues { XCTAssertNil(MutationStatus(rawValue: value), value) }
+
+        for value in fixtureValues {
+            let status = try XCTUnwrap(MutationStatus(rawValue: value))
+            let reply = WireReply.failure(
+                command: .press,
+                code: "NATIVE_FAILURE",
+                message: "Mutation failed",
+                details: ["mutationStatus": .string(status.rawValue)]
+            )
+            let object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(reply)) as? [String: Any]
+            let error = try XCTUnwrap(object?["error"] as? [String: Any])
+            let details = try XCTUnwrap(error["details"] as? [String: Any])
+            XCTAssertEqual(details["mutationStatus"] as? String, value)
+        }
+    }
 }
 
 private func validRequestsForEveryCommandForm() -> [[String: Any]] {
@@ -91,12 +114,20 @@ private struct ProtocolFixture {
     let request: [String: Any]
 }
 
-private func protocolFixtures() throws -> [ProtocolFixture] {
+private func contractFixture(named name: String) throws -> [String: Any] {
     let url = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        .appendingPathComponent("contracts/fixtures/native-protocol.json")
-    let object = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
-    return (object["cases"] as! [[String: Any]]).map {
-        ProtocolFixture(name: $0["name"] as! String, valid: $0["valid"] as! Bool, request: $0["request"] as! [String: Any])
+        .appendingPathComponent("contracts/fixtures/\(name)")
+    return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+}
+
+private func protocolFixtures() throws -> [ProtocolFixture] {
+    let object = try contractFixture(named: "native-protocol.json")
+    return try XCTUnwrap(object["cases"] as? [[String: Any]]).map {
+        ProtocolFixture(
+            name: try XCTUnwrap($0["name"] as? String),
+            valid: try XCTUnwrap($0["valid"] as? Bool),
+            request: try XCTUnwrap($0["request"] as? [String: Any])
+        )
     }
 }

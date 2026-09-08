@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import type { Backend, JsonValue, Reply, Request } from '../core/protocol.js';
+import type { Backend, JsonValue, MutationStatus, Reply, Request } from '../core/protocol.js';
 
 const PROTOCOL_VERSION = '1';
 const MAX_STDOUT_BYTES = 16 * 1024 * 1024;
@@ -73,7 +73,7 @@ export class MacOSBackend implements Backend {
       return syntheticFailure(request, 'PROTOCOL_ERROR', 'Native helper returned an invalid response', execution.requestDispatched);
     }
     try {
-      return projectReply(value, request)
+      return projectReply(value, request, execution.requestDispatched)
         ?? syntheticFailure(request, 'PROTOCOL_ERROR', 'Native helper returned an invalid response', execution.requestDispatched);
     } catch {
       return syntheticFailure(request, 'PROTOCOL_ERROR', 'Native helper returned an invalid response', execution.requestDispatched);
@@ -184,7 +184,7 @@ function failure(request: Request, code: string, message: string): Reply {
   return { schemaVersion: 1, ok: false, command: request.command, error: { code, message } };
 }
 
-function projectReply(value: unknown, request: Request): Reply | undefined {
+function projectReply(value: unknown, request: Request, requestDispatched: boolean): Reply | undefined {
   if (!isRecord(value) || value.schemaVersion !== 1 || typeof value.ok !== 'boolean'
     || value.command !== request.command) return undefined;
   const supplied = suppliedValue(request);
@@ -192,7 +192,13 @@ function projectReply(value: unknown, request: Request): Reply | undefined {
     if (!isRecord(value.error) || typeof value.error.code !== 'string' || typeof value.error.message !== 'string'
       || (value.error.details !== undefined && !isJsonRecord(value.error.details))
       || !STABLE_ERROR_CODES.has(value.error.code)) return undefined;
-    const details = value.error.details === undefined ? undefined : projectDetails(value.error.details, supplied);
+    const wireStatus = readMutationStatus(value.error.details);
+    if (wireStatus === null) return undefined;
+    const publicStatus = mutatesDesktop(request.command)
+      && (wireStatus === 'potentiallyApplied' || (wireStatus === undefined && requestDispatched))
+      ? 'potentiallyApplied'
+      : undefined;
+    const details = projectDetails(value.error.details ?? {}, supplied, publicStatus);
     return {
       schemaVersion: 1,
       ok: false,
@@ -337,8 +343,19 @@ function projectResultValue(field: ResultField, value: unknown, supplied: Suppli
   return reflectsSuppliedValue(value, supplied) ? undefined : value;
 }
 
-function projectDetails(value: Record<string, JsonValue>, supplied: SuppliedValue | undefined): Record<string, JsonValue> | undefined {
-  const mutationStatus = value.mutationStatus === 'potentiallyApplied' ? 'potentiallyApplied' : undefined;
+function readMutationStatus(value: Record<string, JsonValue> | undefined): MutationStatus | undefined | null {
+  if (value === undefined || !Object.hasOwn(value, 'mutationStatus')) return undefined;
+  if (value.mutationStatus === 'notStarted' || value.mutationStatus === 'potentiallyApplied') {
+    return value.mutationStatus;
+  }
+  return null;
+}
+
+function projectDetails(
+  value: Record<string, JsonValue>,
+  supplied: SuppliedValue | undefined,
+  mutationStatus: 'potentiallyApplied' | undefined,
+): Record<string, JsonValue> | undefined {
   const freeForm: Record<string, JsonValue> = {};
   for (const [key, item] of Object.entries(value)) {
     if (key !== 'mutationStatus') freeForm[key] = item;
@@ -347,7 +364,7 @@ function projectDetails(value: Record<string, JsonValue>, supplied: SuppliedValu
   const projected = contaminatedRoot ? undefined : projectFreeFormRecord(freeForm, supplied);
   if (projected === undefined) return mutationStatus === undefined ? undefined : { mutationStatus };
   if (mutationStatus !== undefined) projected.mutationStatus = mutationStatus;
-  return projected;
+  return Object.keys(projected).length === 0 ? undefined : projected;
 }
 
 function projectFreeFormRecord(value: Record<string, JsonValue>, supplied: SuppliedValue | undefined): Record<string, JsonValue> | undefined {

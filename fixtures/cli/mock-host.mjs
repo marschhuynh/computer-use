@@ -152,6 +152,20 @@ if (process.argv.slice(2).includes('--protocol-version')) {
           },
         })}\n`);
         break;
+      case 'mutation-status':
+        writeAndExit(`${JSON.stringify({
+          schemaVersion: 1,
+          ok: false,
+          command: request.command,
+          error: {
+            code: 'NATIVE_FAILURE',
+            message: 'Mutation failed',
+            details: request.text === '__missing__'
+              ? { safe: 'kept' }
+              : { mutationStatus: request.text ?? 'potentiallyApplied', safe: 'kept' },
+          },
+        })}\n`);
+        break;
       case 'stable-error-code':
         writeAndExit(`${JSON.stringify({
           schemaVersion: 1,

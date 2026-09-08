@@ -412,6 +412,42 @@ final class SnapshotTests: XCTestCase {
         guard case let .string(snapshotID)? = reply.data?["snapshotId"] else { return XCTFail("missing snapshot ID") }
         XCTAssertNoThrow(try store.readSnapshot(id: snapshotID))
     }
+
+    func testNativeFailureDetailsRoundTripThroughDispatcher() throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try treeFixture("save-cancel")
+        let lock = DesktopLock(rootURL: root)
+        let now = Date(timeIntervalSince1970: 1_789_000_000)
+        let service = SnapshotService(
+            lock: lock,
+            store: StateStore(rootURL: root, now: { now }),
+            resolve: { _ in fixture.target },
+            observe: { _, _ in
+                throw NativeFailure(
+                    "NATIVE_FAILURE",
+                    "Injected observation failure",
+                    details: ["mutationStatus": .string("notStarted"), "safe": .string("kept")]
+                )
+            },
+            now: { now }
+        )
+        let request = try XCTUnwrap(WireRequest.decode([
+            "schemaVersion": 1,
+            "command": "snapshot",
+            "target": ["pid": 42, "windowId": 7],
+            "tree": ["maxDepth": 8, "maxElements": 500, "hintMode": "full"],
+            "options": ["timeoutMs": 1_000, "cursor": "off"]
+        ]))
+
+        let reply = NativeService(snapshotService: service).execute(request)
+
+        XCTAssertEqual(reply.error?.code, "NATIVE_FAILURE")
+        XCTAssertEqual(reply.error?.details, [
+            "mutationStatus": .string("notStarted"),
+            "safe": .string("kept")
+        ])
+    }
 }
 
 private func treeFixture(_ name: String) throws -> AXTreeSnapshot {

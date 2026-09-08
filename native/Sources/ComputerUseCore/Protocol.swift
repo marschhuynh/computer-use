@@ -4,13 +4,19 @@ public let protocolVersion = 1
 public let maximumTimeoutMilliseconds = 120_000
 public let maximumSafeInteger = 9_007_199_254_740_991
 
+public enum MutationStatus: String, Codable, CaseIterable {
+    case notStarted, potentiallyApplied
+}
+
 public struct NativeFailure: Error, Equatable {
     public let code: String
     public let message: String
+    public let details: [String: JSONValue]?
 
-    public init(_ code: String, _ message: String) {
+    public init(_ code: String, _ message: String, details: [String: JSONValue]? = nil) {
         self.code = code
         self.message = message
+        self.details = details
     }
 }
 
@@ -34,7 +40,7 @@ public struct WireRequest {
     }
 }
 
-public indirect enum JSONValue: Codable {
+public indirect enum JSONValue: Codable, Equatable {
     case null, bool(Bool), number(Double), string(String), array([JSONValue]), object([String: JSONValue])
 
     public init(from decoder: Decoder) throws {
@@ -63,6 +69,7 @@ public indirect enum JSONValue: Codable {
 public struct WireError: Codable, Equatable {
     public let code: String
     public let message: String
+    public let details: [String: JSONValue]?
 }
 
 public struct WireReply: Encodable {
@@ -87,8 +94,18 @@ public struct WireReply: Encodable {
         WireReply(ok: true, command: command.rawValue, data: data, error: nil)
     }
 
-    public static func failure(command: WireCommand? = nil, code: String, message: String) -> WireReply {
-        WireReply(ok: false, command: command?.rawValue, data: nil, error: WireError(code: code, message: message))
+    public static func failure(
+        command: WireCommand? = nil,
+        code: String,
+        message: String,
+        details: [String: JSONValue]? = nil
+    ) -> WireReply {
+        WireReply(
+            ok: false,
+            command: command?.rawValue,
+            data: nil,
+            error: WireError(code: code, message: message, details: details)
+        )
     }
 }
 
