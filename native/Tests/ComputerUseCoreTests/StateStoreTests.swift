@@ -134,9 +134,11 @@ final class DesktopLockTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let log = root.appendingPathComponent("critical.log")
         let first = try spawnLockHelper(root: root, log: log, holdMicroseconds: 150_000)
+        defer { terminateAndWait(first) }
         let second = try spawnLockHelper(root: root, log: log, holdMicroseconds: 150_000)
-        first.waitUntilExit()
-        second.waitUntilExit()
+        defer { terminateAndWait(second) }
+        try waitForExit(first)
+        try waitForExit(second)
         XCTAssertEqual(first.terminationStatus, 0)
         XCTAssertEqual(second.terminationStatus, 0)
 
@@ -155,14 +157,16 @@ final class DesktopLockTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let ready = root.appendingPathComponent("ready")
         let owner = try spawnLockHelper(root: root, log: root.appendingPathComponent("owner.log"), holdForever: true, ready: ready)
+        defer { terminateAndWait(owner) }
         try waitForFile(ready)
         XCTAssertEqual(kill(owner.processIdentifier, SIGKILL), 0)
-        owner.waitUntilExit()
+        try waitForExit(owner)
         XCTAssertEqual(owner.terminationReason, .uncaughtSignal)
         XCTAssertEqual(owner.terminationStatus, SIGKILL)
 
         let successor = try spawnLockHelper(root: root, log: root.appendingPathComponent("successor.log"), holdMicroseconds: 0)
-        successor.waitUntilExit()
+        defer { terminateAndWait(successor) }
+        try waitForExit(successor)
         XCTAssertEqual(successor.terminationStatus, 0)
     }
 
@@ -171,6 +175,7 @@ final class DesktopLockTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let ready = root.appendingPathComponent("ready")
         let owner = try spawnLockHelper(root: root, log: root.appendingPathComponent("owner.log"), holdMicroseconds: 500_000, ready: ready)
+        defer { terminateAndWait(owner) }
         try waitForFile(ready)
 
         let start = DispatchTime.now().uptimeNanoseconds
@@ -179,7 +184,7 @@ final class DesktopLockTests: XCTestCase {
         }
         let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000_000
         XCTAssertLessThan(elapsed, 0.5)
-        owner.waitUntilExit()
+        try waitForExit(owner)
         XCTAssertEqual(owner.terminationStatus, 0)
     }
 
@@ -264,6 +269,25 @@ private func spawnLockHelper(
     process.standardError = Pipe()
     try process.run()
     return process
+}
+
+private func waitForExit(_ process: Process, timeout: TimeInterval = 5) throws {
+    let deadline = Date().addingTimeInterval(timeout)
+    while process.isRunning && Date() < deadline { usleep(10_000) }
+    guard !process.isRunning else { throw NativeFailure("TIMEOUT", "Lock helper did not exit") }
+    process.waitUntilExit()
+}
+
+private func terminateAndWait(_ process: Process) {
+    guard process.isRunning else {
+        process.waitUntilExit()
+        return
+    }
+    process.terminate()
+    let deadline = Date().addingTimeInterval(2)
+    while process.isRunning && Date() < deadline { usleep(10_000) }
+    if process.isRunning { _ = kill(process.processIdentifier, SIGKILL) }
+    process.waitUntilExit()
 }
 
 private func waitForFile(_ url: URL) throws {
