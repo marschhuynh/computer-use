@@ -67,97 +67,384 @@ public struct TargetApplication: Codable, Equatable {
 
 public struct TargetInventory: Codable, Equatable {
     public let apps: [TargetApplication]
+}
 
-    public static func live() -> TargetInventory {
-        let apps = NSWorkspace.shared.runningApplications.compactMap { application -> TargetApplication? in
-            guard let launchDate = application.launchDate else { return nil }
-            let pid = Int(application.processIdentifier)
-            let axWindows = axWindows(for: application.processIdentifier)
-            let cgWindows = cgWindows(for: pid)
-            let windows = axWindows.flatMap { ax in
-                cgWindows.filter { cg in matches(ax: ax, cg: cg) }.map {
-                    TargetWindow(ax: ax, cg: CGWindowMetadata(id: $0.id, title: $0.title, bounds: $0.bounds, onScreen: $0.onScreen, minimized: ax.minimized == true))
-                }
+public struct ProcessMetadata: Equatable, Sendable {
+    public let name: String
+    public let pid: Int
+    public let launchDate: String?
+    public let bundleId: String?
+
+    public init(name: String, pid: Int, launchDate: String?, bundleId: String?) {
+        self.name = name
+        self.pid = pid
+        self.launchDate = launchDate
+        self.bundleId = bundleId
+    }
+
+    init(application: TargetApplication) {
+        name = application.name
+        pid = application.pid
+        launchDate = application.launchDate
+        bundleId = application.bundleId
+    }
+}
+
+public struct TargetResolverProvider {
+    public let listApplications: () async throws -> [ProcessMetadata]
+    public let windowsForPID: (Int, CommandContext) throws -> [TargetWindow]
+
+    public init(
+        listApplications: @escaping () async throws -> [ProcessMetadata],
+        windowsForPID: @escaping (Int, CommandContext) throws -> [TargetWindow]
+    ) {
+        self.listApplications = listApplications
+        self.windowsForPID = windowsForPID
+    }
+
+    public static var live: TargetResolverProvider {
+        TargetResolverProvider(
+            listApplications: {
+                await MainActor.run { liveProcessMetadata() }
+            },
+            windowsForPID: { pid, context in
+                try liveWindows(for: pid, context: context)
             }
-            return TargetApplication(name: application.localizedName ?? "", pid: pid, launchDate: ISO8601DateFormatter().string(from: launchDate), bundleId: application.bundleIdentifier, windows: windows)
-        }
-        return TargetInventory(apps: apps)
+        )
     }
 }
 
 public final class TargetResolver {
-    private let inventory: TargetInventory
+    private let provider: TargetResolverProvider
 
-    public init(inventory: TargetInventory = .live()) { self.inventory = inventory }
+    public init() {
+        provider = .live
+    }
 
-    public func resolve(_ selector: TargetSelector) throws -> ResolvedTarget {
-        let app: TargetApplication
+    public init(inventory: TargetInventory) {
+        provider = TargetResolverProvider(
+            listApplications: { inventory.apps.map(ProcessMetadata.init(application:)) },
+            windowsForPID: { pid, _ in
+                inventory.apps.first(where: { $0.pid == pid })?.windows ?? []
+            }
+        )
+    }
+
+    init(provider: TargetResolverProvider) {
+        self.provider = provider
+    }
+
+    public func resolve(
+        _ selector: TargetSelector,
+        context: CommandContext
+    ) async throws -> ResolvedTarget {
+        try context.check()
+        let applications = try await provider.listApplications()
+        try context.check()
+
+        let selected: [ProcessMetadata]
         switch selector {
         case let .app(name, _):
-            let matches = inventory.apps.filter { $0.name == name || $0.bundleId == name }
-            guard matches.count == 1 else { throw NativeFailure(matches.isEmpty ? "TARGET_NOT_FOUND" : "AMBIGUOUS_TARGET", "Application selection is not unique") }
-            app = matches[0]
+            selected = applications.filter { $0.name == name || $0.bundleId == name }
         case let .pid(pid, _):
-            guard let match = inventory.apps.first(where: { $0.pid == pid }) else { throw NativeFailure("TARGET_NOT_FOUND", "Process was not found") }
-            app = match
+            selected = applications.filter { $0.pid == pid }
         }
-        guard let launchDate = app.launchDate else { throw NativeFailure("TARGET_NOT_FOUND", "Process start identity is unavailable") }
-        let windowID: Int?
-        switch selector { case let .app(_, id), let .pid(_, id): windowID = id }
-        let candidates = app.windows.filter { windowID == nil || $0.cg.id == windowID }
-        guard !candidates.isEmpty else { throw NativeFailure("TARGET_NOT_FOUND", "Window was not found") }
+        guard selected.count == 1 else {
+            throw NativeFailure(
+                selected.isEmpty ? "TARGET_NOT_FOUND" : "AMBIGUOUS_TARGET",
+                "Application selection is not unique"
+            )
+        }
+        let application = selected[0]
+        guard let launchDate = application.launchDate, !launchDate.isEmpty else {
+            throw NativeFailure("TARGET_NOT_FOUND", "Process start identity is unavailable")
+        }
+
+        try context.check()
+        let windows = try provider.windowsForPID(application.pid, context)
+        try context.check()
+        let requestedWindow: Int?
+        switch selector {
+        case let .app(_, windowID), let .pid(_, windowID):
+            requestedWindow = windowID
+        }
+        let candidates = windows.filter {
+            requestedWindow == nil || $0.cg.id == requestedWindow
+        }
+        guard !candidates.isEmpty else {
+            throw NativeFailure("TARGET_NOT_FOUND", "Window was not found")
+        }
         let eligible = candidates.filter { $0.cg.onScreen && !$0.cg.minimized }
-        if eligible.isEmpty { throw NativeFailure("INELIGIBLE_TARGET", "No eligible window is available") }
-        guard eligible.count == 1 else { throw NativeFailure("AMBIGUOUS_TARGET", "Window selection is not unique") }
-        let window = eligible[0]
-        return ResolvedTarget(identity: TargetIdentity(pid: app.pid, launchDate: launchDate, bundleId: app.bundleId, windowId: window.cg.id), title: window.cg.title ?? "", bounds: window.cg.bounds)
-    }
-
-    public func validate(_ identity: TargetIdentity) throws -> ResolvedTarget {
-        guard let app = inventory.apps.first(where: { $0.pid == identity.pid }), app.launchDate == identity.launchDate, app.bundleId == identity.bundleId else {
-            throw NativeFailure("STALE_SNAPSHOT", "Process identity changed")
+        guard !eligible.isEmpty else {
+            throw NativeFailure("INELIGIBLE_TARGET", "No eligible window is available")
         }
-        return try resolve(.pid(app.pid, windowId: identity.windowId))
+        guard eligible.count == 1 else {
+            throw NativeFailure("AMBIGUOUS_TARGET", "Window selection is not unique")
+        }
+        let window = eligible[0]
+        try context.check()
+        return ResolvedTarget(
+            identity: TargetIdentity(
+                pid: application.pid,
+                launchDate: launchDate,
+                bundleId: application.bundleId,
+                windowId: window.cg.id
+            ),
+            title: window.cg.title ?? "",
+            bounds: window.cg.bounds
+        )
+    }
+
+    public func validate(
+        _ identity: TargetIdentity,
+        context: CommandContext
+    ) async throws -> ResolvedTarget {
+        do {
+            let target = try await resolve(
+                .pid(identity.pid, windowId: identity.windowId),
+                context: context
+            )
+            guard target.identity == identity else {
+                throw NativeFailure("STALE_SNAPSHOT", "Process or window identity changed")
+            }
+            return target
+        } catch let failure as NativeFailure {
+            throw mapPersistedSelectionFailure(failure)
+        }
     }
 }
 
-private func axAttribute<T>(_ element: AXUIElement, _ attribute: String, as type: T.Type) -> T? {
-    var value: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }
-    return value as? T
+enum ProcessLaunchDate {
+    static func format(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
+    }
 }
 
-private func axBounds(_ element: AXUIElement) -> WindowBounds? {
-    guard let position: AXValue = axAttribute(element, kAXPositionAttribute, as: AXValue.self),
-          let size: AXValue = axAttribute(element, kAXSizeAttribute, as: AXValue.self) else { return nil }
+@MainActor
+private func liveProcessMetadata() -> [ProcessMetadata] {
+    NSWorkspace.shared.runningApplications.map { application in
+        ProcessMetadata(
+            name: application.localizedName ?? "",
+            pid: Int(application.processIdentifier),
+            launchDate: application.launchDate.map(ProcessLaunchDate.format),
+            bundleId: application.bundleIdentifier
+        )
+    }
+}
+
+private func mapPersistedSelectionFailure(_ failure: NativeFailure) -> NativeFailure {
+    switch failure.code {
+    case "TARGET_NOT_FOUND", "AMBIGUOUS_TARGET", "INELIGIBLE_TARGET":
+        return NativeFailure(
+            "STALE_SNAPSHOT",
+            "Recorded target is no longer eligible or unique"
+        )
+    default:
+        return failure
+    }
+}
+
+private func resolverReadFailure(_ status: AXError) -> NativeFailure {
+    if status == .apiDisabled {
+        return NativeFailure("PERMISSION_DENIED", "Accessibility access is unavailable")
+    }
+    return NativeFailure(
+        "NATIVE_FAILURE",
+        "Window identity could not be observed reliably"
+    )
+}
+
+func resolverOptionalRead<Value>(
+    status: AXError,
+    result: AXReadResult<Value>
+) throws -> Value? {
+    switch result {
+    case let .value(value):
+        return value
+    case .unavailable:
+        return nil
+    case .failure:
+        throw resolverReadFailure(status)
+    }
+}
+
+private func resolverString(
+    _ element: AXUIElement,
+    _ attribute: String
+) throws -> String? {
+    let read = liveAXAttribute(element, attribute)
+    return try resolverOptionalRead(
+        status: read.status,
+        result: axReadResult(
+            status: read.status,
+            value: read.value,
+            expectedTypeID: CFStringGetTypeID(),
+            decode: { $0 as? String }
+        )
+    )
+}
+
+private func resolverBool(
+    _ element: AXUIElement,
+    _ attribute: String
+) throws -> Bool? {
+    let read = liveAXAttribute(element, attribute)
+    return try resolverOptionalRead(
+        status: read.status,
+        result: axReadResult(
+            status: read.status,
+            value: read.value,
+            expectedTypeID: CFBooleanGetTypeID(),
+            decode: { $0 as? Bool }
+        )
+    )
+}
+
+private func resolverBounds(_ element: AXUIElement) throws -> WindowBounds? {
+    let positionRead = liveAXAttribute(element, kAXPositionAttribute)
+    let sizeRead = liveAXAttribute(element, kAXSizeAttribute)
+    let position: AXReadResult<AXValue> = axReadResult(
+        status: positionRead.status,
+        value: positionRead.value,
+        expectedTypeID: AXValueGetTypeID(),
+        decode: { $0 as! AXValue }
+    )
+    let size: AXReadResult<AXValue> = axReadResult(
+        status: sizeRead.status,
+        value: sizeRead.value,
+        expectedTypeID: AXValueGetTypeID(),
+        decode: { $0 as! AXValue }
+    )
+    guard let positionValue = try resolverOptionalRead(
+        status: positionRead.status,
+        result: position
+    ), let sizeValue = try resolverOptionalRead(
+        status: sizeRead.status,
+        result: size
+    ) else {
+        return nil
+    }
+    guard AXValueGetType(positionValue) == .cgPoint,
+          AXValueGetType(sizeValue) == .cgSize else {
+        throw NativeFailure("NATIVE_FAILURE", "Window identity could not be observed reliably")
+    }
     var point = CGPoint.zero
     var dimensions = CGSize.zero
-    guard AXValueGetValue(position, .cgPoint, &point), AXValueGetValue(size, .cgSize, &dimensions) else { return nil }
-    return WindowBounds(x: point.x, y: point.y, width: dimensions.width, height: dimensions.height)
+    guard AXValueGetValue(positionValue, .cgPoint, &point),
+          AXValueGetValue(sizeValue, .cgSize, &dimensions) else {
+        throw NativeFailure("NATIVE_FAILURE", "Window identity could not be observed reliably")
+    }
+    return WindowBounds(
+        x: point.x,
+        y: point.y,
+        width: dimensions.width,
+        height: dimensions.height
+    )
 }
 
-private func axWindows(for pid: pid_t) -> [AXWindowMetadata] {
-    let app = AXUIElementCreateApplication(pid)
-    guard let values: CFArray = axAttribute(app, kAXWindowsAttribute, as: CFArray.self) else { return [] }
-    return (values as [AnyObject]).compactMap { value in
-        let element = unsafeBitCast(value, to: AXUIElement.self)
-        return AXWindowMetadata(role: axAttribute(element, kAXRoleAttribute, as: String.self), title: axAttribute(element, kAXTitleAttribute, as: String.self), bounds: axBounds(element), minimized: axAttribute(element, kAXMinimizedAttribute, as: Bool.self))
+private func liveWindows(for pid: Int, context: CommandContext) throws -> [TargetWindow] {
+    try context.check()
+    guard AXIsProcessTrusted() else {
+        throw NativeFailure("PERMISSION_DENIED", "Accessibility access is unavailable")
+    }
+    guard let nativePID = pid_t(exactly: pid), nativePID > 0 else {
+        throw NativeFailure("TARGET_NOT_FOUND", "Process was not found")
+    }
+    let application = AXUIElementCreateApplication(nativePID)
+    AXUIElementSetMessagingTimeout(application, 2.0)
+    var rawWindows: CFTypeRef?
+    let status = AXUIElementCopyAttributeValue(
+        application,
+        kAXWindowsAttribute as CFString,
+        &rawWindows
+    )
+    let windowsResult: AXReadResult<[AXUIElement]> = axReadResult(
+        status: status,
+        value: rawWindows,
+        expectedTypeID: CFArrayGetTypeID(),
+        decode: { value in
+            let array = value as! CFArray
+            return decodeAXArray(
+                array as [AnyObject],
+                expectedElementTypeID: AXUIElementGetTypeID(),
+                decode: { unsafeBitCast($0, to: AXUIElement.self) }
+            )
+        }
+    )
+    let windowElements: [AXUIElement]
+    switch windowsResult {
+    case let .value(values): windowElements = values
+    case .unavailable: windowElements = []
+    case .failure: throw resolverReadFailure(status)
+    }
+
+    var axWindows: [AXWindowMetadata] = []
+    for element in windowElements {
+        try context.check()
+        axWindows.append(AXWindowMetadata(
+            role: try resolverString(element, kAXRoleAttribute),
+            title: try resolverString(element, kAXTitleAttribute),
+            bounds: try resolverBounds(element),
+            minimized: try resolverBool(element, kAXMinimizedAttribute)
+        ))
+    }
+    let cgWindows = try liveCGWindows(for: pid)
+    return axWindows.flatMap { ax in
+        cgWindows.filter { matches(ax: ax, cg: $0) }.map { cg in
+            TargetWindow(
+                ax: ax,
+                cg: CGWindowMetadata(
+                    id: cg.id,
+                    title: cg.title,
+                    bounds: cg.bounds,
+                    onScreen: cg.onScreen,
+                    minimized: ax.minimized == true
+                )
+            )
+        }
     }
 }
 
-private func cgWindows(for pid: Int) -> [CGWindowMetadata] {
-    guard let values = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return [] }
-    return values.compactMap { value in
-        guard value[kCGWindowOwnerPID as String] as? Int == pid,
-              let id = value[kCGWindowNumber as String] as? Int,
+private func liveCGWindows(for pid: Int) throws -> [CGWindowMetadata] {
+    guard let values = CGWindowListCopyWindowInfo(
+        [.optionAll, .excludeDesktopElements],
+        kCGNullWindowID
+    ) as? [[String: Any]] else {
+        throw NativeFailure("NATIVE_FAILURE", "Window inventory could not be read")
+    }
+    return try values.compactMap { value in
+        guard value[kCGWindowOwnerPID as String] as? Int == pid else { return nil }
+        guard let id = value[kCGWindowNumber as String] as? Int, id > 0,
               let dictionary = value[kCGWindowBounds as String] as? [String: CGFloat],
-              let x = dictionary["X"], let y = dictionary["Y"], let width = dictionary["Width"], let height = dictionary["Height"] else { return nil }
-        return CGWindowMetadata(id: id, title: value[kCGWindowName as String] as? String, bounds: WindowBounds(x: x, y: y, width: width, height: height), onScreen: value[kCGWindowIsOnscreen as String] as? Bool ?? false, minimized: false)
+              let x = dictionary["X"],
+              let y = dictionary["Y"],
+              let width = dictionary["Width"],
+              let height = dictionary["Height"],
+              x.isFinite,
+              y.isFinite,
+              width.isFinite,
+              height.isFinite,
+              width >= 0,
+              height >= 0 else {
+            throw NativeFailure("NATIVE_FAILURE", "Window inventory contained invalid metadata")
+        }
+        return CGWindowMetadata(
+            id: id,
+            title: value[kCGWindowName as String] as? String,
+            bounds: WindowBounds(x: x, y: y, width: width, height: height),
+            onScreen: value[kCGWindowIsOnscreen as String] as? Bool ?? false,
+            minimized: false
+        )
     }
 }
 
 private func matches(ax: AXWindowMetadata, cg: CGWindowMetadata) -> Bool {
-    guard ax.role == "AXWindow", ax.title == cg.title, let bounds = ax.bounds else { return false }
+    guard ax.role == "AXWindow", ax.title == cg.title, let bounds = ax.bounds else {
+        return false
+    }
     return bounds == cg.bounds
 }
 

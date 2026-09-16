@@ -31,12 +31,14 @@ public final class SnapshotService {
     public init(
         lock: DesktopLock = DesktopLock(),
         store: StateStore = StateStore(),
-        resolve: @escaping Resolve = { selector, _ in try TargetResolver().resolve(selector) },
+        resolve: @escaping Resolve = { selector, context in
+            try await TargetResolver().resolve(selector, context: context)
+        },
         observe: @escaping Observe = { target, options, _ in
             try AXTree.capture(target: target, options: options)
         },
-        validateTarget: @escaping ValidateTarget = { identity, _ in
-            try TargetResolver().validate(identity)
+        validateTarget: @escaping ValidateTarget = { identity, context in
+            try await TargetResolver().validate(identity, context: context)
         }
     ) {
         self.lock = lock

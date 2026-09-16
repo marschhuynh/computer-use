@@ -2,52 +2,279 @@ import XCTest
 @testable import ComputerUseCore
 
 final class TargetResolverTests: XCTestCase {
-    func testDuplicateAppNamesAreNotSelected() throws {
+    func testDuplicateAppNamesAreNotSelected() async {
         let resolver = TargetResolver(inventory: .fixture("duplicate-apps"))
-        XCTAssertThrowsError(try resolver.resolve(.app("Editor", windowId: nil))) {
-            XCTAssertEqual(($0 as? NativeFailure)?.code, "AMBIGUOUS_TARGET")
+        await assertResolverFailure("AMBIGUOUS_TARGET") {
+            try await resolver.resolve(.app("Editor", windowId: nil), context: resolverContext())
         }
     }
 
-    func testPidReuseFailsIdentityValidation() throws {
+    func testPidReuseFailsIdentityValidation() async {
         let resolver = TargetResolver(inventory: .fixture("pid-reused"))
-        XCTAssertThrowsError(try resolver.validate(.init(pid: 42, launchDate: "old", bundleId: "com.example.Editor", windowId: 7))) {
-            XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
+        await assertResolverFailure("STALE_SNAPSHOT") {
+            try await resolver.validate(
+                .init(pid: 42, launchDate: "old", bundleId: "com.example.Editor", windowId: 7),
+                context: resolverContext()
+            )
         }
     }
 
-    func testMissingWindowRequiresExactlyOneEligibleWindow() throws {
+    func testMissingWindowRequiresExactlyOneEligibleWindow() async {
         let zero = TargetResolver(inventory: .fixture("zero-eligible-windows"))
-        XCTAssertThrowsError(try zero.resolve(.pid(42, windowId: nil))) {
-            XCTAssertEqual(($0 as? NativeFailure)?.code, "INELIGIBLE_TARGET")
+        await assertResolverFailure("INELIGIBLE_TARGET") {
+            try await zero.resolve(.pid(42, windowId: nil), context: resolverContext())
         }
         let multiple = TargetResolver(inventory: .fixture("multiple-eligible-windows"))
-        XCTAssertThrowsError(try multiple.resolve(.pid(42, windowId: nil))) {
-            XCTAssertEqual(($0 as? NativeFailure)?.code, "AMBIGUOUS_TARGET")
+        await assertResolverFailure("AMBIGUOUS_TARGET") {
+            try await multiple.resolve(.pid(42, windowId: nil), context: resolverContext())
         }
     }
 
-    func testDuplicateAXToCGCandidatesAreRejected() throws {
+    func testDuplicateAXToCGCandidatesAreRejected() async {
         let resolver = TargetResolver(inventory: .fixture("duplicate-ax-cg"))
-        XCTAssertThrowsError(try resolver.resolve(.pid(42, windowId: 7))) {
-            XCTAssertEqual(($0 as? NativeFailure)?.code, "AMBIGUOUS_TARGET")
+        await assertResolverFailure("AMBIGUOUS_TARGET") {
+            try await resolver.resolve(.pid(42, windowId: 7), context: resolverContext())
         }
     }
 
-    func testMinimizedAndOffSpaceWindowsAreIneligible() throws {
+    func testMinimizedAndOffSpaceWindowsAreIneligible() async {
         for fixture in ["minimized-window", "off-space-window"] {
             let resolver = TargetResolver(inventory: .fixture(fixture))
-            XCTAssertThrowsError(try resolver.resolve(.pid(42, windowId: 7)), fixture) {
-                XCTAssertEqual(($0 as? NativeFailure)?.code, "INELIGIBLE_TARGET")
+            await assertResolverFailure("INELIGIBLE_TARGET", message: fixture) {
+                try await resolver.resolve(.pid(42, windowId: 7), context: resolverContext())
             }
         }
+    }
+
+    func testAmbiguousApplicationDoesNotQueryAXWindows() async {
+        let queries = LockedValues<Int>()
+        let resolver = TargetResolver(provider: TargetResolverProvider(
+            listApplications: {
+                [
+                    ProcessMetadata(name: "Editor", pid: 42, launchDate: "2026-09-08T10:00:00.000Z", bundleId: "com.example.Editor"),
+                    ProcessMetadata(name: "Editor", pid: 43, launchDate: "2026-09-08T10:00:00.001Z", bundleId: "com.example.Editor")
+                ]
+            },
+            windowsForPID: { pid, _ in
+                queries.append(pid)
+                XCTFail("window provider must not run for an ambiguous app")
+                return []
+            }
+        ))
+        await assertResolverFailure("AMBIGUOUS_TARGET") {
+            try await resolver.resolve(.app("Editor", windowId: nil), context: resolverContext())
+        }
+        XCTAssertEqual(queries.values, [])
+    }
+
+    func testExplicitPIDQueriesExactlyThatPID() async throws {
+        let queries = LockedValues<Int>()
+        let resolver = TargetResolver(provider: TargetResolverProvider(
+            listApplications: {
+                [
+                    ProcessMetadata(name: "Editor", pid: 42, launchDate: "2026-09-08T10:00:00.000Z", bundleId: "com.example.Editor"),
+                    ProcessMetadata(name: "Other", pid: 99, launchDate: "2026-09-08T10:00:00.000Z", bundleId: "com.example.Other")
+                ]
+            },
+            windowsForPID: { pid, _ in
+                queries.append(pid)
+                return [resolverWindow(id: 7)]
+            }
+        ))
+        let target = try await resolver.resolve(
+            .pid(42, windowId: 7),
+            context: resolverContext()
+        )
+        XCTAssertEqual(queries.values, [42])
+        XCTAssertEqual(target.identity.pid, 42)
+        XCTAssertEqual(target.identity.windowId, 7)
+    }
+
+    func testMillisecondSeparatedSameSecondLaunchesHaveDifferentIdentity() async {
+        let first = ProcessLaunchDate.format(Date(timeIntervalSince1970: 1_788_861_900.000))
+        let second = ProcessLaunchDate.format(Date(timeIntervalSince1970: 1_788_861_900.001))
+        XCTAssertTrue(first.hasSuffix(".000Z"), first)
+        XCTAssertTrue(second.hasSuffix(".001Z"), second)
+        XCTAssertNotEqual(first, second)
+
+        let resolver = TargetResolver(provider: TargetResolverProvider(
+            listApplications: {
+                [ProcessMetadata(name: "Editor", pid: 42, launchDate: second, bundleId: "com.example.Editor")]
+            },
+            windowsForPID: { _, _ in [resolverWindow(id: 7)] }
+        ))
+        await assertResolverFailure("STALE_SNAPSHOT") {
+            try await resolver.validate(
+                TargetIdentity(pid: 42, launchDate: first, bundleId: "com.example.Editor", windowId: 7),
+                context: resolverContext()
+            )
+        }
+    }
+
+    func testMissingLaunchDateRemainsMetadataButCannotBeTargeted() async {
+        let queries = LockedValues<Int>()
+        let metadata = ProcessMetadata(name: "Editor", pid: 42, launchDate: nil, bundleId: "com.example.Editor")
+        XCTAssertNil(metadata.launchDate)
+        let resolver = TargetResolver(provider: TargetResolverProvider(
+            listApplications: { [metadata] },
+            windowsForPID: { pid, _ in queries.append(pid); return [] }
+        ))
+        await assertResolverFailure("TARGET_NOT_FOUND") {
+            try await resolver.resolve(.pid(42, windowId: nil), context: resolverContext())
+        }
+        XCTAssertEqual(queries.values, [])
+    }
+
+    func testPersistedMissingWindowIsStaleButPermissionAndNativeFailuresSurvive() async {
+        let identity = TargetIdentity(
+            pid: 42,
+            launchDate: "2026-09-08T10:00:00.000Z",
+            bundleId: "com.example.Editor",
+            windowId: 7
+        )
+        let applications = {
+            [ProcessMetadata(name: "Editor", pid: 42, launchDate: identity.launchDate, bundleId: identity.bundleId)]
+        }
+        let missing = TargetResolver(provider: TargetResolverProvider(
+            listApplications: applications,
+            windowsForPID: { _, _ in [] }
+        ))
+        await assertResolverFailure("TARGET_NOT_FOUND") {
+            try await missing.resolve(.pid(42, windowId: 7), context: resolverContext())
+        }
+        await assertResolverFailure("STALE_SNAPSHOT") {
+            try await missing.validate(identity, context: resolverContext())
+        }
+
+        for code in ["PERMISSION_DENIED", "NATIVE_FAILURE"] {
+            let resolver = TargetResolver(provider: TargetResolverProvider(
+                listApplications: applications,
+                windowsForPID: { _, _ in throw NativeFailure(code, "classified provider failure") }
+            ))
+            await assertResolverFailure(code) {
+                try await resolver.validate(identity, context: resolverContext())
+            }
+        }
+    }
+
+    func testResolverUnavailableReadsRemainOptionalButHardFailuresStayClassified() throws {
+        let unavailable: AXReadResult<String> = .unavailable
+        XCTAssertNil(try resolverOptionalRead(status: .noValue, result: unavailable))
+
+        for (status, code) in [
+            (AXError.apiDisabled, "PERMISSION_DENIED"),
+            (.cannotComplete, "NATIVE_FAILURE"),
+            (.success, "NATIVE_FAILURE")
+        ] {
+            let failure: AXReadResult<String> = .failure
+            XCTAssertThrowsError(try resolverOptionalRead(status: status, result: failure)) {
+                XCTAssertEqual(($0 as? NativeFailure)?.code, code)
+            }
+        }
+    }
+
+    func testUnavailableAXMetadataCanCoexistWithValidSelectedWindow() async throws {
+        let bounds = WindowBounds(x: 0, y: 0, width: 100, height: 100)
+        let unsupported = TargetWindow(
+            ax: AXWindowMetadata(
+                role: nil,
+                title: nil,
+                bounds: nil,
+                minimized: nil
+            ),
+            cg: CGWindowMetadata(
+                id: 8,
+                title: nil,
+                bounds: bounds,
+                onScreen: true,
+                minimized: false
+            )
+        )
+        let resolver = TargetResolver(provider: TargetResolverProvider(
+            listApplications: {
+                [ProcessMetadata(
+                    name: "Editor",
+                    pid: 42,
+                    launchDate: "2026-09-08T10:00:00.000Z",
+                    bundleId: "com.example.Editor"
+                )]
+            },
+            windowsForPID: { _, _ in [unsupported, resolverWindow(id: 7)] }
+        ))
+
+        let target = try await resolver.resolve(
+            .pid(42, windowId: 7),
+            context: resolverContext()
+        )
+        XCTAssertEqual(target.identity.windowId, 7)
+    }
+
+
+    func testEmptyFixtureHandlesAreNotProductionEqual() {
+        XCTAssertFalse(liveAXElementsAreIdentical(LiveAXElement(), LiveAXElement()))
     }
 }
 
 extension TargetInventory {
     static func fixture(_ name: String) -> TargetInventory {
         let url = Bundle.module.url(forResource: "inventories", withExtension: "json")!
-        let fixtures = try! JSONDecoder().decode([String: TargetInventory].self, from: Data(contentsOf: url))
+        let fixtures = try! JSONDecoder().decode(
+            [String: TargetInventory].self,
+            from: Data(contentsOf: url)
+        )
         return fixtures[name]!
+    }
+}
+
+private final class LockedValues<Value> {
+    private let lock = NSLock()
+    private var storage: [Value] = []
+
+    var values: [Value] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func append(_ value: Value) {
+        lock.lock()
+        storage.append(value)
+        lock.unlock()
+    }
+}
+
+private func resolverContext() -> CommandContext {
+    CommandContext(
+        timeoutMilliseconds: 1_000,
+        clock: NativeClock(
+            monotonicNow: { 0 },
+            wallNow: { Date(timeIntervalSince1970: 0) },
+            sleepNanoseconds: { _ in }
+        )
+    )
+}
+
+private func resolverWindow(id: Int) -> TargetWindow {
+    let bounds = WindowBounds(x: 0, y: 0, width: 100, height: 100)
+    return TargetWindow(
+        ax: AXWindowMetadata(role: "AXWindow", title: "Draft", bounds: bounds, minimized: false),
+        cg: CGWindowMetadata(id: id, title: "Draft", bounds: bounds, onScreen: true, minimized: false)
+    )
+}
+
+private func assertResolverFailure<T>(
+    _ code: String,
+    message: String = "",
+    file: StaticString = #filePath,
+    line: UInt = #line,
+    _ work: () async throws -> T
+) async {
+    do {
+        _ = try await work()
+        XCTFail(message.isEmpty ? "expected \(code)" : message, file: file, line: line)
+    } catch let failure as NativeFailure {
+        XCTAssertEqual(failure.code, code, message, file: file, line: line)
+    } catch {
+        XCTFail("unexpected error \(error)", file: file, line: line)
     }
 }

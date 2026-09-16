@@ -326,6 +326,16 @@ public struct LiveAXElement {
     init(_ rawValue: AXUIElement) { self.rawValue = rawValue }
 }
 
+public typealias AXElementIdentity = (LiveAXElement, LiveAXElement) -> Bool
+
+func liveAXElementsAreIdentical(
+    _ lhs: LiveAXElement,
+    _ rhs: LiveAXElement
+) -> Bool {
+    guard let left = lhs.rawValue, let right = rhs.rawValue else { return false }
+    return CFEqual(left, right)
+}
+
 public struct AXTreeObservation {
     public let snapshot: AXTreeSnapshot
     let liveElements: [Int: LiveAXElement]
@@ -601,7 +611,7 @@ private func liveAXTreeReader() -> AXTreeReader<AXUIElement> {
     )
 }
 
-private func liveAXAttribute(
+func liveAXAttribute(
     _ element: AXUIElement,
     _ attribute: String
 ) -> (status: AXError, value: CFTypeRef?) {
