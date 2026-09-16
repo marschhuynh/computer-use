@@ -21,12 +21,19 @@ public final class SnapshotService {
     public typealias Resolve = (TargetSelector, CommandContext) async throws -> ResolvedTarget
     public typealias Observe = (ResolvedTarget, TreeOptions, CommandContext) async throws -> AXTreeObservation
     public typealias ValidateTarget = (TargetIdentity, CommandContext) async throws -> ResolvedTarget
+    public typealias PrepareForeground = (ResolvedTarget, LiveAXElement, CommandContext) async throws -> Void
+    public typealias PrepareElement = (LiveAXElement, CommandContext) async throws -> Void
+    public typealias Preflight<Prepared> = (LiveAXElement, ResolvedTarget, CommandContext) async throws -> Prepared
+    public typealias Dispatch<Prepared, Result> = (Prepared, LiveAXElement, CommandContext) async throws -> Result
 
     private let lock: DesktopLock
     private let store: StateStore
     private let resolve: Resolve
     private let observe: Observe
     private let validateTarget: ValidateTarget
+    private let sameLiveElement: AXElementIdentity
+    private let prepareForeground: PrepareForeground
+    private let prepareElement: PrepareElement
 
     public init(
         lock: DesktopLock = DesktopLock(),
@@ -39,13 +46,21 @@ public final class SnapshotService {
         },
         validateTarget: @escaping ValidateTarget = { identity, context in
             try await TargetResolver().validate(identity, context: context)
-        }
+        },
+        sameLiveElement: AXElementIdentity? = nil,
+        prepareForeground: @escaping PrepareForeground = { _, _, _ in },
+        prepareElement: PrepareElement? = nil
     ) {
         self.lock = lock
         self.store = store
         self.resolve = resolve
         self.observe = observe
         self.validateTarget = validateTarget
+        self.sameLiveElement = sameLiveElement ?? liveAXElementsAreIdentical
+        self.prepareForeground = prepareForeground
+        self.prepareElement = prepareElement ?? { element, context in
+            try prepareLiveAXElementMessaging(element, context: context)
+        }
     }
 
     public func snapshot(
@@ -53,30 +68,38 @@ public final class SnapshotService {
         options: TreeOptions,
         context: CommandContext
     ) async throws -> SnapshotResult {
-        try await lock.withLock(context: context) {
+        try context.check()
+        return try await lock.withLock(context: context) {
             try context.check()
             try store.sweep(context: context)
             let target = try await resolve(selector, context)
             try context.check()
             let observation = try await observe(target, options, context)
-            guard observation.snapshot.target == target,
+            try context.check()
+            let refreshed = try await validateTarget(
+                observation.snapshot.target.identity,
+                context
+            )
+            try context.check()
+            guard refreshed == target,
+                  observation.snapshot.target == refreshed,
                   observation.snapshot.treeOptions == options else {
                 throw NativeFailure(
                     "STALE_SNAPSHOT",
                     "Target or traversal evidence changed during snapshot"
                 )
             }
-            try context.check()
             let created = context.wallNow
             let record = SnapshotRecord(
                 id: UUID().uuidString.lowercased(),
                 createdAt: timestamp(created),
                 expiresAt: timestamp(created.addingTimeInterval(snapshotLifetime)),
-                target: target,
+                target: refreshed,
                 treeOptions: options,
                 evidence: observation.snapshot.evidence
             )
             try store.writeSnapshot(record, context: context)
+            // Durable publication committed; do not check or roll back after return.
             return SnapshotResult(record: record, snapshot: observation.snapshot)
         }
     }
@@ -86,40 +109,132 @@ public final class SnapshotService {
         ref: Int,
         context: CommandContext,
         stateChanging: Bool,
-        preflight: (LiveAXElement, ResolvedTarget, CommandContext) async throws -> Prepared,
-        dispatch: (Prepared, CommandContext) async throws -> Result
+        preflight: @escaping Preflight<Prepared>,
+        dispatch: @escaping Dispatch<Prepared, Result>
     ) async throws -> Result {
-        try await lock.withLock(context: context) {
+        var dispatchEntered = false
+        do {
             try context.check()
-            try store.sweep(context: context)
-            let record = try store.readSnapshot(id: snapshotID, context: context)
-            let target = try await validateTarget(record.target.identity, context)
-            guard target == record.target else {
-                throw NativeFailure("STALE_SNAPSHOT", "Window evidence changed")
-            }
-            let live = try await observe(target, record.treeOptions, context)
-            let recorded = AXTreeSnapshot(
-                target: record.target,
-                treeOptions: record.treeOptions,
-                evidence: record.evidence
-            )
-            _ = try Self.validateEvidence(recorded, live: live.snapshot, ref: ref)
-            guard let element = live.liveElements[ref] else {
-                throw NativeFailure(
-                    "STALE_SNAPSHOT",
-                    "Live accessibility reference is unavailable"
+            return try await lock.withLock(context: context) {
+                try context.check()
+                try store.sweep(context: context)
+                let record = try store.readSnapshot(id: snapshotID, context: context)
+                let recorded = AXTreeSnapshot(
+                    target: record.target,
+                    treeOptions: record.treeOptions,
+                    evidence: record.evidence
                 )
+
+                let target = try await validateTarget(record.target.identity, context)
+                try context.check()
+                guard target == record.target else {
+                    throw NativeFailure("STALE_SNAPSHOT", "Window evidence changed")
+                }
+                let live = try await observe(target, record.treeOptions, context)
+                try context.check()
+                _ = try Self.validateEvidence(recorded, live: live.snapshot, ref: ref)
+                guard let element = live.liveElements[ref] else {
+                    throw NativeFailure("STALE_SNAPSHOT", "Live accessibility reference is unavailable")
+                }
+                let identityAfterObservation = try await validateTarget(
+                    record.target.identity,
+                    context
+                )
+                try context.check()
+                guard identityAfterObservation == record.target else {
+                    throw NativeFailure("STALE_SNAPSHOT", "Window evidence changed")
+                }
+
+                try await prepareElement(element, context)
+                _ = try await preflight(element, target, context)
+                try context.check()
+                let identityAfterPreflight = try await validateTarget(
+                    record.target.identity,
+                    context
+                )
+                try context.check()
+                guard identityAfterPreflight == record.target else {
+                    throw NativeFailure("STALE_SNAPSHOT", "Window evidence changed")
+                }
+
+                if stateChanging {
+                    try store.invalidateRecords(
+                        for: record.target.identity,
+                        context: context
+                    )
+                }
+                try context.check()
+
+                try await prepareForeground(target, element, context)
+                try context.check()
+
+                let freshTarget = try await validateTarget(record.target.identity, context)
+                try context.check()
+                guard freshTarget == record.target else {
+                    throw NativeFailure("STALE_SNAPSHOT", "Window evidence changed")
+                }
+                let freshLive = try await observe(
+                    freshTarget,
+                    record.treeOptions,
+                    context
+                )
+                try context.check()
+                _ = try Self.validateEvidence(
+                    recorded,
+                    live: freshLive.snapshot,
+                    ref: ref
+                )
+                guard let freshElement = freshLive.liveElements[ref] else {
+                    throw NativeFailure("STALE_SNAPSHOT", "Live accessibility reference is unavailable")
+                }
+                let identityAfterFreshObservation = try await validateTarget(
+                    record.target.identity,
+                    context
+                )
+                try context.check()
+                guard identityAfterFreshObservation == record.target else {
+                    throw NativeFailure("STALE_SNAPSHOT", "Window evidence changed")
+                }
+                guard sameLiveElement(element, freshElement) else {
+                    throw NativeFailure("STALE_SNAPSHOT", "Live accessibility element was replaced")
+                }
+
+                try await prepareElement(freshElement, context)
+                let freshlyPrepared = try await preflight(
+                    freshElement,
+                    freshTarget,
+                    context
+                )
+                try context.check()
+                let identityBeforeDispatch = try await validateTarget(
+                    record.target.identity,
+                    context
+                )
+                try context.check()
+                guard identityBeforeDispatch == record.target else {
+                    throw NativeFailure("STALE_SNAPSHOT", "Window evidence changed")
+                }
+                try await prepareElement(freshElement, context)
+                try context.check()
+
+                dispatchEntered = true
+                let result = try await dispatch(freshlyPrepared, freshElement, context)
+                // Successful dispatch is the action commit; no post-commit check.
+                return result
             }
-            let prepared = try await preflight(element, target, context)
-            try context.check()
-            if stateChanging {
-                try store.invalidateRecords(for: record.target.identity, context: context)
-            }
-            return try await dispatch(prepared, context)
+        } catch {
+            throw Self.attachingMutationStatus(
+                to: error,
+                status: dispatchEntered ? .potentiallyApplied : .notStarted
+            )
         }
     }
 
-    static func validateEvidence(_ recorded: AXTreeSnapshot, live: AXTreeSnapshot, ref: Int) throws -> AXRefEvidence {
+    static func validateEvidence(
+        _ recorded: AXTreeSnapshot,
+        live: AXTreeSnapshot,
+        ref: Int
+    ) throws -> AXRefEvidence {
         try AXEvidencePolicy.validate(recorded.evidence, options: recorded.treeOptions)
         try AXEvidencePolicy.validate(live.evidence, options: live.treeOptions)
         guard recorded.target == live.target,
@@ -130,9 +245,23 @@ public final class SnapshotService {
               let recordedRef = recorded.evidence.refs.first(where: { $0.ref == ref }),
               let liveRef = live.evidence.refs.first(where: { $0.ref == ref }),
               recordedRef == liveRef else {
-            throw NativeFailure("STALE_SNAPSHOT", "Snapshot evidence no longer matches the selected window")
+            throw NativeFailure(
+                "STALE_SNAPSHOT",
+                "Snapshot evidence no longer matches the selected window"
+            )
         }
         return liveRef
+    }
+
+    private static func attachingMutationStatus(
+        to error: Error,
+        status: MutationStatus
+    ) -> NativeFailure {
+        let failure = error as? NativeFailure
+            ?? NativeFailure("NATIVE_FAILURE", "Native command failed")
+        var details = failure.details ?? [:]
+        details["mutationStatus"] = .string(status.rawValue)
+        return NativeFailure(failure.code, failure.message, details: details)
     }
 }
 

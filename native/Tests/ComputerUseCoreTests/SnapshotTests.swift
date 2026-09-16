@@ -211,7 +211,9 @@ final class SnapshotTests: XCTestCase {
                 _ = identity
                 _ = context
                 return recorded.target
-            }
+            },
+            sameLiveElement: { _, _ in true },
+            prepareElement: { _, _ in }
         )
 
         await XCTAssertThrowsErrorAsync({
@@ -226,9 +228,8 @@ final class SnapshotTests: XCTestCase {
                     _ = context
                     XCTFail("preflight must not run")
                 },
-                dispatch: { prepared, context in
+                dispatch: { prepared, _, _ in
                     _ = prepared
-                    _ = context
                     XCTFail("dispatch must not run")
                 }
             )
@@ -266,8 +267,11 @@ final class SnapshotTests: XCTestCase {
                     _ = identity
                     _ = context
                     return snapshot.target
-                }
+                },
+                sameLiveElement: { _, _ in true },
+                prepareElement: { _, _ in }
             )
+            var preflightCount = 0
             var validDuringPreflight = false
             var invalidatedDuringAction = false
 
@@ -276,18 +280,21 @@ final class SnapshotTests: XCTestCase {
                 ref: 2,
                 context: snapshotCommandContext(wallNow: now),
                 stateChanging: stateChanging,
-                preflight: { element, target, context in
-                    _ = element
-                    _ = target
-                    _ = context
-                    validDuringPreflight = (try? store.readSnapshot(id: id, context: snapshotCommandContext(wallNow: now))) != nil
+                preflight: { _, _, _ in
+                    preflightCount += 1
+                    if preflightCount == 1 {
+                        validDuringPreflight = (try? store.readSnapshot(
+                            id: id,
+                            context: snapshotCommandContext(wallNow: now)
+                        )) != nil
+                    }
                 },
-                dispatch: { prepared, context in
+                dispatch: { prepared, _, _ in
                     _ = prepared
-                    _ = context
                     invalidatedDuringAction = (try? store.readSnapshot(id: id, context: snapshotCommandContext(wallNow: now))) == nil
                 }
             )
+            XCTAssertEqual(preflightCount, 2)
             XCTAssertTrue(validDuringPreflight)
             XCTAssertEqual(invalidatedDuringAction, stateChanging)
             XCTAssertEqual((try? store.readSnapshot(id: id, context: snapshotCommandContext(wallNow: now))) == nil, stateChanging)
@@ -320,7 +327,9 @@ final class SnapshotTests: XCTestCase {
                 _ = identity
                 _ = context
                 return snapshot.target
-            }
+            },
+            sameLiveElement: { _, _ in true },
+            prepareElement: { _, _ in }
         )
         var dispatched = false
 
@@ -336,9 +345,8 @@ final class SnapshotTests: XCTestCase {
                     _ = context
                     throw NativeFailure("INVALID_REQUEST", "Action-specific preparation failed")
                 },
-                dispatch: { prepared, context in
+                dispatch: { prepared, _, _ in
                     _ = prepared
-                    _ = context
                     dispatched = true
                 }
             )
@@ -374,7 +382,9 @@ final class SnapshotTests: XCTestCase {
                     _ = identity
                     _ = context
                     return snapshot.target
-                }
+                },
+                sameLiveElement: { _, _ in true },
+                prepareElement: { _, _ in }
             )
             var actionRan = false
 
@@ -389,9 +399,8 @@ final class SnapshotTests: XCTestCase {
                         _ = target
                         _ = context
                     },
-                    dispatch: { prepared, context in
+                    dispatch: { prepared, _, _ in
                         _ = prepared
-                        _ = context
                         actionRan = true
                     }
                 )
@@ -421,9 +430,12 @@ final class SnapshotTests: XCTestCase {
                 _ = identity
                 _ = context
                 return snapshot.target
-            }
+            },
+            sameLiveElement: { _, _ in true },
+            prepareElement: { _, _ in }
         )
 
+        var capturedFailure: NativeFailure?
         await XCTAssertThrowsErrorAsync({
             try await service.withValidatedSnapshotAction(
                 snapshotID: record.id,
@@ -436,13 +448,16 @@ final class SnapshotTests: XCTestCase {
                     _ = context
                     return "prepared"
                 },
-                dispatch: { prepared, context in
+                dispatch: { prepared, _, _ in
                     XCTAssertEqual(prepared, "prepared")
-                    _ = context
                     throw NativeFailure("NATIVE_FAILURE", "Dispatch failed")
                 }
             )
-        })
+        }) { error in
+            capturedFailure = error as? NativeFailure
+        }
+        let failure = try XCTUnwrap(capturedFailure)
+        XCTAssertEqual(failure.details?["mutationStatus"], .string("potentiallyApplied"))
         XCTAssertThrowsError(try store.readSnapshot(id: record.id, context: snapshotCommandContext(wallNow: now)))
     }
 
@@ -473,7 +488,9 @@ final class SnapshotTests: XCTestCase {
                 _ = identity
                 _ = context
                 return snapshot.target
-            }
+            },
+            sameLiveElement: { _, _ in true },
+            prepareElement: { _, _ in }
         )
         var preflightRan = false
         var dispatchRan = false
@@ -490,9 +507,8 @@ final class SnapshotTests: XCTestCase {
                     _ = context
                     preflightRan = true
                 },
-                dispatch: { prepared, context in
+                dispatch: { prepared, _, _ in
                     _ = prepared
-                    _ = context
                     dispatchRan = true
                 }
             )
@@ -534,7 +550,9 @@ final class SnapshotTests: XCTestCase {
                     _ = identity
                     _ = context
                     return snapshot.target
-                }
+                },
+                sameLiveElement: { _, _ in true },
+                prepareElement: { _, _ in }
             )
             var preflightRan = false
             var dispatchRan = false
@@ -551,9 +569,8 @@ final class SnapshotTests: XCTestCase {
                         _ = context
                         preflightRan = true
                     },
-                    dispatch: { prepared, context in
+                    dispatch: { prepared, _, _ in
                         _ = prepared
-                        _ = context
                         dispatchRan = true
                     }
                 )
@@ -586,7 +603,8 @@ final class SnapshotTests: XCTestCase {
                 _ = options
                 _ = context
                 return AXTreeObservation(snapshot: fixture, liveElements: [:])
-            }
+            },
+            validateTarget: { _, _ in fixture.target }
         )
         let native = NativeService(snapshotService: service)
         let request = try XCTUnwrap(WireRequest.decode([
