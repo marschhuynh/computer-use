@@ -5,10 +5,16 @@ import Foundation
 public final class NativeService {
     private let snapshotService: SnapshotService
     private let desktopLock: DesktopLock
+    private let targetResolver: TargetResolver
 
-    public init(snapshotService: SnapshotService = SnapshotService(), desktopLock: DesktopLock = DesktopLock()) {
+    public init(
+        snapshotService: SnapshotService = SnapshotService(),
+        desktopLock: DesktopLock = DesktopLock(),
+        targetResolver: TargetResolver = TargetResolver()
+    ) {
         self.snapshotService = snapshotService
         self.desktopLock = desktopLock
+        self.targetResolver = targetResolver
     }
 
     public func execute(_ request: WireRequest, context: CommandContext) async -> WireReply {
@@ -21,6 +27,15 @@ public final class NativeService {
                     try context.check()
                     return result
                 }
+            case .apps:
+                let apps = try await targetResolver.listApplications(context: context)
+                return .success(command: .apps, data: [
+                    "apps": .array(apps.map { app in .object([
+                        "name": .string(app.name),
+                        "pid": .number(Double(app.pid)),
+                        "bundleId": app.bundleId.map(JSONValue.string) ?? .null,
+                    ]) })
+                ])
             case .snapshot:
                 guard let selector = TargetSelector.decode(request.object["target"]),
                       let tree = decodeTreeOptions(request.object["tree"]) else {

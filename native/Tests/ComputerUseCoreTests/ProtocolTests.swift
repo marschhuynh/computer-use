@@ -9,14 +9,18 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testUnsupportedValidRequestStagesUntilItsTask() async throws {
+        // `apps` was implemented in Stage D; use a still-unsupported mutation
+        // command to prove unimplemented commands fail safe rather than dispatch.
         let request = try XCTUnwrap(WireRequest.decode([
             "schemaVersion": 1,
-            "command": "apps",
-            "options": ["timeoutMs": 1, "cursor": "on"]
+            "command": "press",
+            "snapshotId": "123e4567-e89b-42d3-a456-426614174000",
+            "ref": 1,
+            "options": ["timeoutMs": 15_000, "cursor": "on"]
         ]))
         let reply = await NativeService().execute(
             request,
-            context: CommandContext(timeoutMilliseconds: 1)
+            context: CommandContext(timeoutMilliseconds: 15_000)
         )
         XCTAssertEqual(reply.error?.code, "UNSUPPORTED_ACTION")
     }

@@ -134,6 +134,16 @@ public final class TargetResolver {
         self.provider = provider
     }
 
+    /// Enumerates running applications for the `apps` command. Unlike `resolve`,
+    /// this never selects a unique target, never requires launch identity, and
+    /// never filters by eligibility — it returns the inventory as observed.
+    public func listApplications(context: CommandContext) async throws -> [ProcessMetadata] {
+        try context.check()
+        let applications = try await provider.listApplications()
+        try context.check()
+        return applications
+    }
+
     public func resolve(
         _ selector: TargetSelector,
         context: CommandContext
