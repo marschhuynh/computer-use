@@ -34,8 +34,8 @@ public final class SnapshotService {
         resolve: @escaping Resolve = { selector, context in
             try await TargetResolver().resolve(selector, context: context)
         },
-        observe: @escaping Observe = { target, options, _ in
-            try AXTree.capture(target: target, options: options)
+        observe: @escaping Observe = { target, options, context in
+            try AXTree.capture(target: target, options: options, context: context)
         },
         validateTarget: @escaping ValidateTarget = { identity, context in
             try await TargetResolver().validate(identity, context: context)
@@ -55,7 +55,7 @@ public final class SnapshotService {
     ) async throws -> SnapshotResult {
         try await lock.withLock(context: context) {
             try context.check()
-            try store.sweep()
+            try store.sweep(context: context)
             let target = try await resolve(selector, context)
             try context.check()
             let observation = try await observe(target, options, context)
@@ -76,7 +76,7 @@ public final class SnapshotService {
                 treeOptions: options,
                 evidence: observation.snapshot.evidence
             )
-            try store.writeSnapshot(record)
+            try store.writeSnapshot(record, context: context)
             return SnapshotResult(record: record, snapshot: observation.snapshot)
         }
     }
@@ -91,8 +91,8 @@ public final class SnapshotService {
     ) async throws -> Result {
         try await lock.withLock(context: context) {
             try context.check()
-            try store.sweep()
-            let record = try store.readSnapshot(id: snapshotID)
+            try store.sweep(context: context)
+            let record = try store.readSnapshot(id: snapshotID, context: context)
             let target = try await validateTarget(record.target.identity, context)
             guard target == record.target else {
                 throw NativeFailure("STALE_SNAPSHOT", "Window evidence changed")
@@ -113,7 +113,7 @@ public final class SnapshotService {
             let prepared = try await preflight(element, target, context)
             try context.check()
             if stateChanging {
-                try store.invalidateRecords(for: record.target.identity)
+                try store.invalidateRecords(for: record.target.identity, context: context)
             }
             return try await dispatch(prepared, context)
         }

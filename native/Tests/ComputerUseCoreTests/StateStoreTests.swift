@@ -9,8 +9,8 @@ final class StateStoreTests: XCTestCase {
         let store = StateStore(rootURL: root)
         let record = snapshotRecord()
 
-        try store.writeSnapshot(record)
-        XCTAssertEqual(try store.readSnapshot(id: record.id), record)
+        try store.writeSnapshot(record, context: stateTestContext())
+        XCTAssertEqual(try store.readSnapshot(id: record.id, context: stateTestContext()), record)
         XCTAssertEqual(fileMode(root), 0o700)
         XCTAssertEqual(fileMode(root.appendingPathComponent("snapshots")), 0o700)
         XCTAssertEqual(fileMode(root.appendingPathComponent("snapshots/\(record.id).json")), 0o600)
@@ -20,15 +20,19 @@ final class StateStoreTests: XCTestCase {
     func testExpiredAndInvalidatedRecordsAreRejected() throws {
         let root = temporaryStateDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
-        let store = StateStore(rootURL: root, now: { Date(timeIntervalSince1970: 1_000) })
-        try store.writeSnapshot(snapshotRecord(createdAt: "1970-01-01T00:00:00Z", expiresAt: "1970-01-01T00:10:00Z"))
-        XCTAssertThrowsError(try store.readSnapshot(id: fixedID)) {
+        let wallNow = Date(timeIntervalSince1970: 1_000)
+        let store = StateStore(rootURL: root)
+        try store.writeSnapshot(
+            snapshotRecord(createdAt: "1970-01-01T00:00:00Z", expiresAt: "1970-01-01T00:10:00Z"),
+            context: stateTestContext(wallNow: wallNow)
+        )
+        XCTAssertThrowsError(try store.readSnapshot(id: fixedID, context: stateTestContext(wallNow: wallNow))) {
             XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
         }
 
         let current = snapshotRecord(id: secondID, createdAt: "1970-01-01T00:10:00Z", expiresAt: "1970-01-01T00:20:00Z", invalidated: true)
-        try store.writeSnapshot(current)
-        XCTAssertThrowsError(try store.readSnapshot(id: secondID)) {
+        try store.writeSnapshot(current, context: stateTestContext(wallNow: wallNow))
+        XCTAssertThrowsError(try store.readSnapshot(id: secondID, context: stateTestContext(wallNow: wallNow))) {
             XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
         }
     }
@@ -36,15 +40,15 @@ final class StateStoreTests: XCTestCase {
     func testMalformedUnsupportedAndMismatchedRecordsAreRejected() throws {
         let root = temporaryStateDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
-        let store = StateStore(rootURL: root, now: { Date(timeIntervalSince1970: 0) })
-        try store.writeSnapshot(snapshotRecord())
+        let store = StateStore(rootURL: root)
+        try store.writeSnapshot(snapshotRecord(), context: stateTestContext())
         let path = root.appendingPathComponent("snapshots/\(fixedID).json")
 
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: path)) as? [String: Any])
         object["version"] = 99
         try JSONSerialization.data(withJSONObject: object).write(to: path)
         chmod(path.path, 0o600)
-        XCTAssertThrowsError(try store.readSnapshot(id: fixedID)) {
+        XCTAssertThrowsError(try store.readSnapshot(id: fixedID, context: stateTestContext())) {
             XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
         }
 
@@ -52,7 +56,7 @@ final class StateStoreTests: XCTestCase {
         object["id"] = secondID
         try JSONSerialization.data(withJSONObject: object).write(to: path)
         chmod(path.path, 0o600)
-        XCTAssertThrowsError(try store.readSnapshot(id: fixedID)) {
+        XCTAssertThrowsError(try store.readSnapshot(id: fixedID, context: stateTestContext())) {
             XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
         }
     }
@@ -62,19 +66,19 @@ final class StateStoreTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = StateStore(rootURL: root)
         for id in ["../outside", "not-a-uuid"] {
-            XCTAssertThrowsError(try store.readSnapshot(id: id), id) {
+            XCTAssertThrowsError(try store.readSnapshot(id: id, context: stateTestContext()), id) {
                 XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
             }
         }
-        try store.writeSnapshot(snapshotRecord())
-        XCTAssertEqual(try store.readSnapshot(id: fixedID.uppercased()).id, fixedID)
+        try store.writeSnapshot(snapshotRecord(), context: stateTestContext())
+        XCTAssertEqual(try store.readSnapshot(id: fixedID.uppercased(), context: stateTestContext()).id, fixedID)
     }
 
     func testReadDoesNotFollowRecordSymlink() throws {
         let root = temporaryStateDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let store = StateStore(rootURL: root)
-        try store.writeSnapshot(snapshotRecord())
+        try store.writeSnapshot(snapshotRecord(), context: stateTestContext())
         let outside = root.deletingLastPathComponent().appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: outside) }
         try Data("private".utf8).write(to: outside)
@@ -82,7 +86,7 @@ final class StateStoreTests: XCTestCase {
         try FileManager.default.removeItem(at: path)
         try FileManager.default.createSymbolicLink(at: path, withDestinationURL: outside)
 
-        XCTAssertThrowsError(try store.readSnapshot(id: fixedID)) {
+        XCTAssertThrowsError(try store.readSnapshot(id: fixedID, context: stateTestContext())) {
             XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
         }
         XCTAssertEqual(try String(contentsOf: outside), "private")
@@ -91,13 +95,17 @@ final class StateStoreTests: XCTestCase {
     func testSweepRemovesExpiredOwnedRecordsAndPreservesUnrelatedFiles() throws {
         let root = temporaryStateDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
-        let store = StateStore(rootURL: root, now: { Date(timeIntervalSince1970: 1_000) })
-        try store.writeSnapshot(snapshotRecord(createdAt: "1970-01-01T00:00:00Z", expiresAt: "1970-01-01T00:10:00Z"))
+        let wallNow = Date(timeIntervalSince1970: 1_000)
+        let store = StateStore(rootURL: root)
+        try store.writeSnapshot(
+            snapshotRecord(createdAt: "1970-01-01T00:00:00Z", expiresAt: "1970-01-01T00:10:00Z"),
+            context: stateTestContext(wallNow: wallNow)
+        )
         let snapshots = root.appendingPathComponent("snapshots")
         let unrelated = snapshots.appendingPathComponent("notes.txt")
         try Data("keep".utf8).write(to: unrelated)
 
-        try store.sweep()
+        try store.sweep(context: stateTestContext(wallNow: wallNow))
         XCTAssertFalse(FileManager.default.fileExists(atPath: snapshots.appendingPathComponent("\(fixedID).json").path))
         XCTAssertEqual(try String(contentsOf: unrelated), "keep")
     }
@@ -105,29 +113,31 @@ final class StateStoreTests: XCTestCase {
     func testInvalidationRewritesAllRecordsForAppBeforeReturning() throws {
         let root = temporaryStateDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
-        let store = StateStore(rootURL: root, now: { Date(timeIntervalSince1970: 0) })
+        let store = StateStore(rootURL: root)
         let first = snapshotRecord()
         let sameApp = snapshotRecord(id: secondID, target: resolvedTarget(pid: 99, bundleID: "com.example.Editor"))
         let other = snapshotRecord(id: thirdID, target: resolvedTarget(pid: 100, bundleID: "com.example.Other"))
-        try [first, sameApp, other].forEach(store.writeSnapshot)
+        for record in [first, sameApp, other] {
+            try store.writeSnapshot(record, context: stateTestContext())
+        }
 
-        try store.invalidateRecords(for: first.target.identity)
+        try store.invalidateRecords(for: first.target.identity, context: stateTestContext())
 
-        XCTAssertThrowsError(try store.readSnapshot(id: first.id))
-        XCTAssertThrowsError(try store.readSnapshot(id: sameApp.id))
-        XCTAssertFalse(try store.readSnapshot(id: other.id).invalidated)
+        XCTAssertThrowsError(try store.readSnapshot(id: first.id, context: stateTestContext()))
+        XCTAssertThrowsError(try store.readSnapshot(id: sameApp.id, context: stateTestContext()))
+        XCTAssertFalse(try store.readSnapshot(id: other.id, context: stateTestContext()).invalidated)
     }
 
     func testInvalidationFailsClosedForUnreadableRecognizedRecord() throws {
         let root = temporaryStateDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let store = StateStore(rootURL: root)
-        try store.writeSnapshot(snapshotRecord())
-        try store.writeSnapshot(snapshotRecord(id: secondID))
+        try store.writeSnapshot(snapshotRecord(), context: stateTestContext())
+        try store.writeSnapshot(snapshotRecord(id: secondID), context: stateTestContext())
         let unreadable = root.appendingPathComponent("snapshots/\(secondID).json")
         chmod(unreadable.path, 0o000)
 
-        XCTAssertThrowsError(try store.invalidateRecords(for: resolvedTarget().identity)) {
+        XCTAssertThrowsError(try store.invalidateRecords(for: resolvedTarget().identity, context: stateTestContext())) {
             XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
         }
     }
@@ -135,7 +145,7 @@ final class StateStoreTests: XCTestCase {
     func testRecordOpenAndReadRetryEINTR() throws {
         let root = temporaryStateDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
-        try StateStore(rootURL: root).writeSnapshot(snapshotRecord())
+        try StateStore(rootURL: root).writeSnapshot(snapshotRecord(), context: stateTestContext())
         var openCalls = 0
         var readCalls = 0
         let io = StateStoreIO(
@@ -153,7 +163,7 @@ final class StateStoreTests: XCTestCase {
             }
         )
 
-        XCTAssertNoThrow(try StateStore(rootURL: root, now: Date.init, io: io).readSnapshot(id: fixedID))
+        XCTAssertNoThrow(try StateStore(rootURL: root, io: io).readSnapshot(id: fixedID, context: stateTestContext()))
         XCTAssertGreaterThanOrEqual(openCalls, 2)
         XCTAssertGreaterThanOrEqual(readCalls, 2)
     }
@@ -162,14 +172,14 @@ final class StateStoreTests: XCTestCase {
         let root = temporaryStateDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let writer = StateStore(rootURL: root)
-        try writer.writeSnapshot(snapshotRecord())
+        try writer.writeSnapshot(snapshotRecord(), context: stateTestContext())
         let io = StateStoreIO(read: { _, _, _ in SystemCallResult(value: -1, error: EIO) })
-        let failingStore = StateStore(rootURL: root, now: Date.init, io: io)
+        let failingStore = StateStore(rootURL: root, io: io)
 
-        XCTAssertThrowsError(try failingStore.invalidateRecords(for: resolvedTarget().identity)) {
+        XCTAssertThrowsError(try failingStore.invalidateRecords(for: resolvedTarget().identity, context: stateTestContext())) {
             XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
         }
-        XCTAssertNoThrow(try writer.readSnapshot(id: fixedID))
+        XCTAssertNoThrow(try writer.readSnapshot(id: fixedID, context: stateTestContext()))
     }
 
     func testRootSymlinkAndPathSwapNeverChmodUnrelatedObject() async throws {
@@ -302,7 +312,7 @@ final class StateStoreTests: XCTestCase {
         for (name, record) in cases {
             let root = temporaryStateDirectory()
             defer { try? FileManager.default.removeItem(at: root) }
-            XCTAssertThrowsError(try StateStore(rootURL: root).writeSnapshot(record), name) {
+            XCTAssertThrowsError(try StateStore(rootURL: root).writeSnapshot(record, context: stateTestContext()), name) {
                 XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
             }
         }
@@ -312,7 +322,7 @@ final class StateStoreTests: XCTestCase {
         let root = temporaryStateDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let store = StateStore(rootURL: root)
-        try store.writeSnapshot(snapshotRecord())
+        try store.writeSnapshot(snapshotRecord(), context: stateTestContext())
         let path = root.appendingPathComponent("snapshots/\(fixedID).json")
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: path)) as? [String: Any])
         var target = try XCTUnwrap(object["target"] as? [String: Any])
@@ -323,7 +333,7 @@ final class StateStoreTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: object).write(to: path)
         chmod(path.path, 0o600)
 
-        XCTAssertThrowsError(try store.readSnapshot(id: fixedID)) {
+        XCTAssertThrowsError(try store.readSnapshot(id: fixedID, context: stateTestContext())) {
             XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
         }
     }
@@ -337,7 +347,15 @@ final class StateStoreTests: XCTestCase {
         for (name, expiration, accepted) in cases {
             let root = temporaryStateDirectory()
             defer { try? FileManager.default.removeItem(at: root) }
-            let operation = { try StateStore(rootURL: root).writeSnapshot(snapshotRecord(createdAt: "2999-01-01T00:00:00.0000Z", expiresAt: expiration)) }
+            let operation = {
+                try StateStore(rootURL: root).writeSnapshot(
+                    snapshotRecord(
+                        createdAt: "2999-01-01T00:00:00.0000Z",
+                        expiresAt: expiration
+                    ),
+                    context: stateTestContext()
+                )
+            }
             if accepted {
                 XCTAssertNoThrow(try operation(), name)
             } else {
@@ -360,10 +378,13 @@ final class StateStoreTests: XCTestCase {
         for value in malformed {
             let root = temporaryStateDirectory()
             defer { try? FileManager.default.removeItem(at: root) }
-            XCTAssertThrowsError(try StateStore(rootURL: root).writeSnapshot(snapshotRecord(
-                createdAt: value,
-                expiresAt: "2999-01-01T00:10:00Z"
-            )), value) {
+            XCTAssertThrowsError(try StateStore(rootURL: root).writeSnapshot(
+                snapshotRecord(
+                    createdAt: value,
+                    expiresAt: "2999-01-01T00:10:00Z"
+                ),
+                context: stateTestContext()
+            ), value) {
                 XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
             }
         }
@@ -382,17 +403,20 @@ final class StateStoreTests: XCTestCase {
         let record = snapshotRecord(treeOptions: options, evidence: evidence)
         let store = StateStore(rootURL: root)
 
-        XCTAssertNoThrow(try store.writeSnapshot(record))
-        XCTAssertEqual(try store.readSnapshot(id: record.id), record)
+        XCTAssertNoThrow(try store.writeSnapshot(record, context: stateTestContext()))
+        XCTAssertEqual(try store.readSnapshot(id: record.id, context: stateTestContext()), record)
     }
 
     func testExpiryBoundaryRemainsExpiredAtExactExpiration() throws {
         let root = temporaryStateDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
-        let expiration = Date(timeIntervalSince1970: 600)
-        let store = StateStore(rootURL: root, now: { expiration })
-        try store.writeSnapshot(snapshotRecord(createdAt: "1970-01-01T00:00:00Z", expiresAt: "1970-01-01T00:10:00Z"))
-        XCTAssertThrowsError(try store.readSnapshot(id: fixedID)) {
+        let wallNow = Date(timeIntervalSince1970: 600)
+        let store = StateStore(rootURL: root)
+        try store.writeSnapshot(
+            snapshotRecord(createdAt: "1970-01-01T00:00:00Z", expiresAt: "1970-01-01T00:10:00Z"),
+            context: stateTestContext(wallNow: wallNow)
+        )
+        XCTAssertThrowsError(try store.readSnapshot(id: fixedID, context: stateTestContext(wallNow: wallNow))) {
             XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
         }
     }
@@ -404,6 +428,120 @@ final class StateStoreTests: XCTestCase {
         try await lock.withLock(context: CommandContext(timeoutMilliseconds: 100)) {}
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("snapshots").path))
         XCTAssertEqual(fileMode(root.appendingPathComponent("desktop.lock")), 0o600)
+    }
+
+    func testCancellationBetweenSweepRecordsStopsFurtherOpens() async throws {
+        let root = temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let writer = StateStore(rootURL: root)
+        try writer.writeSnapshot(
+            snapshotRecord(createdAt: "1970-01-01T00:00:00Z", expiresAt: "1970-01-01T00:10:00Z"),
+            context: stateTestContext()
+        )
+        try writer.writeSnapshot(
+            snapshotRecord(id: secondID, createdAt: "1970-01-01T00:00:00Z", expiresAt: "1970-01-01T00:10:00Z"),
+            context: stateTestContext()
+        )
+        let context = stateTestContext()
+        let opens = LockedStateInt()
+        let io = StateStoreIO(openRecord: { directory, name in
+            let value = openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+            if opens.increment() == 1 { context.cancel() }
+            return SystemCallResult(value: value, error: value < 0 ? errno : 0)
+        })
+        let store = StateStore(rootURL: root, io: io)
+        XCTAssertThrowsError(try store.sweep(context: context)) {
+            XCTAssertEqual(($0 as? NativeFailure)?.code, "INTERRUPTED")
+        }
+        XCTAssertEqual(opens.value, 1)
+    }
+
+    func testCancellationDuringBlockedStateReadDoesNotOpenNextRecord() async throws {
+        let root = temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let writer = StateStore(rootURL: root)
+        try writer.writeSnapshot(snapshotRecord(), context: stateTestContext())
+        try writer.writeSnapshot(snapshotRecord(id: secondID), context: stateTestContext())
+        let context = stateTestContext()
+        let entered = expectation(description: "state read entered")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        let reads = LockedStateInt()
+        let opens = LockedStateInt()
+        let io = StateStoreIO(
+            openRecord: { directory, name in
+                opens.increment()
+                let value = openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+                return SystemCallResult(value: value, error: value < 0 ? errno : 0)
+            },
+            read: { descriptor, buffer, count in
+                if reads.increment() == 1 {
+                    entered.fulfill()
+                    _ = release.wait(timeout: .now() + 1)
+                }
+                let value = Darwin.read(descriptor, buffer, count)
+                return SystemCallResult(value: value, error: value < 0 ? errno : 0)
+            }
+        )
+        let store = StateStore(rootURL: root, io: io)
+        let work = Task.detached { () -> NativeFailure? in
+            do {
+                try store.invalidateRecords(for: resolvedTarget().identity, context: context)
+                return nil
+            } catch let failure as NativeFailure {
+                return failure
+            } catch {
+                return NativeFailure("NATIVE_FAILURE", "unexpected test failure")
+            }
+        }
+        await fulfillment(of: [entered], timeout: 1)
+        context.cancel()
+        release.signal()
+        let failure = await work.value
+        XCTAssertEqual(failure?.code, "INTERRUPTED")
+        XCTAssertEqual(opens.value, 1)
+    }
+
+    func testCancellationInsideDirectoryEnumerationPreservesInterrupted() throws {
+        let root = temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let context = stateTestContext()
+        var enumerationCalls = 0
+        let io = StateStoreIO(directoryNames: { _, checkpoint in
+            enumerationCalls += 1
+            context.cancel()
+            try checkpoint()
+            return []
+        })
+        let store = StateStore(rootURL: root, io: io)
+        XCTAssertThrowsError(try store.sweep(context: context)) {
+            XCTAssertEqual(($0 as? NativeFailure)?.code, "INTERRUPTED")
+        }
+        XCTAssertEqual(enumerationCalls, 1)
+    }
+
+    func testExpiryUsesCommandContextWallClock() throws {
+        let root = temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = StateStore(rootURL: root)
+        let record = snapshotRecord(
+            createdAt: "1970-01-01T00:00:00Z",
+            expiresAt: "1970-01-01T00:10:00Z"
+        )
+        try store.writeSnapshot(
+            record,
+            context: stateTestContext(wallNow: Date(timeIntervalSince1970: 0))
+        )
+        XCTAssertNoThrow(try store.readSnapshot(
+            id: record.id,
+            context: stateTestContext(wallNow: Date(timeIntervalSince1970: 599))
+        ))
+        XCTAssertThrowsError(try store.readSnapshot(
+            id: record.id,
+            context: stateTestContext(wallNow: Date(timeIntervalSince1970: 600))
+        )) {
+            XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
+        }
     }
 }
 
@@ -626,6 +764,41 @@ final class DesktopLockTests: XCTestCase {
             appendEvent("end \(getpid())\n", to: logPath)
         }
     }
+}
+
+private final class LockedStateInt {
+    private let lock = NSLock()
+    private var storage = 0
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    @discardableResult
+    func increment() -> Int {
+        lock.lock()
+        storage += 1
+        let result = storage
+        lock.unlock()
+        return result
+    }
+}
+
+private func stateTestContext(
+    wallNow: Date = Date(timeIntervalSince1970: 0),
+    cancellation: CommandCancellation = CommandCancellation()
+) -> CommandContext {
+    CommandContext(
+        timeoutMilliseconds: 5_000,
+        clock: NativeClock(
+            monotonicNow: { 0 },
+            wallNow: { wallNow },
+            sleepNanoseconds: { _ in }
+        ),
+        cancellation: cancellation
+    )
 }
 
 private let fixedID = "11111111-1111-4111-8111-111111111111"

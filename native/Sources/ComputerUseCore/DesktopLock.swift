@@ -165,12 +165,42 @@ struct PrivateStateDirectory {
         }
     }
 
-    static func openChild(_ name: String, rootDescriptor: Int32, create: Bool) throws -> Int32 {
-        if create && mkdirat(rootDescriptor, name, 0o700) != 0 && errno != EEXIST {
-            throw stateFailure("Unable to create the state records directory")
+    static func openChild(
+        _ name: String,
+        rootDescriptor: Int32,
+        create: Bool,
+        checkpoint: () throws -> Void = {}
+    ) throws -> Int32 {
+        if create {
+            while mkdirat(rootDescriptor, name, 0o700) != 0 {
+                if errno == EINTR {
+                    try checkpoint()
+                    continue
+                }
+                guard errno == EEXIST else {
+                    throw stateFailure("Unable to create the state records directory")
+                }
+                break
+            }
         }
-        let descriptor = openat(rootDescriptor, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
-        guard descriptor >= 0 else { throw stateFailure("Unable to open the state records directory") }
+        let descriptor: Int32
+        while true {
+            try checkpoint()
+            let opened = openat(
+                rootDescriptor,
+                name,
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+            )
+            if opened >= 0 {
+                descriptor = opened
+                break
+            }
+            if errno == EINTR {
+                try checkpoint()
+                continue
+            }
+            throw stateFailure("Unable to open the state records directory")
+        }
         do {
             try verifyPrivateDirectory(descriptor)
             guard fchmod(descriptor, 0o700) == 0 else { throw stateFailure("Unable to protect the state records directory") }

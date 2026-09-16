@@ -51,7 +51,7 @@ public struct SnapshotRecord: Codable, Equatable {
 }
 
 struct StateStoreIO {
-    let directoryNames: (Int32) throws -> [String]
+    let directoryNames: (Int32, () throws -> Void) throws -> [String]
     let openRecord: (Int32, String) -> SystemCallResult<Int32>
     let read: (Int32, UnsafeMutableRawPointer?, Int) -> SystemCallResult<Int>
     let write: (Int32, UnsafeRawPointer?, Int) -> SystemCallResult<Int>
@@ -59,7 +59,7 @@ struct StateStoreIO {
     let renameRecord: (Int32, String, Int32, String) -> SystemCallResult<Int32>
 
     init(
-        directoryNames: @escaping (Int32) throws -> [String] = liveDirectoryNames,
+        directoryNames: @escaping (Int32, () throws -> Void) throws -> [String] = liveDirectoryNames,
         openRecord: @escaping (Int32, String) -> SystemCallResult<Int32> = { directory, name in
             let value = openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
             return SystemCallResult(value: value, error: value < 0 ? errno : 0)
@@ -93,89 +93,153 @@ struct StateStoreIO {
 
 public final class StateStore {
     private let rootURL: URL
-    private let currentDate: () -> Date
     private let encoder: JSONEncoder
     private let decoder = JSONDecoder()
     private let io: StateStoreIO
 
-    public init(rootURL: URL = DesktopLock.defaultRootURL, now: @escaping () -> Date = Date.init) {
+    public init(rootURL: URL = DesktopLock.defaultRootURL) {
         self.rootURL = rootURL
-        currentDate = now
         io = StateStoreIO()
         encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
     }
 
-    init(rootURL: URL, now: @escaping () -> Date, io: StateStoreIO) {
+    init(rootURL: URL, io: StateStoreIO) {
         self.rootURL = rootURL
-        currentDate = now
         self.io = io
         encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
     }
 
-    public func writeSnapshot(_ record: SnapshotRecord) throws {
+    public func writeSnapshot(_ record: SnapshotRecord, context: CommandContext) throws {
         guard validateRecord(record, expectedID: record.id) else { throw staleSnapshot() }
+        try context.check()
         let data: Data
-        do { data = try encoder.encode(record) } catch { throw stateFailure("Unable to encode snapshot state") }
-        try withSnapshotDirectory(create: true) { descriptor in
-            try atomicWrite(data, named: recordFileName(record.id), directoryDescriptor: descriptor, replacing: false)
+        do { data = try encoder.encode(record) }
+        catch { throw stateFailure("Unable to encode snapshot state") }
+        try withSnapshotDirectory(create: true, context: context) { descriptor in
+            try atomicWrite(
+                data,
+                named: recordFileName(record.id),
+                directoryDescriptor: descriptor,
+                replacing: false,
+                context: context
+            )
         }
     }
 
-    public func readSnapshot(id: String) throws -> SnapshotRecord {
+    public func readSnapshot(id: String, context: CommandContext) throws -> SnapshotRecord {
         guard let id = canonicalUUID(id) else { throw staleSnapshot() }
-        return try withSnapshotDirectory(create: false) { descriptor in
-            let record = try decodeRecord(named: recordFileName(id), directoryDescriptor: descriptor)
+        try context.check()
+        return try withSnapshotDirectory(create: false, context: context) { descriptor in
+            let record = try decodeRecord(
+                named: recordFileName(id),
+                directoryDescriptor: descriptor,
+                context: context
+            )
             guard validateRecord(record, expectedID: id),
                   !record.invalidated,
                   let expiration = parseSnapshotTimestamp(record.expiresAt)?.date,
-                  currentDate() < expiration else { throw staleSnapshot() }
+                  context.wallNow < expiration else { throw staleSnapshot() }
+            try context.check()
             return record
         }
     }
 
-    public func sweep() throws {
-        try withSnapshotDirectory(create: true) { descriptor in
-            let names = try io.directoryNames(descriptor)
+    public func sweep(context: CommandContext) throws {
+        try context.check()
+        try withSnapshotDirectory(create: true, context: context) { descriptor in
+            let names = try io.directoryNames(descriptor) { try context.check() }
             for name in names {
+                try context.check()
                 if temporaryRecordName(name) {
                     _ = unlinkat(descriptor, name, 0)
                     continue
                 }
                 guard let id = recordID(from: name) else { continue }
-                guard let record = try? decodeRecord(named: name, directoryDescriptor: descriptor) else { continue }
-                let expired = parseSnapshotTimestamp(record.expiresAt).map { currentDate() >= $0.date } ?? false
+                let record: SnapshotRecord
+                do {
+                    record = try decodeRecord(
+                        named: name,
+                        directoryDescriptor: descriptor,
+                        context: context
+                    )
+                } catch let failure as NativeFailure
+                    where failure.code == "INTERRUPTED" || failure.code == "TIMEOUT" {
+                    throw failure
+                } catch {
+                    continue
+                }
+                let expired = parseSnapshotTimestamp(record.expiresAt).map {
+                    context.wallNow >= $0.date
+                } ?? false
                 if record.id == id && (record.invalidated || expired) {
                     _ = unlinkat(descriptor, name, 0)
                 }
             }
-            guard fsync(descriptor) == 0 else { throw stateFailure("Unable to synchronize snapshot state") }
+            try context.check()
+            guard fsync(descriptor) == 0 else {
+                throw stateFailure("Unable to synchronize snapshot state")
+            }
         }
+        try context.check()
     }
 
-    public func invalidateRecords(for identity: TargetIdentity) throws {
-        try withSnapshotDirectory(create: true) { descriptor in
-            let names = try io.directoryNames(descriptor)
+    public func invalidateRecords(
+        for identity: TargetIdentity,
+        context: CommandContext
+    ) throws {
+        try context.check()
+        try withSnapshotDirectory(create: true, context: context) { descriptor in
+            let names = try io.directoryNames(descriptor) { try context.check() }
             for name in names {
+                try context.check()
                 guard let id = recordID(from: name) else { continue }
-                let record = try decodeRecord(named: name, directoryDescriptor: descriptor)
+                let record = try decodeRecord(
+                    named: name,
+                    directoryDescriptor: descriptor,
+                    context: context
+                )
                 guard validateRecord(record, expectedID: id) else { throw staleSnapshot() }
-                guard sameApplication(record.target.identity, identity), !record.invalidated else { continue }
+                guard sameApplication(record.target.identity, identity),
+                      !record.invalidated else { continue }
                 let data: Data
                 do { data = try encoder.encode(record.invalidatedCopy()) }
                 catch { throw stateFailure("Unable to encode invalidated state") }
-                try atomicWrite(data, named: name, directoryDescriptor: descriptor, replacing: true)
+                try atomicWrite(
+                    data,
+                    named: name,
+                    directoryDescriptor: descriptor,
+                    replacing: true,
+                    context: context
+                )
             }
         }
+        try context.check()
     }
 
-    private func withSnapshotDirectory<T>(create: Bool, _ body: (Int32) throws -> T) throws -> T {
-        let rootDescriptor = try PrivateStateDirectory.openRoot(rootURL)
+    private func withSnapshotDirectory<T>(
+        create: Bool,
+        context: CommandContext,
+        _ body: (Int32) throws -> T
+    ) throws -> T {
+        let checkpoint = { try context.check() }
+        let rootDescriptor = try PrivateStateDirectory.openRoot(
+            rootURL,
+            checkpoint: checkpoint
+        )
         defer { close(rootDescriptor) }
         let snapshotDescriptor: Int32
         do {
-            snapshotDescriptor = try PrivateStateDirectory.openChild("snapshots", rootDescriptor: rootDescriptor, create: create)
+            snapshotDescriptor = try PrivateStateDirectory.openChild(
+                "snapshots",
+                rootDescriptor: rootDescriptor,
+                create: create,
+                checkpoint: checkpoint
+            )
+        } catch let failure as NativeFailure
+            where failure.code == "INTERRUPTED" || failure.code == "TIMEOUT" {
+            throw failure
         } catch where !create && errno == ENOENT {
             throw staleSnapshot()
         }
@@ -183,15 +247,23 @@ public final class StateStore {
         return try body(snapshotDescriptor)
     }
 
-    private func decodeRecord(named name: String, directoryDescriptor: Int32) throws -> SnapshotRecord {
+    private func decodeRecord(
+        named name: String,
+        directoryDescriptor: Int32,
+        context: CommandContext
+    ) throws -> SnapshotRecord {
         let descriptor: Int32
         while true {
+            try context.check()
             let result = io.openRecord(directoryDescriptor, name)
             if result.value >= 0 {
                 descriptor = result.value
                 break
             }
-            if result.error == EINTR { continue }
+            if result.error == EINTR {
+                try context.check()
+                continue
+            }
             throw staleSnapshot()
         }
         defer { close(descriptor) }
@@ -202,58 +274,87 @@ public final class StateStore {
               info.st_size <= 16 * 1_024 * 1_024,
               info.st_mode & 0o777 == 0o600 else { throw staleSnapshot() }
         var data = Data(count: Int(info.st_size))
-        let count = data.withUnsafeMutableBytes { buffer -> Int in
+        let count = try data.withUnsafeMutableBytes { buffer -> Int in
             var offset = 0
             while offset < buffer.count {
-                let result = io.read(descriptor, buffer.baseAddress?.advanced(by: offset), buffer.count - offset)
-                if result.value < 0 && result.error == EINTR { continue }
+                try context.check()
+                let result = io.read(
+                    descriptor,
+                    buffer.baseAddress?.advanced(by: offset),
+                    buffer.count - offset
+                )
+                if result.value < 0 && result.error == EINTR {
+                    try context.check()
+                    continue
+                }
                 if result.value <= 0 { return -1 }
                 offset += result.value
             }
             return offset
         }
-        guard count == data.count, let record = try? decoder.decode(SnapshotRecord.self, from: data) else { throw staleSnapshot() }
+        guard count == data.count,
+              let record = try? decoder.decode(SnapshotRecord.self, from: data) else {
+            throw staleSnapshot()
+        }
         return record
     }
 
-    private func atomicWrite(_ data: Data, named name: String, directoryDescriptor: Int32, replacing: Bool) throws {
+    private func atomicWrite(
+        _ data: Data,
+        named name: String,
+        directoryDescriptor: Int32,
+        replacing: Bool,
+        context: CommandContext
+    ) throws {
+        try context.check()
         if !replacing {
             var info = stat()
-            guard fstatat(directoryDescriptor, name, &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT else {
+            guard fstatat(directoryDescriptor, name, &info, AT_SYMLINK_NOFOLLOW) != 0,
+                  errno == ENOENT else {
                 throw stateFailure("Snapshot state already exists")
             }
         }
         let temporaryName = ".tmp.\(UUID().uuidString.lowercased()).json"
-        let descriptor = openat(directoryDescriptor, temporaryName, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        let descriptor = openat(
+            directoryDescriptor,
+            temporaryName,
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+            0o600
+        )
         guard descriptor >= 0 else { throw stateFailure("Unable to create snapshot state") }
         var shouldRemoveTemporary = true
         defer {
             close(descriptor)
             if shouldRemoveTemporary { _ = unlinkat(directoryDescriptor, temporaryName, 0) }
         }
-        guard fchmod(descriptor, 0o600) == 0 else { throw stateFailure("Unable to protect snapshot state") }
+        guard fchmod(descriptor, 0o600) == 0 else {
+            throw stateFailure("Unable to protect snapshot state")
+        }
         try verifyPrivateFile(descriptor)
-        let wroteAll = data.withUnsafeBytes { buffer -> Bool in
+        let wroteAll = try data.withUnsafeBytes { buffer -> Bool in
             var offset = 0
             while offset < buffer.count {
+                try context.check()
                 let result = io.write(
                     descriptor,
                     buffer.baseAddress?.advanced(by: offset),
                     buffer.count - offset
                 )
-                if result.value < 0 && result.error == EINTR { continue }
+                if result.value < 0 && result.error == EINTR {
+                    try context.check()
+                    continue
+                }
                 if result.value <= 0 { return false }
                 offset += result.value
             }
             return true
         }
-        guard wroteAll else {
+        guard wroteAll else { throw stateFailure("Unable to write snapshot state") }
+        try context.check()
+        guard io.sync(descriptor).value == 0 else {
             throw stateFailure("Unable to write snapshot state")
         }
-        let fileSync = io.sync(descriptor)
-        guard fileSync.value == 0 else {
-            throw stateFailure("Unable to write snapshot state")
-        }
+        try context.check()
         let renamed = io.renameRecord(
             directoryDescriptor,
             temporaryName,
@@ -264,14 +365,17 @@ public final class StateStore {
             throw stateFailure("Unable to publish snapshot state")
         }
         shouldRemoveTemporary = false
-        let directorySync = io.sync(directoryDescriptor)
-        guard directorySync.value == 0 else {
+        guard io.sync(directoryDescriptor).value == 0 else {
             throw stateFailure("Unable to synchronize snapshot state")
         }
+        // COMMIT: rename is immediately followed by directory sync; no cancellation check or deletion occurs after publication begins.
     }
 }
 
-private func liveDirectoryNames(_ descriptor: Int32) throws -> [String] {
+private func liveDirectoryNames(
+    _ descriptor: Int32,
+    checkpoint: () throws -> Void
+) throws -> [String] {
     let duplicate = dup(descriptor)
     guard duplicate >= 0, let directory = fdopendir(duplicate) else {
         if duplicate >= 0 { close(duplicate) }
@@ -280,14 +384,22 @@ private func liveDirectoryNames(_ descriptor: Int32) throws -> [String] {
     defer { closedir(directory) }
     var names: [String] = []
     while true {
+        try checkpoint()
         errno = 0
         guard let entry = readdir(directory) else {
-            if errno == EINTR { continue }
-            guard errno == 0 else { throw stateFailure("Unable to enumerate snapshot state") }
+            if errno == EINTR {
+                try checkpoint()
+                continue
+            }
+            guard errno == 0 else {
+                throw stateFailure("Unable to enumerate snapshot state")
+            }
             break
         }
         let name = withUnsafePointer(to: entry.pointee.d_name) {
-            $0.withMemoryRebound(to: CChar.self, capacity: Int(NAME_MAX) + 1) { String(cString: $0) }
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(NAME_MAX) + 1) {
+                String(cString: $0)
+            }
         }
         if name != "." && name != ".." { names.append(name) }
     }

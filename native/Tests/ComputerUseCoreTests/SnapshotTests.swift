@@ -190,9 +190,9 @@ final class SnapshotTests: XCTestCase {
         let recorded = try treeFixture("save-cancel")
         let live = try treeFixture("changed-label")
         let now = Date(timeIntervalSince1970: 1_788_861_900)
-        let store = StateStore(rootURL: root, now: { now })
+        let store = StateStore(rootURL: root)
         let record = SnapshotRecord(id: "44444444-4444-4444-8444-444444444444", createdAt: "2026-09-08T10:00:00Z", expiresAt: "2026-09-08T10:10:00Z", target: recorded.target, treeOptions: recorded.treeOptions, evidence: recorded.evidence)
-        try store.writeSnapshot(record)
+        try store.writeSnapshot(record, context: snapshotCommandContext(wallNow: now))
         let service = SnapshotService(
             lock: DesktopLock(rootURL: root),
             store: store,
@@ -235,7 +235,7 @@ final class SnapshotTests: XCTestCase {
         }) {
             XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
         }
-        XCTAssertFalse(try store.readSnapshot(id: record.id).invalidated)
+        XCTAssertFalse(try store.readSnapshot(id: record.id, context: snapshotCommandContext(wallNow: now)).invalidated)
     }
 
     func testStateChangingAttemptInvalidatesBeforeActionButNonChangingAttemptDoesNot() async throws {
@@ -244,10 +244,10 @@ final class SnapshotTests: XCTestCase {
             defer { try? FileManager.default.removeItem(at: root) }
             let snapshot = try treeFixture("save-cancel")
             let now = Date(timeIntervalSince1970: 1_788_861_900)
-            let store = StateStore(rootURL: root, now: { now })
+            let store = StateStore(rootURL: root)
             let id = stateChanging ? "55555555-5555-4555-8555-555555555555" : "66666666-6666-4666-8666-666666666666"
             let record = SnapshotRecord(id: id, createdAt: "2026-09-08T10:00:00Z", expiresAt: "2026-09-08T10:10:00Z", target: snapshot.target, treeOptions: snapshot.treeOptions, evidence: snapshot.evidence)
-            try store.writeSnapshot(record)
+            try store.writeSnapshot(record, context: snapshotCommandContext(wallNow: now))
             let service = SnapshotService(
                 lock: DesktopLock(rootURL: root),
                 store: store,
@@ -280,17 +280,17 @@ final class SnapshotTests: XCTestCase {
                     _ = element
                     _ = target
                     _ = context
-                    validDuringPreflight = (try? store.readSnapshot(id: id)) != nil
+                    validDuringPreflight = (try? store.readSnapshot(id: id, context: snapshotCommandContext(wallNow: now))) != nil
                 },
                 dispatch: { prepared, context in
                     _ = prepared
                     _ = context
-                    invalidatedDuringAction = (try? store.readSnapshot(id: id)) == nil
+                    invalidatedDuringAction = (try? store.readSnapshot(id: id, context: snapshotCommandContext(wallNow: now))) == nil
                 }
             )
             XCTAssertTrue(validDuringPreflight)
             XCTAssertEqual(invalidatedDuringAction, stateChanging)
-            XCTAssertEqual((try? store.readSnapshot(id: id)) == nil, stateChanging)
+            XCTAssertEqual((try? store.readSnapshot(id: id, context: snapshotCommandContext(wallNow: now))) == nil, stateChanging)
         }
     }
 
@@ -299,9 +299,9 @@ final class SnapshotTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let snapshot = try treeFixture("save-cancel")
         let now = Date(timeIntervalSince1970: 1_788_861_900)
-        let store = StateStore(rootURL: root, now: { now })
+        let store = StateStore(rootURL: root)
         let record = SnapshotRecord(id: "77777777-7777-4777-8777-777777777777", createdAt: "2026-09-08T10:00:00Z", expiresAt: "2026-09-08T10:10:00Z", target: snapshot.target, treeOptions: snapshot.treeOptions, evidence: snapshot.evidence)
-        try store.writeSnapshot(record)
+        try store.writeSnapshot(record, context: snapshotCommandContext(wallNow: now))
         let service = SnapshotService(
             lock: DesktopLock(rootURL: root),
             store: store,
@@ -345,7 +345,7 @@ final class SnapshotTests: XCTestCase {
         }) {
             XCTAssertEqual(($0 as? NativeFailure)?.code, "INVALID_REQUEST")
         }
-        XCTAssertNoThrow(try store.readSnapshot(id: record.id))
+        XCTAssertNoThrow(try store.readSnapshot(id: record.id, context: snapshotCommandContext(wallNow: now)))
         XCTAssertFalse(dispatched)
     }
 
@@ -355,9 +355,9 @@ final class SnapshotTests: XCTestCase {
             defer { try? FileManager.default.removeItem(at: root) }
             let snapshot = try treeFixture("save-cancel")
             let now = Date(timeIntervalSince1970: 1_788_861_900)
-            let store = StateStore(rootURL: root, now: { now })
+            let store = StateStore(rootURL: root)
             let record = SnapshotRecord(id: "88888888-8888-4888-8888-888888888888", createdAt: "2026-09-08T10:00:00Z", expiresAt: "2026-09-08T10:10:00Z", target: snapshot.target, treeOptions: snapshot.treeOptions, evidence: snapshot.evidence)
-            try store.writeSnapshot(record)
+            try store.writeSnapshot(record, context: snapshotCommandContext(wallNow: now))
             let malformed = root.appendingPathComponent("snapshots/00000000-0000-4000-8000-000000000000.json")
             try contents.write(to: malformed)
             chmod(malformed.path, 0o600)
@@ -405,9 +405,9 @@ final class SnapshotTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let snapshot = try treeFixture("save-cancel")
         let now = Date(timeIntervalSince1970: 1_788_861_900)
-        let store = StateStore(rootURL: root, now: { now })
+        let store = StateStore(rootURL: root)
         let record = SnapshotRecord(id: "99999999-9999-4999-8999-999999999999", createdAt: "2026-09-08T10:00:00Z", expiresAt: "2026-09-08T10:10:00Z", target: snapshot.target, treeOptions: snapshot.treeOptions, evidence: snapshot.evidence)
-        try store.writeSnapshot(record)
+        try store.writeSnapshot(record, context: snapshotCommandContext(wallNow: now))
         let service = SnapshotService(
             lock: DesktopLock(rootURL: root),
             store: store,
@@ -443,7 +443,7 @@ final class SnapshotTests: XCTestCase {
                 }
             )
         })
-        XCTAssertThrowsError(try store.readSnapshot(id: record.id))
+        XCTAssertThrowsError(try store.readSnapshot(id: record.id, context: snapshotCommandContext(wallNow: now)))
     }
 
     func testEnumerationFailureAfterPreflightPreventsDispatch() async throws {
@@ -452,14 +452,14 @@ final class SnapshotTests: XCTestCase {
         let snapshot = try treeFixture("save-cancel")
         let now = Date(timeIntervalSince1970: 1_788_861_900)
         var enumerationCount = 0
-        let io = StateStoreIO(directoryNames: { descriptor in
+        let io = StateStoreIO(directoryNames: { descriptor, _ in
             enumerationCount += 1
             if enumerationCount == 1 { return try testDirectoryNames(descriptor) }
             throw NativeFailure("NATIVE_FAILURE", "Injected enumeration failure")
         })
-        let store = StateStore(rootURL: root, now: { now }, io: io)
+        let store = StateStore(rootURL: root, io: io)
         let record = SnapshotRecord(id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", createdAt: "2026-09-08T10:00:00Z", expiresAt: "2026-09-08T10:10:00Z", target: snapshot.target, treeOptions: snapshot.treeOptions, evidence: snapshot.evidence)
-        try store.writeSnapshot(record)
+        try store.writeSnapshot(record, context: snapshotCommandContext(wallNow: now))
         let service = SnapshotService(
             lock: DesktopLock(rootURL: root),
             store: store,
@@ -515,11 +515,10 @@ final class SnapshotTests: XCTestCase {
                 treeOptions: snapshot.treeOptions,
                 evidence: snapshot.evidence
             )
-            try StateStore(rootURL: root, now: { now }).writeSnapshot(record)
+            try StateStore(rootURL: root).writeSnapshot(record, context: snapshotCommandContext(wallNow: now))
 
             let store = StateStore(
                 rootURL: root,
-                now: { now },
                 io: failingInvalidationIO(failure)
             )
             let service = SnapshotService(
@@ -562,7 +561,7 @@ final class SnapshotTests: XCTestCase {
             XCTAssertTrue(preflightRan, failure.rawValue)
             XCTAssertFalse(dispatchRan, failure.rawValue)
 
-            let remainsValid = (try? StateStore(rootURL: root, now: { now }).readSnapshot(id: record.id)) != nil
+            let remainsValid = (try? StateStore(rootURL: root).readSnapshot(id: record.id, context: snapshotCommandContext(wallNow: now))) != nil
             XCTAssertEqual(remainsValid, failure != .directorySync, failure.rawValue)
         }
     }
@@ -573,7 +572,7 @@ final class SnapshotTests: XCTestCase {
         let fixture = try treeFixture("save-cancel")
         let lock = DesktopLock(rootURL: root)
         let now = Date(timeIntervalSince1970: 1_789_000_000)
-        let store = StateStore(rootURL: root, now: { now })
+        let store = StateStore(rootURL: root)
         let service = SnapshotService(
             lock: lock,
             store: store,
@@ -605,7 +604,7 @@ final class SnapshotTests: XCTestCase {
         XCTAssertTrue(reply.ok)
         XCTAssertEqual(reply.command, "snapshot")
         guard case let .string(snapshotID)? = reply.data?["snapshotId"] else { return XCTFail("missing snapshot ID") }
-        XCTAssertNoThrow(try store.readSnapshot(id: snapshotID))
+        XCTAssertNoThrow(try store.readSnapshot(id: snapshotID, context: snapshotCommandContext(wallNow: now)))
     }
 
     func testNativeFailureDetailsRoundTripThroughDispatcher() async throws {
@@ -616,7 +615,7 @@ final class SnapshotTests: XCTestCase {
         let now = Date(timeIntervalSince1970: 1_789_000_000)
         let service = SnapshotService(
             lock: lock,
-            store: StateStore(rootURL: root, now: { now }),
+            store: StateStore(rootURL: root),
             resolve: { selector, context in
                 _ = selector
                 _ = context

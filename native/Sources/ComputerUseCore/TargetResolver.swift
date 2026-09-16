@@ -354,7 +354,7 @@ private func liveWindows(for pid: Int, context: CommandContext) throws -> [Targe
         throw NativeFailure("TARGET_NOT_FOUND", "Process was not found")
     }
     let application = AXUIElementCreateApplication(nativePID)
-    AXUIElementSetMessagingTimeout(application, 2.0)
+    try prepareLiveAXMessaging(application, context: context)
     var rawWindows: CFTypeRef?
     let status = AXUIElementCopyAttributeValue(
         application,
@@ -384,6 +384,7 @@ private func liveWindows(for pid: Int, context: CommandContext) throws -> [Targe
     var axWindows: [AXWindowMetadata] = []
     for element in windowElements {
         try context.check()
+        try prepareLiveAXMessaging(element, context: context)
         axWindows.append(AXWindowMetadata(
             role: try resolverString(element, kAXRoleAttribute),
             title: try resolverString(element, kAXTitleAttribute),
@@ -391,10 +392,14 @@ private func liveWindows(for pid: Int, context: CommandContext) throws -> [Targe
             minimized: try resolverBool(element, kAXMinimizedAttribute)
         ))
     }
-    let cgWindows = try liveCGWindows(for: pid)
-    return axWindows.flatMap { ax in
-        cgWindows.filter { matches(ax: ax, cg: $0) }.map { cg in
-            TargetWindow(
+    let cgWindows = try liveCGWindows(for: pid, context: context)
+    var matched: [TargetWindow] = []
+    for ax in axWindows {
+        try context.check()
+        for cg in cgWindows {
+            try context.check()
+            guard matches(ax: ax, cg: cg) else { continue }
+            matched.append(TargetWindow(
                 ax: ax,
                 cg: CGWindowMetadata(
                     id: cg.id,
@@ -403,20 +408,28 @@ private func liveWindows(for pid: Int, context: CommandContext) throws -> [Targe
                     onScreen: cg.onScreen,
                     minimized: ax.minimized == true
                 )
-            )
+            ))
         }
     }
+    return matched
 }
 
-private func liveCGWindows(for pid: Int) throws -> [CGWindowMetadata] {
+private func liveCGWindows(
+    for pid: Int,
+    context: CommandContext
+) throws -> [CGWindowMetadata] {
+    try context.check()
     guard let values = CGWindowListCopyWindowInfo(
         [.optionAll, .excludeDesktopElements],
         kCGNullWindowID
     ) as? [[String: Any]] else {
         throw NativeFailure("NATIVE_FAILURE", "Window inventory could not be read")
     }
-    return try values.compactMap { value in
-        guard value[kCGWindowOwnerPID as String] as? Int == pid else { return nil }
+    try context.check()
+    var windows: [CGWindowMetadata] = []
+    for value in values {
+        try context.check()
+        guard value[kCGWindowOwnerPID as String] as? Int == pid else { continue }
         guard let id = value[kCGWindowNumber as String] as? Int, id > 0,
               let dictionary = value[kCGWindowBounds as String] as? [String: CGFloat],
               let x = dictionary["X"],
@@ -431,14 +444,15 @@ private func liveCGWindows(for pid: Int) throws -> [CGWindowMetadata] {
               height >= 0 else {
             throw NativeFailure("NATIVE_FAILURE", "Window inventory contained invalid metadata")
         }
-        return CGWindowMetadata(
+        windows.append(CGWindowMetadata(
             id: id,
             title: value[kCGWindowName as String] as? String,
             bounds: WindowBounds(x: x, y: y, width: width, height: height),
             onScreen: value[kCGWindowIsOnscreen as String] as? Bool ?? false,
             minimized: false
-        )
+        ))
     }
+    return windows
 }
 
 private func matches(ax: AXWindowMetadata, cg: CGWindowMetadata) -> Bool {

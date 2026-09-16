@@ -26,11 +26,11 @@ enum AXReadResult<Value> {
 extension AXReadResult: Equatable where Value: Equatable {}
 
 struct AXTreeReader<Element> {
-    let string: (Element, String) -> AXReadResult<String>
-    let bool: (Element, String) -> AXReadResult<Bool>
-    let children: (Element) -> AXReadResult<[Element]>
-    let actions: (Element) -> AXReadResult<[String]>
-    let bounds: (Element) -> AXReadResult<WindowBounds>
+    let string: (Element, String) throws -> AXReadResult<String>
+    let bool: (Element, String) throws -> AXReadResult<Bool>
+    let children: (Element) throws -> AXReadResult<[Element]>
+    let actions: (Element) throws -> AXReadResult<[String]>
+    let bounds: (Element) throws -> AXReadResult<WindowBounds>
 }
 
 public struct AXTreeInputNode: Equatable {
@@ -336,6 +336,35 @@ func liveAXElementsAreIdentical(
     return CFEqual(left, right)
 }
 
+func axMessagingTimeout(context: CommandContext) throws -> Float {
+    try context.check()
+    let remaining = Double(context.remainingNanoseconds) / 1_000_000_000
+    guard remaining > 0 else {
+        try context.check()
+        throw NativeFailure("TIMEOUT", "Desktop operation deadline expired")
+    }
+    return Float(min(2.0, remaining))
+}
+
+func prepareLiveAXMessaging(
+    _ element: AXUIElement,
+    context: CommandContext
+) throws {
+    let timeout = try axMessagingTimeout(context: context)
+    let status = AXUIElementSetMessagingTimeout(element, timeout)
+    guard status == .success else { throw liveAXFailure(for: status) }
+}
+
+func prepareLiveAXElementMessaging(
+    _ element: LiveAXElement,
+    context: CommandContext
+) throws {
+    guard let rawValue = element.rawValue else {
+        throw NativeFailure("STALE_SNAPSHOT", "Live accessibility reference is unavailable")
+    }
+    try prepareLiveAXMessaging(rawValue, context: context)
+}
+
 public struct AXTreeObservation {
     public let snapshot: AXTreeSnapshot
     let liveElements: [Int: LiveAXElement]
@@ -363,7 +392,9 @@ public enum AXTree {
         target: ResolvedTarget,
         options: TreeOptions,
         root: Element,
-        reader: AXTreeReader<Element>
+        reader: AXTreeReader<Element>,
+        checkpoint: () throws -> Void = {},
+        prepare: (Element) throws -> Void = { _ in }
     ) throws -> (snapshot: AXTreeSnapshot, elementsByRef: [Int: Element]) {
         var visited = 0
         var elementsByPath: [[Int]: Element] = [:]
@@ -373,12 +404,15 @@ public enum AXTree {
             depth: 0,
             options: options,
             reader: reader,
+            checkpoint: checkpoint,
+            prepare: prepare,
             visited: &visited,
             elementsByPath: &elementsByPath
         )
         let snapshot = snapshot(target: target, options: options, root: input)
         var elementsByRef: [Int: Element] = [:]
         for ref in snapshot.evidence.refs {
+            try checkpoint()
             guard let element = elementsByPath[ref.path] else { throw observationFailure() }
             elementsByRef[ref.ref] = element
         }
@@ -391,12 +425,15 @@ public enum AXTree {
         depth: Int,
         options: TreeOptions,
         reader: AXTreeReader<Element>,
+        checkpoint: () throws -> Void,
+        prepare: (Element) throws -> Void,
         visited: inout Int,
         elementsByPath: inout [[Int]: Element]
     ) throws -> AXTreeInputNode {
+        try checkpoint()
+        try prepare(element)
         visited += 1
         elementsByPath[path] = element
-
         let role = try required(reader.string(element, kAXRoleAttribute))
         let subrole = try optional(reader.string(element, kAXSubroleAttribute))
         let identifier = try optional(reader.string(element, kAXIdentifierAttribute))
@@ -414,18 +451,20 @@ public enum AXTree {
         if depth < options.maxDepth {
             for (index, child) in rawChildren.enumerated() {
                 guard visited < options.maxElements else { break }
+                try checkpoint()
                 children.append(try readNode(
                     child,
                     path: path + [index],
                     depth: depth + 1,
                     options: options,
                     reader: reader,
+                    checkpoint: checkpoint,
+                    prepare: prepare,
                     visited: &visited,
                     elementsByPath: &elementsByPath
                 ))
             }
         }
-
         return AXTreeInputNode(
             role: role,
             subrole: subrole,
@@ -468,20 +507,34 @@ public enum AXTree {
         NativeFailure("STALE_SNAPSHOT", "Accessibility observation could not be trusted")
     }
 
-    public static func capture(target: ResolvedTarget, options: TreeOptions) throws -> AXTreeObservation {
-        let app = AXUIElementCreateApplication(pid_t(target.identity.pid))
-        AXUIElementSetMessagingTimeout(app, 2)
-        let reader = liveAXTreeReader()
-
-        guard case let .value(windows) = liveAXChildren(app, attribute: kAXWindowsAttribute) else {
+    public static func capture(
+        target: ResolvedTarget,
+        options: TreeOptions,
+        context: CommandContext
+    ) throws -> AXTreeObservation {
+        try context.check()
+        guard AXIsProcessTrusted() else {
+            throw NativeFailure("PERMISSION_DENIED", "Accessibility access is unavailable")
+        }
+        guard let pid = pid_t(exactly: target.identity.pid), pid > 0 else {
             throw observationFailure()
         }
-
+        let app = AXUIElementCreateApplication(pid)
+        try prepareLiveAXMessaging(app, context: context)
+        let reader = liveAXTreeReader()
+        guard case let .value(windows) = try liveAXChildren(
+            app,
+            attribute: kAXWindowsAttribute
+        ) else {
+            throw observationFailure()
+        }
         var matches: [AXUIElement] = []
         for window in windows {
-            guard case let .value(role) = reader.string(window, kAXRoleAttribute),
-                  case let .value(title) = reader.string(window, kAXTitleAttribute),
-                  case let .value(bounds) = reader.bounds(window) else {
+            try context.check()
+            try prepareLiveAXMessaging(window, context: context)
+            guard case let .value(role) = try reader.string(window, kAXRoleAttribute),
+                  case let .value(title) = try reader.string(window, kAXTitleAttribute),
+                  case let .value(bounds) = try reader.bounds(window) else {
                 throw observationFailure()
             }
             if role == "AXWindow" && title == target.title && bounds == target.bounds {
@@ -491,12 +544,13 @@ public enum AXTree {
         guard matches.count == 1 else {
             throw NativeFailure("STALE_SNAPSHOT", "Selected window identity is no longer unique")
         }
-
         let result = try readSnapshot(
             target: target,
             options: options,
             root: matches[0],
-            reader: reader
+            reader: reader,
+            checkpoint: { try context.check() },
+            prepare: { try prepareLiveAXMessaging($0, context: context) }
         )
         return AXTreeObservation(
             snapshot: result.snapshot,
@@ -601,11 +655,26 @@ func decodeAXArray<Value>(
     return decoded
 }
 
+func liveAXFailure(for status: AXError) -> NativeFailure {
+    if status == .apiDisabled {
+        return NativeFailure("PERMISSION_DENIED", "Accessibility access is unavailable")
+    }
+    return NativeFailure("NATIVE_FAILURE", "Accessibility data could not be read reliably")
+}
+
+private func classifyLiveAXResult<Value>(
+    status: AXError,
+    result: AXReadResult<Value>
+) throws -> AXReadResult<Value> {
+    if case .failure = result { throw liveAXFailure(for: status) }
+    return result
+}
+
 private func liveAXTreeReader() -> AXTreeReader<AXUIElement> {
     AXTreeReader(
         string: liveAXString,
         bool: liveAXBool,
-        children: { liveAXChildren($0, attribute: kAXChildrenAttribute) },
+        children: { try liveAXChildren($0, attribute: kAXChildrenAttribute) },
         actions: liveAXActions,
         bounds: liveAXBounds
     )
@@ -620,92 +689,116 @@ func liveAXAttribute(
     return (status, value)
 }
 
-private func liveAXString(_ element: AXUIElement, _ attribute: String) -> AXReadResult<String> {
+private func liveAXString(
+    _ element: AXUIElement,
+    _ attribute: String
+) throws -> AXReadResult<String> {
     let read = liveAXAttribute(element, attribute)
-    return axReadResult(
+    return try classifyLiveAXResult(
         status: read.status,
-        value: read.value,
-        expectedTypeID: CFStringGetTypeID(),
-        decode: { $0 as? String }
+        result: axReadResult(
+            status: read.status,
+            value: read.value,
+            expectedTypeID: CFStringGetTypeID(),
+            decode: { $0 as? String }
+        )
     )
 }
 
-private func liveAXBool(_ element: AXUIElement, _ attribute: String) -> AXReadResult<Bool> {
+private func liveAXBool(
+    _ element: AXUIElement,
+    _ attribute: String
+) throws -> AXReadResult<Bool> {
     let read = liveAXAttribute(element, attribute)
-    return axReadResult(
+    return try classifyLiveAXResult(
         status: read.status,
-        value: read.value,
-        expectedTypeID: CFBooleanGetTypeID(),
-        decode: { $0 as? Bool }
+        result: axReadResult(
+            status: read.status,
+            value: read.value,
+            expectedTypeID: CFBooleanGetTypeID(),
+            decode: { $0 as? Bool }
+        )
     )
 }
 
-private func liveAXChildren(_ element: AXUIElement, attribute: String) -> AXReadResult<[AXUIElement]> {
+private func liveAXChildren(
+    _ element: AXUIElement,
+    attribute: String
+) throws -> AXReadResult<[AXUIElement]> {
     let read = liveAXAttribute(element, attribute)
-    return axReadResult(
+    return try classifyLiveAXResult(
         status: read.status,
-        value: read.value,
-        expectedTypeID: CFArrayGetTypeID(),
-        decode: { value in
-            // axReadResult has already verified CFArrayGetTypeID().
-            let array = value as! CFArray
-            return decodeAXArray(
-                array as [AnyObject],
-                expectedElementTypeID: AXUIElementGetTypeID(),
-                decode: { raw in unsafeBitCast(raw, to: AXUIElement.self) }
-            )
-        }
+        result: axReadResult(
+            status: read.status,
+            value: read.value,
+            expectedTypeID: CFArrayGetTypeID(),
+            decode: { value in
+                let array = value as! CFArray
+                return decodeAXArray(
+                    array as [AnyObject],
+                    expectedElementTypeID: AXUIElementGetTypeID(),
+                    decode: { unsafeBitCast($0, to: AXUIElement.self) }
+                )
+            }
+        )
     )
 }
 
-private func liveAXActions(_ element: AXUIElement) -> AXReadResult<[String]> {
+private func liveAXActions(_ element: AXUIElement) throws -> AXReadResult<[String]> {
     var names: CFArray?
     let status = AXUIElementCopyActionNames(element, &names)
-    return axReadResult(
+    return try classifyLiveAXResult(
         status: status,
-        value: names,
-        expectedTypeID: CFArrayGetTypeID(),
-        decode: { value in
-            // axReadResult has already verified CFArrayGetTypeID().
-            let array = value as! CFArray
-            guard let actions: [String] = decodeAXArray(
+        result: axReadResult(
+            status: status,
+            value: names,
+            expectedTypeID: CFArrayGetTypeID(),
+            decode: { value in
+                let array = value as! CFArray
+                return decodeAXArray(
                     array as [AnyObject],
                     expectedElementTypeID: CFStringGetTypeID(),
                     decode: { $0 as? String }
-                  ) else { return nil }
-            return actions
-        }
+                )
+            }
+        )
     )
 }
 
-private func liveAXBounds(_ element: AXUIElement) -> AXReadResult<WindowBounds> {
+private func liveAXBounds(_ element: AXUIElement) throws -> AXReadResult<WindowBounds> {
     let positionRead = liveAXAttribute(element, kAXPositionAttribute)
     let sizeRead = liveAXAttribute(element, kAXSizeAttribute)
     let position: AXReadResult<AXValue> = axReadResult(
         status: positionRead.status,
         value: positionRead.value,
         expectedTypeID: AXValueGetTypeID(),
-        decode: { ($0 as! AXValue) } // guarded by AXValueGetTypeID above
+        decode: { $0 as! AXValue }
     )
     let size: AXReadResult<AXValue> = axReadResult(
         status: sizeRead.status,
         value: sizeRead.value,
         expectedTypeID: AXValueGetTypeID(),
-        decode: { ($0 as! AXValue) } // guarded by AXValueGetTypeID above
+        decode: { $0 as! AXValue }
     )
 
     switch (position, size) {
-    case (.failure, _), (_, .failure):
-        return .failure
+    case (.failure, _):
+        throw liveAXFailure(for: positionRead.status)
+    case (_, .failure):
+        throw liveAXFailure(for: sizeRead.status)
     case (.unavailable, _), (_, .unavailable):
         return .unavailable
     case let (.value(position), .value(size)):
         guard AXValueGetType(position) == .cgPoint,
-              AXValueGetType(size) == .cgSize else { return .failure }
+              AXValueGetType(size) == .cgSize else {
+            throw liveAXFailure(for: .success)
+        }
         var point = CGPoint.zero
         var dimensions = CGSize.zero
         guard AXValueGetValue(position, .cgPoint, &point),
-              AXValueGetValue(size, .cgSize, &dimensions) else { return .failure }
+              AXValueGetValue(size, .cgSize, &dimensions) else {
+            throw liveAXFailure(for: .success)
+        }
         return .value(WindowBounds(
             x: point.x,
             y: point.y,
