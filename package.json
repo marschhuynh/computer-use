@@ -19,7 +19,7 @@
     "native-tests": "node scripts/native-tests.mjs",
     "test:build-hygiene": "node scripts/test-build-hygiene.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --exclude tests/native-protocol.test.ts",
+    "test": "vitest run --exclude tests/native-protocol.test.ts --exclude '**/.worktrees/**'",
     "test:native-protocol": "node scripts/native-protocol-tests.mjs",
     "ax-helper": "make ax-helper"
   },
