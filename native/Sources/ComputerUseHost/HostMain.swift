@@ -20,15 +20,33 @@ struct ComputerUseHost {
         }
 
         _ = NSApplication.shared
+        guard let timeout = request.timeoutMilliseconds else {
+            write(.failure(
+                command: request.command,
+                code: "PROTOCOL_ERROR",
+                message: "Invalid command options"
+            ))
+            return
+        }
+        let context = CommandContext(timeoutMilliseconds: timeout)
         let session = HostSession(
-            work: { cancellation, completion in
-                DispatchQueue.main.async {
-                    guard !cancellation.isCancelled else { return }
-                    completion(NativeService().execute(request))
+            context: context,
+            work: { context, completion in
+                Task.detached {
+                    await withTaskCancellationHandler(operation: {
+                        let reply = await NativeService().execute(request, context: context)
+                        completion(reply)
+                    }, onCancel: {
+                        context.cancel()
+                    })
                 }
             },
             onReply: write,
-            onShutdown: { CFRunLoopStop(CFRunLoopGetMain()) }
+            onShutdown: {
+                DispatchQueue.main.async {
+                    CFRunLoopStop(CFRunLoopGetMain())
+                }
+            }
         )
         let parentObserver = ParentEOFObserver(fileHandle: .standardInput) {
             session.parentDidClose()

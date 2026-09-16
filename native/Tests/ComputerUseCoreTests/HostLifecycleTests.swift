@@ -28,41 +28,55 @@ final class HostLifecycleTests: XCTestCase {
         var replies = 0
         var shutdowns = 0
         let session = HostSession(
-            work: { _, completion in finish = completion },
+            context: CommandContext(timeoutMilliseconds: 1_000),
+            work: { _, completion in
+                finish = completion
+                return Task.detached {}
+            },
             onReply: { _ in replies += 1 },
             onShutdown: { shutdowns += 1 }
         )
-
         session.start()
         XCTAssertEqual(replies, 0)
         XCTAssertEqual(shutdowns, 0)
-
         try XCTUnwrap(finish)(.failure(code: "UNSUPPORTED_ACTION", message: "staged"))
         XCTAssertEqual(replies, 1)
         XCTAssertEqual(shutdowns, 1)
     }
 
     func testHostSessionCancelsAndShutsDownWhenParentClosesDuringWork() {
-        var cancellation: HostCancellation?
+        let context = CommandContext(timeoutMilliseconds: 1_000)
         var workCancelled = false
         var replies = 0
         var shutdowns = 0
+        context.onCancel { workCancelled = true }
         let session = HostSession(
-            work: { token, _ in
-                cancellation = token
-                token.onCancel { workCancelled = true }
-            },
+            context: context,
+            work: { _, _ in Task.detached {} },
             onReply: { _ in replies += 1 },
             onShutdown: { shutdowns += 1 }
         )
-
         session.start()
         session.parentDidClose()
-
-        XCTAssertEqual(cancellation?.isCancelled, true)
+        XCTAssertTrue(context.isCancelled)
         XCTAssertTrue(workCancelled)
         XCTAssertEqual(replies, 0)
         XCTAssertEqual(shutdowns, 1)
+    }
+
+    func testDetachedCommandWorkRunsOffMainAndCompletes() async {
+        let completed = expectation(description: "detached completion")
+        let context = CommandContext(timeoutMilliseconds: 1_000)
+        let task = Task.detached {
+            await withTaskCancellationHandler(operation: {
+                XCTAssertFalse(Thread.isMainThread)
+                completed.fulfill()
+            }, onCancel: {
+                context.cancel()
+            })
+        }
+        await fulfillment(of: [completed], timeout: 1)
+        await task.value
     }
 
     func testParentEOFObserverIgnoresDataAndReportsClosure() {

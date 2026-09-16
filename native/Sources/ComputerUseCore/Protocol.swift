@@ -40,6 +40,12 @@ public struct WireRequest {
     }
 }
 
+extension WireRequest {
+    public var timeoutMilliseconds: Int? {
+        integer((object["options"] as? [String: Any])?["timeoutMs"])
+    }
+}
+
 public indirect enum JSONValue: Codable, Equatable {
     case null, bool(Bool), number(Double), string(String), array([JSONValue]), object([String: JSONValue])
 
@@ -217,7 +223,7 @@ private func validID(_ value: Any?) -> Bool {
 }
 
 private func positiveInteger(_ value: Any?) -> Bool { (integer(value) ?? 0) > 0 }
-private func integer(_ value: Any?) -> Int? {
+func integer(_ value: Any?) -> Int? {
     guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
     let value = number.doubleValue
     guard value.isFinite, value.rounded() == value, abs(value) <= Double(maximumSafeInteger) else { return nil }

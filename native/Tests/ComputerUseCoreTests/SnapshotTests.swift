@@ -184,7 +184,7 @@ final class SnapshotTests: XCTestCase {
         XCTAssertNotEqual(full.evidence.refs, compact.evidence.refs)
     }
 
-    func testValidationFailureDoesNotInvalidateRecord() throws {
+    func testValidationFailureDoesNotInvalidateRecord() async throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let recorded = try treeFixture("save-cancel")
@@ -193,21 +193,52 @@ final class SnapshotTests: XCTestCase {
         let store = StateStore(rootURL: root, now: { now })
         let record = SnapshotRecord(id: "44444444-4444-4444-8444-444444444444", createdAt: "2026-09-08T10:00:00Z", expiresAt: "2026-09-08T10:10:00Z", target: recorded.target, treeOptions: recorded.treeOptions, evidence: recorded.evidence)
         try store.writeSnapshot(record)
-        let service = SnapshotService(lock: DesktopLock(rootURL: root), store: store, resolve: { _ in recorded.target }, observe: { _, _ in
-            AXTreeObservation(snapshot: live, liveElements: [2: LiveAXElement()])
-        }, validateTarget: { _ in recorded.target }, now: { now })
+        let service = SnapshotService(
+            lock: DesktopLock(rootURL: root),
+            store: store,
+            resolve: { selector, context in
+                _ = selector
+                _ = context
+                return recorded.target
+            },
+            observe: { target, options, context in
+                _ = target
+                _ = options
+                _ = context
+                return AXTreeObservation(snapshot: live, liveElements: [2: LiveAXElement()])
+            },
+            validateTarget: { identity, context in
+                _ = identity
+                _ = context
+                return recorded.target
+            }
+        )
 
-        XCTAssertThrowsError(try service.withValidatedSnapshotAction(snapshotID: record.id, ref: 2, timeoutMilliseconds: 1_000, stateChanging: true, preflight: { _, _ in
-            XCTFail("preflight must not run")
-        }, dispatch: { _ in
-            XCTFail("dispatch must not run")
-        })) {
+        await XCTAssertThrowsErrorAsync({
+            try await service.withValidatedSnapshotAction(
+                snapshotID: record.id,
+                ref: 2,
+                context: snapshotCommandContext(wallNow: now),
+                stateChanging: true,
+                preflight: { element, target, context in
+                    _ = element
+                    _ = target
+                    _ = context
+                    XCTFail("preflight must not run")
+                },
+                dispatch: { prepared, context in
+                    _ = prepared
+                    _ = context
+                    XCTFail("dispatch must not run")
+                }
+            )
+        }) {
             XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
         }
         XCTAssertFalse(try store.readSnapshot(id: record.id).invalidated)
     }
 
-    func testStateChangingAttemptInvalidatesBeforeActionButNonChangingAttemptDoesNot() throws {
+    func testStateChangingAttemptInvalidatesBeforeActionButNonChangingAttemptDoesNot() async throws {
         for stateChanging in [false, true] {
             let root = temporaryDirectory()
             defer { try? FileManager.default.removeItem(at: root) }
@@ -217,24 +248,53 @@ final class SnapshotTests: XCTestCase {
             let id = stateChanging ? "55555555-5555-4555-8555-555555555555" : "66666666-6666-4666-8666-666666666666"
             let record = SnapshotRecord(id: id, createdAt: "2026-09-08T10:00:00Z", expiresAt: "2026-09-08T10:10:00Z", target: snapshot.target, treeOptions: snapshot.treeOptions, evidence: snapshot.evidence)
             try store.writeSnapshot(record)
-            let service = SnapshotService(lock: DesktopLock(rootURL: root), store: store, resolve: { _ in snapshot.target }, observe: { _, _ in
-                AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
-            }, validateTarget: { _ in snapshot.target }, now: { now })
+            let service = SnapshotService(
+                lock: DesktopLock(rootURL: root),
+                store: store,
+                resolve: { selector, context in
+                    _ = selector
+                    _ = context
+                    return snapshot.target
+                },
+                observe: { target, options, context in
+                    _ = target
+                    _ = options
+                    _ = context
+                    return AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
+                },
+                validateTarget: { identity, context in
+                    _ = identity
+                    _ = context
+                    return snapshot.target
+                }
+            )
             var validDuringPreflight = false
             var invalidatedDuringAction = false
 
-            try service.withValidatedSnapshotAction(snapshotID: id, ref: 2, timeoutMilliseconds: 1_000, stateChanging: stateChanging, preflight: { _, _ in
-                validDuringPreflight = (try? store.readSnapshot(id: id)) != nil
-            }, dispatch: { _ in
-                invalidatedDuringAction = (try? store.readSnapshot(id: id)) == nil
-            })
+            try await service.withValidatedSnapshotAction(
+                snapshotID: id,
+                ref: 2,
+                context: snapshotCommandContext(wallNow: now),
+                stateChanging: stateChanging,
+                preflight: { element, target, context in
+                    _ = element
+                    _ = target
+                    _ = context
+                    validDuringPreflight = (try? store.readSnapshot(id: id)) != nil
+                },
+                dispatch: { prepared, context in
+                    _ = prepared
+                    _ = context
+                    invalidatedDuringAction = (try? store.readSnapshot(id: id)) == nil
+                }
+            )
             XCTAssertTrue(validDuringPreflight)
             XCTAssertEqual(invalidatedDuringAction, stateChanging)
             XCTAssertEqual((try? store.readSnapshot(id: id)) == nil, stateChanging)
         }
     }
 
-    func testFailedStateChangingPreparationDoesNotInvalidateOrDispatch() throws {
+    func testFailedStateChangingPreparationDoesNotInvalidateOrDispatch() async throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let snapshot = try treeFixture("save-cancel")
@@ -242,23 +302,54 @@ final class SnapshotTests: XCTestCase {
         let store = StateStore(rootURL: root, now: { now })
         let record = SnapshotRecord(id: "77777777-7777-4777-8777-777777777777", createdAt: "2026-09-08T10:00:00Z", expiresAt: "2026-09-08T10:10:00Z", target: snapshot.target, treeOptions: snapshot.treeOptions, evidence: snapshot.evidence)
         try store.writeSnapshot(record)
-        let service = SnapshotService(lock: DesktopLock(rootURL: root), store: store, resolve: { _ in snapshot.target }, observe: { _, _ in
-            AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
-        }, validateTarget: { _ in snapshot.target }, now: { now })
+        let service = SnapshotService(
+            lock: DesktopLock(rootURL: root),
+            store: store,
+            resolve: { selector, context in
+                _ = selector
+                _ = context
+                return snapshot.target
+            },
+            observe: { target, options, context in
+                _ = target
+                _ = options
+                _ = context
+                return AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
+            },
+            validateTarget: { identity, context in
+                _ = identity
+                _ = context
+                return snapshot.target
+            }
+        )
         var dispatched = false
 
-        XCTAssertThrowsError(try service.withValidatedSnapshotAction(snapshotID: record.id, ref: 2, timeoutMilliseconds: 1_000, stateChanging: true, preflight: { _, _ in
-            throw NativeFailure("INVALID_REQUEST", "Action-specific preparation failed")
-        }, dispatch: { _ in
-            dispatched = true
-        })) {
+        await XCTAssertThrowsErrorAsync({
+            try await service.withValidatedSnapshotAction(
+                snapshotID: record.id,
+                ref: 2,
+                context: snapshotCommandContext(wallNow: now),
+                stateChanging: true,
+                preflight: { element, target, context in
+                    _ = element
+                    _ = target
+                    _ = context
+                    throw NativeFailure("INVALID_REQUEST", "Action-specific preparation failed")
+                },
+                dispatch: { prepared, context in
+                    _ = prepared
+                    _ = context
+                    dispatched = true
+                }
+            )
+        }) {
             XCTAssertEqual(($0 as? NativeFailure)?.code, "INVALID_REQUEST")
         }
         XCTAssertNoThrow(try store.readSnapshot(id: record.id))
         XCTAssertFalse(dispatched)
     }
 
-    func testInvalidationFailurePreventsActionDispatch() throws {
+    func testInvalidationFailurePreventsActionDispatch() async throws {
         for contents in [Data("not-json".utf8), Data("{}".utf8)] {
             let root = temporaryDirectory()
             defer { try? FileManager.default.removeItem(at: root) }
@@ -270,21 +361,46 @@ final class SnapshotTests: XCTestCase {
             let malformed = root.appendingPathComponent("snapshots/00000000-0000-4000-8000-000000000000.json")
             try contents.write(to: malformed)
             chmod(malformed.path, 0o600)
-            let service = SnapshotService(lock: DesktopLock(rootURL: root), store: store, observe: { _, _ in
-                AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
-            }, validateTarget: { _ in snapshot.target }, now: { now })
+            let service = SnapshotService(
+                lock: DesktopLock(rootURL: root),
+                store: store,
+                observe: { target, options, context in
+                    _ = target
+                    _ = options
+                    _ = context
+                    return AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
+                },
+                validateTarget: { identity, context in
+                    _ = identity
+                    _ = context
+                    return snapshot.target
+                }
+            )
             var actionRan = false
 
-            XCTAssertThrowsError(try service.withValidatedSnapshotAction(snapshotID: record.id, ref: 2, timeoutMilliseconds: 1_000, stateChanging: true, preflight: { _, _ in
-                ()
-            }, dispatch: { _ in
-                actionRan = true
-            }))
+            await XCTAssertThrowsErrorAsync({
+                try await service.withValidatedSnapshotAction(
+                    snapshotID: record.id,
+                    ref: 2,
+                    context: snapshotCommandContext(wallNow: now),
+                    stateChanging: true,
+                    preflight: { element, target, context in
+                        _ = element
+                        _ = target
+                        _ = context
+                    },
+                    dispatch: { prepared, context in
+                        _ = prepared
+                        _ = context
+                        actionRan = true
+                    }
+                )
+            })
             XCTAssertFalse(actionRan)
         }
     }
 
-    func testDispatchFailureLeavesAllAppRecordsInvalidated() throws {
+    func testDispatchFailureLeavesAllAppRecordsInvalidated() async throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let snapshot = try treeFixture("save-cancel")
@@ -292,20 +408,45 @@ final class SnapshotTests: XCTestCase {
         let store = StateStore(rootURL: root, now: { now })
         let record = SnapshotRecord(id: "99999999-9999-4999-8999-999999999999", createdAt: "2026-09-08T10:00:00Z", expiresAt: "2026-09-08T10:10:00Z", target: snapshot.target, treeOptions: snapshot.treeOptions, evidence: snapshot.evidence)
         try store.writeSnapshot(record)
-        let service = SnapshotService(lock: DesktopLock(rootURL: root), store: store, observe: { _, _ in
-            AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
-        }, validateTarget: { _ in snapshot.target }, now: { now })
+        let service = SnapshotService(
+            lock: DesktopLock(rootURL: root),
+            store: store,
+            observe: { target, options, context in
+                _ = target
+                _ = options
+                _ = context
+                return AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
+            },
+            validateTarget: { identity, context in
+                _ = identity
+                _ = context
+                return snapshot.target
+            }
+        )
 
-        XCTAssertThrowsError(try service.withValidatedSnapshotAction(snapshotID: record.id, ref: 2, timeoutMilliseconds: 1_000, stateChanging: true, preflight: { _, _ in
-            "prepared"
-        }, dispatch: { prepared in
-            XCTAssertEqual(prepared, "prepared")
-            throw NativeFailure("NATIVE_FAILURE", "Dispatch failed")
-        }))
+        await XCTAssertThrowsErrorAsync({
+            try await service.withValidatedSnapshotAction(
+                snapshotID: record.id,
+                ref: 2,
+                context: snapshotCommandContext(wallNow: now),
+                stateChanging: true,
+                preflight: { element, target, context in
+                    _ = element
+                    _ = target
+                    _ = context
+                    return "prepared"
+                },
+                dispatch: { prepared, context in
+                    XCTAssertEqual(prepared, "prepared")
+                    _ = context
+                    throw NativeFailure("NATIVE_FAILURE", "Dispatch failed")
+                }
+            )
+        })
         XCTAssertThrowsError(try store.readSnapshot(id: record.id))
     }
 
-    func testEnumerationFailureAfterPreflightPreventsDispatch() throws {
+    func testEnumerationFailureAfterPreflightPreventsDispatch() async throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let snapshot = try treeFixture("save-cancel")
@@ -319,22 +460,48 @@ final class SnapshotTests: XCTestCase {
         let store = StateStore(rootURL: root, now: { now }, io: io)
         let record = SnapshotRecord(id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", createdAt: "2026-09-08T10:00:00Z", expiresAt: "2026-09-08T10:10:00Z", target: snapshot.target, treeOptions: snapshot.treeOptions, evidence: snapshot.evidence)
         try store.writeSnapshot(record)
-        let service = SnapshotService(lock: DesktopLock(rootURL: root), store: store, observe: { _, _ in
-            AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
-        }, validateTarget: { _ in snapshot.target }, now: { now })
+        let service = SnapshotService(
+            lock: DesktopLock(rootURL: root),
+            store: store,
+            observe: { target, options, context in
+                _ = target
+                _ = options
+                _ = context
+                return AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
+            },
+            validateTarget: { identity, context in
+                _ = identity
+                _ = context
+                return snapshot.target
+            }
+        )
         var preflightRan = false
         var dispatchRan = false
 
-        XCTAssertThrowsError(try service.withValidatedSnapshotAction(snapshotID: record.id, ref: 2, timeoutMilliseconds: 1_000, stateChanging: true, preflight: { _, _ in
-            preflightRan = true
-        }, dispatch: { _ in
-            dispatchRan = true
-        }))
+        await XCTAssertThrowsErrorAsync({
+            try await service.withValidatedSnapshotAction(
+                snapshotID: record.id,
+                ref: 2,
+                context: snapshotCommandContext(wallNow: now),
+                stateChanging: true,
+                preflight: { element, target, context in
+                    _ = element
+                    _ = target
+                    _ = context
+                    preflightRan = true
+                },
+                dispatch: { prepared, context in
+                    _ = prepared
+                    _ = context
+                    dispatchRan = true
+                }
+            )
+        })
         XCTAssertTrue(preflightRan)
         XCTAssertFalse(dispatchRan)
     }
 
-    func testEveryInvalidationPublicationFailurePreventsDispatch() throws {
+    func testEveryInvalidationPublicationFailurePreventsDispatch() async throws {
         for failure in InvalidationIOFailure.allCases {
             let root = temporaryDirectory()
             defer { try? FileManager.default.removeItem(at: root) }
@@ -358,27 +525,40 @@ final class SnapshotTests: XCTestCase {
             let service = SnapshotService(
                 lock: DesktopLock(rootURL: root),
                 store: store,
-                observe: { _, _ in
-                    AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
+                observe: { target, options, context in
+                    _ = target
+                    _ = options
+                    _ = context
+                    return AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
                 },
-                validateTarget: { _ in snapshot.target },
-                now: { now }
+                validateTarget: { identity, context in
+                    _ = identity
+                    _ = context
+                    return snapshot.target
+                }
             )
             var preflightRan = false
             var dispatchRan = false
 
-            XCTAssertThrowsError(try service.withValidatedSnapshotAction(
-                snapshotID: record.id,
-                ref: 2,
-                timeoutMilliseconds: 1_000,
-                stateChanging: true,
-                preflight: { _, _ in
-                    preflightRan = true
-                },
-                dispatch: { _ in
-                    dispatchRan = true
-                }
-            ), failure.rawValue)
+            await XCTAssertThrowsErrorAsync({
+                try await service.withValidatedSnapshotAction(
+                    snapshotID: record.id,
+                    ref: 2,
+                    context: snapshotCommandContext(wallNow: now),
+                    stateChanging: true,
+                    preflight: { element, target, context in
+                        _ = element
+                        _ = target
+                        _ = context
+                        preflightRan = true
+                    },
+                    dispatch: { prepared, context in
+                        _ = prepared
+                        _ = context
+                        dispatchRan = true
+                    }
+                )
+            }, failure.rawValue)
             XCTAssertTrue(preflightRan, failure.rawValue)
             XCTAssertFalse(dispatchRan, failure.rawValue)
 
@@ -387,16 +567,28 @@ final class SnapshotTests: XCTestCase {
         }
     }
 
-    func testSnapshotNativeDispatchUsesInjectedPureObservation() throws {
+    func testSnapshotNativeDispatchUsesInjectedPureObservation() async throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let fixture = try treeFixture("save-cancel")
         let lock = DesktopLock(rootURL: root)
         let now = Date(timeIntervalSince1970: 1_789_000_000)
         let store = StateStore(rootURL: root, now: { now })
-        let service = SnapshotService(lock: lock, store: store, resolve: { _ in fixture.target }, observe: { _, _ in
-            AXTreeObservation(snapshot: fixture, liveElements: [:])
-        }, now: { now })
+        let service = SnapshotService(
+            lock: lock,
+            store: store,
+            resolve: { selector, context in
+                _ = selector
+                _ = context
+                return fixture.target
+            },
+            observe: { target, options, context in
+                _ = target
+                _ = options
+                _ = context
+                return AXTreeObservation(snapshot: fixture, liveElements: [:])
+            }
+        )
         let native = NativeService(snapshotService: service)
         let request = try XCTUnwrap(WireRequest.decode([
             "schemaVersion": 1,
@@ -406,14 +598,17 @@ final class SnapshotTests: XCTestCase {
             "options": ["timeoutMs": 1_000, "cursor": "off"]
         ]))
 
-        let reply = native.execute(request)
+        let reply = await native.execute(
+            request,
+            context: snapshotCommandContext(wallNow: now)
+        )
         XCTAssertTrue(reply.ok)
         XCTAssertEqual(reply.command, "snapshot")
         guard case let .string(snapshotID)? = reply.data?["snapshotId"] else { return XCTFail("missing snapshot ID") }
         XCTAssertNoThrow(try store.readSnapshot(id: snapshotID))
     }
 
-    func testNativeFailureDetailsRoundTripThroughDispatcher() throws {
+    func testNativeFailureDetailsRoundTripThroughDispatcher() async throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let fixture = try treeFixture("save-cancel")
@@ -422,15 +617,21 @@ final class SnapshotTests: XCTestCase {
         let service = SnapshotService(
             lock: lock,
             store: StateStore(rootURL: root, now: { now }),
-            resolve: { _ in fixture.target },
-            observe: { _, _ in
+            resolve: { selector, context in
+                _ = selector
+                _ = context
+                return fixture.target
+            },
+            observe: { target, options, context in
+                _ = target
+                _ = options
+                _ = context
                 throw NativeFailure(
                     "NATIVE_FAILURE",
                     "Injected observation failure",
                     details: ["mutationStatus": .string("notStarted"), "safe": .string("kept")]
                 )
-            },
-            now: { now }
+            }
         )
         let request = try XCTUnwrap(WireRequest.decode([
             "schemaVersion": 1,
@@ -440,7 +641,10 @@ final class SnapshotTests: XCTestCase {
             "options": ["timeoutMs": 1_000, "cursor": "off"]
         ]))
 
-        let reply = NativeService(snapshotService: service).execute(request)
+        let reply = await NativeService(snapshotService: service).execute(
+            request,
+            context: snapshotCommandContext(wallNow: now)
+        )
 
         XCTAssertEqual(reply.error?.code, "NATIVE_FAILURE")
         XCTAssertEqual(reply.error?.details, [
@@ -476,6 +680,20 @@ final class SnapshotTests: XCTestCase {
 
         XCTAssertEqual(actual, expected)
     }
+}
+
+private func snapshotCommandContext(
+    wallNow: Date,
+    timeoutMilliseconds: Int = 1_000
+) -> CommandContext {
+    CommandContext(
+        timeoutMilliseconds: timeoutMilliseconds,
+        clock: NativeClock(
+            monotonicNow: { 0 },
+            wallNow: { wallNow },
+            sleepNanoseconds: { _ in }
+        )
+    )
 }
 
 private func treeFixture(_ name: String) throws -> AXTreeSnapshot {

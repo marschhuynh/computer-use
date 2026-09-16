@@ -11,21 +11,37 @@ public final class NativeService {
         self.desktopLock = desktopLock
     }
 
-    public func execute(_ request: WireRequest) -> WireReply {
+    public func execute(_ request: WireRequest, context: CommandContext) async -> WireReply {
         do {
+            try context.check()
             switch request.command {
             case .doctor:
-                return try withDesktopLock(request) { doctor() }
+                return try await desktopLock.withLock(context: context) {
+                    let result = doctor()
+                    try context.check()
+                    return result
+                }
             case .snapshot:
                 guard let selector = TargetSelector.decode(request.object["target"]),
-                      let tree = decodeTreeOptions(request.object["tree"]),
-                      let timeout = wireInteger((request.object["options"] as? [String: Any])?["timeoutMs"]) else {
-                    return .failure(command: request.command, code: "PROTOCOL_ERROR", message: "Invalid snapshot request")
+                      let tree = decodeTreeOptions(request.object["tree"]) else {
+                    return .failure(
+                        command: request.command,
+                        code: "PROTOCOL_ERROR",
+                        message: "Invalid snapshot request"
+                    )
                 }
-                let result = try snapshotService.snapshot(selector: selector, options: tree, timeoutMilliseconds: timeout)
+                let result = try await snapshotService.snapshot(
+                    selector: selector,
+                    options: tree,
+                    context: context
+                )
                 return .success(command: .snapshot, data: result.wireData)
             default:
-                return .failure(command: request.command, code: "UNSUPPORTED_ACTION", message: "This command is not implemented by this helper version")
+                return .failure(
+                    command: request.command,
+                    code: "UNSUPPORTED_ACTION",
+                    message: "This command is not implemented by this helper version"
+                )
             }
         } catch let failure as NativeFailure {
             return .failure(
@@ -35,15 +51,12 @@ public final class NativeService {
                 details: failure.details
             )
         } catch {
-            return .failure(command: request.command, code: "NATIVE_FAILURE", message: "Native command failed")
+            return .failure(
+                command: request.command,
+                code: "NATIVE_FAILURE",
+                message: "Native command failed"
+            )
         }
-    }
-
-    private func withDesktopLock(_ request: WireRequest, body: () -> WireReply) throws -> WireReply {
-        guard let timeout = wireInteger((request.object["options"] as? [String: Any])?["timeoutMs"]) else {
-            throw NativeFailure("PROTOCOL_ERROR", "Invalid command options")
-        }
-        return try desktopLock.withLock(timeoutMilliseconds: timeout, body)
     }
 
     private func doctor() -> WireReply {
@@ -69,16 +82,9 @@ public final class NativeService {
 
 private func decodeTreeOptions(_ value: Any?) -> TreeOptions? {
     guard let tree = value as? [String: Any],
-          let maxDepth = wireInteger(tree["maxDepth"]),
-          let maxElements = wireInteger(tree["maxElements"]),
+          let maxDepth = integer(tree["maxDepth"]),
+          let maxElements = integer(tree["maxElements"]),
           let rawMode = tree["hintMode"] as? String,
           let hintMode = HintMode(rawValue: rawMode) else { return nil }
     return TreeOptions(maxDepth: maxDepth, maxElements: maxElements, hintMode: hintMode)
-}
-
-private func wireInteger(_ value: Any?) -> Int? {
-    guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
-    let value = number.doubleValue
-    guard value.isFinite, value.rounded() == value, value > 0, value <= Double(maximumSafeInteger) else { return nil }
-    return Int(value)
 }

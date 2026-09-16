@@ -18,46 +18,54 @@ public struct SnapshotResult {
 }
 
 public final class SnapshotService {
-    public typealias Resolve = (TargetSelector) throws -> ResolvedTarget
-    public typealias Observe = (ResolvedTarget, TreeOptions) throws -> AXTreeObservation
+    public typealias Resolve = (TargetSelector, CommandContext) async throws -> ResolvedTarget
+    public typealias Observe = (ResolvedTarget, TreeOptions, CommandContext) async throws -> AXTreeObservation
+    public typealias ValidateTarget = (TargetIdentity, CommandContext) async throws -> ResolvedTarget
 
-    public typealias ValidateTarget = (TargetIdentity) throws -> ResolvedTarget
     private let lock: DesktopLock
     private let store: StateStore
     private let resolve: Resolve
     private let observe: Observe
-    private let currentDate: () -> Date
     private let validateTarget: ValidateTarget
 
     public init(
         lock: DesktopLock = DesktopLock(),
         store: StateStore = StateStore(),
-        resolve: @escaping Resolve = { try TargetResolver().resolve($0) },
-        observe: @escaping Observe = AXTree.capture,
-        validateTarget: @escaping ValidateTarget = { try TargetResolver().validate($0) },
-        now: @escaping () -> Date = Date.init
+        resolve: @escaping Resolve = { selector, _ in try TargetResolver().resolve(selector) },
+        observe: @escaping Observe = { target, options, _ in
+            try AXTree.capture(target: target, options: options)
+        },
+        validateTarget: @escaping ValidateTarget = { identity, _ in
+            try TargetResolver().validate(identity)
+        }
     ) {
         self.lock = lock
         self.store = store
         self.resolve = resolve
         self.observe = observe
         self.validateTarget = validateTarget
-        currentDate = now
     }
 
-    public func snapshot(selector: TargetSelector, options: TreeOptions, timeoutMilliseconds: Int) throws -> SnapshotResult {
-        let deadline = deadline(after: timeoutMilliseconds)
-        return try lock.withLock(deadline: deadline) {
-            try requireTime(deadline)
+    public func snapshot(
+        selector: TargetSelector,
+        options: TreeOptions,
+        context: CommandContext
+    ) async throws -> SnapshotResult {
+        try await lock.withLock(context: context) {
+            try context.check()
             try store.sweep()
-            let target = try resolve(selector)
-            try requireTime(deadline)
-            let observation = try observe(target, options)
-            guard observation.snapshot.target == target, observation.snapshot.treeOptions == options else {
-                throw NativeFailure("STALE_SNAPSHOT", "Target or traversal evidence changed during snapshot")
+            let target = try await resolve(selector, context)
+            try context.check()
+            let observation = try await observe(target, options, context)
+            guard observation.snapshot.target == target,
+                  observation.snapshot.treeOptions == options else {
+                throw NativeFailure(
+                    "STALE_SNAPSHOT",
+                    "Target or traversal evidence changed during snapshot"
+                )
             }
-            try requireTime(deadline)
-            let created = currentDate()
+            try context.check()
+            let created = context.wallNow
             let record = SnapshotRecord(
                 id: UUID().uuidString.lowercased(),
                 createdAt: timestamp(created),
@@ -74,28 +82,38 @@ public final class SnapshotService {
     func withValidatedSnapshotAction<Prepared, Result>(
         snapshotID: String,
         ref: Int,
-        timeoutMilliseconds: Int,
+        context: CommandContext,
         stateChanging: Bool,
-        preflight: (LiveAXElement, ResolvedTarget) throws -> Prepared,
-        dispatch: (Prepared) throws -> Result
-    ) throws -> Result {
-        let deadline = deadline(after: timeoutMilliseconds)
-        return try lock.withLock(deadline: deadline) {
-            try requireTime(deadline)
+        preflight: (LiveAXElement, ResolvedTarget, CommandContext) async throws -> Prepared,
+        dispatch: (Prepared, CommandContext) async throws -> Result
+    ) async throws -> Result {
+        try await lock.withLock(context: context) {
+            try context.check()
             try store.sweep()
             let record = try store.readSnapshot(id: snapshotID)
-            let target = try validateTarget(record.target.identity)
-            guard target == record.target else { throw NativeFailure("STALE_SNAPSHOT", "Window evidence changed") }
-            let live = try observe(target, record.treeOptions)
-            let recorded = AXTreeSnapshot(target: record.target, treeOptions: record.treeOptions, evidence: record.evidence)
+            let target = try await validateTarget(record.target.identity, context)
+            guard target == record.target else {
+                throw NativeFailure("STALE_SNAPSHOT", "Window evidence changed")
+            }
+            let live = try await observe(target, record.treeOptions, context)
+            let recorded = AXTreeSnapshot(
+                target: record.target,
+                treeOptions: record.treeOptions,
+                evidence: record.evidence
+            )
             _ = try Self.validateEvidence(recorded, live: live.snapshot, ref: ref)
-            guard let element = live.liveElements[ref] else { throw NativeFailure("STALE_SNAPSHOT", "Live accessibility reference is unavailable") }
-            let prepared = try preflight(element, target)
-            try requireTime(deadline)
+            guard let element = live.liveElements[ref] else {
+                throw NativeFailure(
+                    "STALE_SNAPSHOT",
+                    "Live accessibility reference is unavailable"
+                )
+            }
+            let prepared = try await preflight(element, target, context)
+            try context.check()
             if stateChanging {
                 try store.invalidateRecords(for: record.target.identity)
             }
-            return try dispatch(prepared)
+            return try await dispatch(prepared, context)
         }
     }
 
@@ -113,16 +131,6 @@ public final class SnapshotService {
             throw NativeFailure("STALE_SNAPSHOT", "Snapshot evidence no longer matches the selected window")
         }
         return liveRef
-    }
-
-    private func deadline(after milliseconds: Int) -> UInt64 {
-        let increment = UInt64(max(0, milliseconds)) * 1_000_000
-        let now = lock.now()
-        return now > UInt64.max - increment ? UInt64.max : now + increment
-    }
-
-    private func requireTime(_ deadline: UInt64) throws {
-        guard lock.now() < deadline else { throw NativeFailure("TIMEOUT", "Desktop operation deadline expired") }
     }
 }
 

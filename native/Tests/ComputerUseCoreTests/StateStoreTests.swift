@@ -172,7 +172,7 @@ final class StateStoreTests: XCTestCase {
         XCTAssertNoThrow(try writer.readSnapshot(id: fixedID))
     }
 
-    func testRootSymlinkAndPathSwapNeverChmodUnrelatedObject() throws {
+    func testRootSymlinkAndPathSwapNeverChmodUnrelatedObject() async throws {
         let parent = temporaryStateDirectory()
         defer { try? FileManager.default.removeItem(at: parent) }
         let outside = parent.appendingPathComponent("outside", isDirectory: true)
@@ -180,16 +180,20 @@ final class StateStoreTests: XCTestCase {
         XCTAssertEqual(mkdir(outside.path, 0o755), 0)
         XCTAssertEqual(fileMode(outside), 0o755)
         try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: outside)
-        XCTAssertThrowsError(try DesktopLock(rootURL: symlink).withLock(timeoutMilliseconds: 100) {})
+        await XCTAssertThrowsErrorAsync({
+            try await DesktopLock(rootURL: symlink).withLock(
+                context: CommandContext(timeoutMilliseconds: 100)
+            ) {}
+        })
         XCTAssertEqual(fileMode(outside), 0o755)
 
         let root = parent.appendingPathComponent("root", isDirectory: true)
         let openedObject = parent.appendingPathComponent("opened", isDirectory: true)
         XCTAssertEqual(mkdir(root.path, 0o755), 0)
-        let descriptor = try PrivateStateDirectory.openRoot(root) { _ in
+        let descriptor = try PrivateStateDirectory.openRoot(root, afterOpen: { _ in
             XCTAssertEqual(rename(root.path, openedObject.path), 0)
             XCTAssertEqual(mkdir(root.path, 0o755), 0)
-        }
+        })
         close(descriptor)
         XCTAssertEqual(fileMode(openedObject), 0o700)
         XCTAssertEqual(fileMode(root), 0o755)
@@ -393,11 +397,11 @@ final class StateStoreTests: XCTestCase {
         }
     }
 
-    func testLockSetupDoesNotCreateSnapshotDirectory() throws {
+    func testLockSetupDoesNotCreateSnapshotDirectory() async throws {
         let root = temporaryStateDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let lock = DesktopLock(rootURL: root)
-        try lock.withLock(timeoutMilliseconds: 100) {}
+        try await lock.withLock(context: CommandContext(timeoutMilliseconds: 100)) {}
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("snapshots").path))
         XCTAssertEqual(fileMode(root.appendingPathComponent("desktop.lock")), 0o600)
     }
@@ -445,16 +449,25 @@ final class DesktopLockTests: XCTestCase {
         XCTAssertEqual(successor.terminationStatus, 0)
     }
 
-    func testBusyAcquisitionIsDeadlineBounded() throws {
+    func testBusyAcquisitionIsDeadlineBounded() async throws {
         let root = temporaryStateDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let ready = root.appendingPathComponent("ready")
-        let owner = try spawnLockHelper(root: root, log: root.appendingPathComponent("owner.log"), holdMicroseconds: 500_000, ready: ready)
+        let owner = try spawnLockHelper(
+            root: root,
+            log: root.appendingPathComponent("owner.log"),
+            holdMicroseconds: 500_000,
+            ready: ready
+        )
         defer { terminateAndWait(owner) }
         try waitForFile(ready)
 
         let start = DispatchTime.now().uptimeNanoseconds
-        XCTAssertThrowsError(try DesktopLock(rootURL: root).withLock(timeoutMilliseconds: 50) {}) {
+        await XCTAssertThrowsErrorAsync({
+            try await DesktopLock(rootURL: root).withLock(
+                context: CommandContext(timeoutMilliseconds: 50)
+            ) {}
+        }) {
             XCTAssertEqual(($0 as? NativeFailure)?.code, "BUSY")
         }
         let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000_000
@@ -463,48 +476,145 @@ final class DesktopLockTests: XCTestCase {
         XCTAssertEqual(owner.terminationStatus, 0)
     }
 
-
-    func testSuccessfulFlockAtDeadlineIsReleasedWithoutRunningBody() throws {
+    func testSuccessfulFlockAtDeadlineIsReleasedWithoutRunningBody() async {
         let root = temporaryStateDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
-        var times: [UInt64] = [9, 10]
+        var now: UInt64 = 9
+        let context = CommandContext(
+            timeoutMilliseconds: 1,
+            clock: NativeClock(
+                monotonicNow: { now },
+                wallNow: { Date(timeIntervalSince1970: 0) },
+                sleepNanoseconds: { _ in }
+            )
+        )
         var operations: [Int32] = []
-        let lock = DesktopLock(rootURL: root, monotonicNow: { times.removeFirst() }, wait: {}, flock: { _, operation in
+        let lock = DesktopLock(rootURL: root, flock: { _, operation in
             operations.append(operation)
+            now = context.deadline
             return SystemCallResult(value: 0, error: 0)
         })
         var bodyRan = false
 
-        XCTAssertThrowsError(try lock.withLock(deadline: 10) { bodyRan = true }) {
-            XCTAssertEqual(($0 as? NativeFailure)?.code, "BUSY")
+        await XCTAssertThrowsErrorAsync({
+            try await lock.withLock(context: context) { bodyRan = true }
+        }) {
+            XCTAssertEqual(($0 as? NativeFailure)?.code, "TIMEOUT")
         }
         XCTAssertFalse(bodyRan)
         XCTAssertEqual(operations, [LOCK_EX | LOCK_NB, LOCK_UN])
     }
 
-    func testEINTRRetryChecksDeadlineBeforeAnotherFlockAttempt() throws {
+    func testEINTRRetryChecksDeadlineBeforeAnotherFlockAttempt() async {
         let root = temporaryStateDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
-        var times: [UInt64] = [9, 10]
+        var now: UInt64 = 9
+        let context = CommandContext(
+            timeoutMilliseconds: 1,
+            clock: NativeClock(
+                monotonicNow: { now },
+                wallNow: { Date(timeIntervalSince1970: 0) },
+                sleepNanoseconds: { _ in }
+            )
+        )
         var attempts = 0
-        let lock = DesktopLock(rootURL: root, monotonicNow: { times.removeFirst() }, wait: {}, flock: { _, _ in
+        let lock = DesktopLock(rootURL: root, flock: { _, _ in
             attempts += 1
+            now = context.deadline
             return SystemCallResult(value: -1, error: EINTR)
         })
         var bodyRan = false
 
-        XCTAssertThrowsError(try lock.withLock(deadline: 10) { bodyRan = true }) {
-            XCTAssertEqual(($0 as? NativeFailure)?.code, "BUSY")
+        await XCTAssertThrowsErrorAsync({
+            try await lock.withLock(context: context) { bodyRan = true }
+        }) {
+            XCTAssertEqual(($0 as? NativeFailure)?.code, "TIMEOUT")
         }
         XCTAssertEqual(attempts, 1)
         XCTAssertFalse(bodyRan)
     }
 
-    func testSubprocessLockHelper() throws {
+    func testContendedWaitExpiresAsBusy() async {
+        let root = temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var now: UInt64 = 0
+        let lock = DesktopLock(rootURL: root, flock: { _, _ in
+            now = 1_000_000
+            return SystemCallResult(value: -1, error: EWOULDBLOCK)
+        })
+        let context = CommandContext(
+            timeoutMilliseconds: 1,
+            clock: NativeClock(
+                monotonicNow: { now },
+                wallNow: { Date(timeIntervalSince1970: 0) },
+                sleepNanoseconds: { _ in }
+            )
+        )
+        await XCTAssertThrowsErrorAsync({
+            try await lock.withLock(context: context) {}
+        }) {
+            XCTAssertEqual(($0 as? NativeFailure)?.code, "BUSY")
+        }
+    }
+
+    func testLockSleepIsClampedToRemainingBudget() async {
+        let root = temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var now: UInt64 = 0
+        var slept: [UInt64] = []
+        let lock = DesktopLock(rootURL: root, flock: { _, _ in
+            SystemCallResult(value: -1, error: EWOULDBLOCK)
+        })
+        let context = CommandContext(
+            timeoutMilliseconds: 5,
+            clock: NativeClock(
+                monotonicNow: { now },
+                wallNow: { Date(timeIntervalSince1970: 0) },
+                sleepNanoseconds: { duration in
+                    slept.append(duration)
+                    now = 5_000_000
+                }
+            )
+        )
+        await XCTAssertThrowsErrorAsync({
+            try await lock.withLock(context: context) {}
+        }) {
+            XCTAssertEqual(($0 as? NativeFailure)?.code, "BUSY")
+        }
+        XCTAssertEqual(slept, [5_000_000])
+    }
+
+    func testCancellationDuringWaitDoesNotUnlockAnUnheldLock() async {
+        let root = temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var operations: [Int32] = []
+        let context = CommandContext(
+            timeoutMilliseconds: 5_000,
+            clock: NativeClock(
+                monotonicNow: { 0 },
+                wallNow: { Date(timeIntervalSince1970: 0) },
+                sleepNanoseconds: { _ in throw CancellationError() }
+            )
+        )
+        let lock = DesktopLock(rootURL: root, flock: { _, operation in
+            operations.append(operation)
+            return SystemCallResult(value: -1, error: EWOULDBLOCK)
+        })
+        await XCTAssertThrowsErrorAsync({
+            try await lock.withLock(context: context) {}
+        }) {
+            XCTAssertEqual(($0 as? NativeFailure)?.code, "INTERRUPTED")
+        }
+        XCTAssertEqual(operations, [LOCK_EX | LOCK_NB])
+    }
+
+    func testSubprocessLockHelper() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard let rootPath = environment["LOCK_HELPER_ROOT"], let logPath = environment["LOCK_HELPER_LOG"] else { return }
         let hold = useconds_t(environment["LOCK_HELPER_HOLD"] ?? "0") ?? 0
-        try DesktopLock(rootURL: URL(fileURLWithPath: rootPath)).withLock(timeoutMilliseconds: 5_000) {
+        try await DesktopLock(rootURL: URL(fileURLWithPath: rootPath)).withLock(
+            context: CommandContext(timeoutMilliseconds: 5_000)
+        ) {
             appendEvent("start \(getpid())\n", to: logPath)
             if let readyPath = environment["LOCK_HELPER_READY"] {
                 FileManager.default.createFile(atPath: readyPath, contents: Data())

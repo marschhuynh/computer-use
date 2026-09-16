@@ -8,13 +8,16 @@ final class ProtocolTests: XCTestCase {
         }
     }
 
-    func testUnsupportedValidRequestStagesUntilItsTask() throws {
+    func testUnsupportedValidRequestStagesUntilItsTask() async throws {
         let request = try XCTUnwrap(WireRequest.decode([
             "schemaVersion": 1,
             "command": "apps",
             "options": ["timeoutMs": 1, "cursor": "on"]
         ]))
-        let reply = NativeService().execute(request)
+        let reply = await NativeService().execute(
+            request,
+            context: CommandContext(timeoutMilliseconds: 1)
+        )
         XCTAssertEqual(reply.error?.code, "UNSUPPORTED_ACTION")
     }
 

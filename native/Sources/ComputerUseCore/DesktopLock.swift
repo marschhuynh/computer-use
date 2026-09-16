@@ -13,18 +13,10 @@ public final class DesktopLock {
     }
 
     private let rootURL: URL
-    private let monotonicNow: () -> UInt64
-    private let wait: () -> Void
     private let flockCall: (Int32, Int32) -> SystemCallResult<Int32>
 
-    public init(
-        rootURL: URL = DesktopLock.defaultRootURL,
-        monotonicNow: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
-        wait: @escaping () -> Void = { usleep(10_000) }
-    ) {
+    public init(rootURL: URL = DesktopLock.defaultRootURL) {
         self.rootURL = rootURL
-        self.monotonicNow = monotonicNow
-        self.wait = wait
         flockCall = { descriptor, operation in
             let value = flock(descriptor, operation)
             return SystemCallResult(value: value, error: value < 0 ? errno : 0)
@@ -33,64 +25,94 @@ public final class DesktopLock {
 
     init(
         rootURL: URL,
-        monotonicNow: @escaping () -> UInt64,
-        wait: @escaping () -> Void,
         flock: @escaping (Int32, Int32) -> SystemCallResult<Int32>
     ) {
         self.rootURL = rootURL
-        self.monotonicNow = monotonicNow
-        self.wait = wait
         flockCall = flock
     }
 
-    public func withLock<T>(timeoutMilliseconds: Int, _ body: () throws -> T) throws -> T {
-        let milliseconds = max(0, timeoutMilliseconds)
-        let increment = UInt64(milliseconds) * 1_000_000
-        let now = monotonicNow()
-        let deadline = now > UInt64.max - increment ? UInt64.max : now + increment
-        return try withLock(deadline: deadline, body)
-    }
-
-    func withLock<T>(deadline: UInt64, _ body: () throws -> T) throws -> T {
-        let rootDescriptor = try PrivateStateDirectory.openRoot(rootURL)
+    public func withLock<T>(
+        context: CommandContext,
+        _ body: () async throws -> T
+    ) async throws -> T {
+        try context.check()
+        let rootDescriptor = try PrivateStateDirectory.openRoot(
+            rootURL,
+            checkpoint: { try context.check() }
+        )
         defer { close(rootDescriptor) }
-        let descriptor = try openLockFile(in: rootDescriptor)
+        let descriptor = try openLockFile(
+            in: rootDescriptor,
+            checkpoint: { try context.check() }
+        )
         defer { close(descriptor) }
         try verifyPrivateFile(descriptor)
-        guard fchmod(descriptor, 0o600) == 0 else { throw stateFailure("Unable to protect the desktop lock") }
+        guard fchmod(descriptor, 0o600) == 0 else {
+            throw stateFailure("Unable to protect the desktop lock")
+        }
 
+        var observedContention = false
         while true {
-            guard monotonicNow() < deadline else { throw NativeFailure("BUSY", "Another desktop operation is in progress") }
+            try context.checkLockWait(observedContention: observedContention)
             let result = flockCall(descriptor, LOCK_EX | LOCK_NB)
             if result.value == 0 {
-                guard monotonicNow() < deadline else {
+                do {
+                    try context.checkLockWait(observedContention: observedContention)
+                } catch {
                     _ = flockCall(descriptor, LOCK_UN)
-                    throw NativeFailure("BUSY", "Another desktop operation is in progress")
+                    throw error
                 }
                 break
             }
             let lockError = result.error
-            if lockError == EINTR { continue }
-            guard lockError == EWOULDBLOCK || lockError == EAGAIN else { throw stateFailure("Unable to acquire the desktop lock") }
-            guard monotonicNow() < deadline else { throw NativeFailure("BUSY", "Another desktop operation is in progress") }
-            wait()
+            if lockError == EINTR {
+                try context.checkLockWait(observedContention: observedContention)
+                continue
+            }
+            guard lockError == EWOULDBLOCK || lockError == EAGAIN else {
+                throw stateFailure("Unable to acquire the desktop lock")
+            }
+            observedContention = true
+            try context.checkLockWait(observedContention: true)
+            do {
+                try await context.sleep(
+                    nanoseconds: min(10_000_000, context.remainingNanoseconds)
+                )
+            } catch let failure as NativeFailure where failure.code == "TIMEOUT" {
+                try context.checkLockWait(observedContention: true)
+            }
         }
         defer { _ = flockCall(descriptor, LOCK_UN) }
-        return try body()
+        return try await body()
     }
-
-    func now() -> UInt64 { monotonicNow() }
 }
-private func openLockFile(in rootDescriptor: Int32) throws -> Int32 {
+private func openLockFile(
+    in rootDescriptor: Int32,
+    checkpoint: () throws -> Void
+) throws -> Int32 {
     while true {
+        try checkpoint()
         let existing = openat(rootDescriptor, "desktop.lock", O_RDWR | O_CLOEXEC | O_NOFOLLOW)
         if existing >= 0 { return existing }
-        if errno == EINTR { continue }
-        guard errno == ENOENT else { throw stateFailure("Unable to open the desktop lock") }
+        if errno == EINTR {
+            try checkpoint()
+            continue
+        }
+        guard errno == ENOENT else {
+            throw stateFailure("Unable to open the desktop lock")
+        }
 
-        let created = openat(rootDescriptor, "desktop.lock", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        let created = openat(
+            rootDescriptor,
+            "desktop.lock",
+            O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+            0o600
+        )
         if created >= 0 { return created }
-        if errno == EINTR || errno == EEXIST { continue }
+        if errno == EINTR || errno == EEXIST {
+            try checkpoint()
+            continue
+        }
         throw stateFailure("Unable to create the desktop lock")
     }
 }
@@ -98,28 +120,44 @@ private func openLockFile(in rootDescriptor: Int32) throws -> Int32 {
 
 
 struct PrivateStateDirectory {
-    static func openRoot(_ url: URL, afterOpen: (Int32) throws -> Void = { _ in }) throws -> Int32 {
-        guard url.isFileURL, url.path.hasPrefix("/") else { throw stateFailure("Invalid state directory") }
+    static func openRoot(
+        _ url: URL,
+        checkpoint: () throws -> Void = {},
+        afterOpen: (Int32) throws -> Void = { _ in }
+    ) throws -> Int32 {
+        guard url.isFileURL, url.path.hasPrefix("/") else {
+            throw stateFailure("Invalid state directory")
+        }
         while mkdir(url.path, 0o700) != 0 {
-            if errno == EINTR { continue }
-            guard errno == EEXIST else { throw stateFailure("Unable to create the state directory") }
+            if errno == EINTR {
+                try checkpoint()
+                continue
+            }
+            guard errno == EEXIST else {
+                throw stateFailure("Unable to create the state directory")
+            }
             break
         }
-
         let descriptor: Int32
         while true {
+            try checkpoint()
             let opened = open(url.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
             if opened >= 0 {
                 descriptor = opened
                 break
             }
-            if errno == EINTR { continue }
+            if errno == EINTR {
+                try checkpoint()
+                continue
+            }
             throw stateFailure("Unable to open the state directory")
         }
         do {
             try afterOpen(descriptor)
             try verifyPrivateDirectory(descriptor)
-            guard fchmod(descriptor, 0o700) == 0 else { throw stateFailure("Unable to protect the state directory") }
+            guard fchmod(descriptor, 0o700) == 0 else {
+                throw stateFailure("Unable to protect the state directory")
+            }
             return descriptor
         } catch {
             close(descriptor)

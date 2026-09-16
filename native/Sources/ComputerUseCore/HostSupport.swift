@@ -49,44 +49,11 @@ public struct BoundedLineReader {
     }
 }
 
-public final class HostCancellation {
-    private let lock = NSLock()
-    private var cancelled = false
-    private var handlers: [() -> Void] = []
-
-    public var isCancelled: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return cancelled
-    }
-
-    public func onCancel(_ handler: @escaping () -> Void) {
-        lock.lock()
-        if cancelled {
-            lock.unlock()
-            handler()
-        } else {
-            handlers.append(handler)
-            lock.unlock()
-        }
-    }
-
-    fileprivate func cancel() {
-        lock.lock()
-        guard !cancelled else {
-            lock.unlock()
-            return
-        }
-        cancelled = true
-        let pendingHandlers = handlers
-        handlers.removeAll()
-        lock.unlock()
-        pendingHandlers.forEach { $0() }
-    }
-}
-
 public final class HostSession {
-    public typealias Work = (HostCancellation, @escaping (WireReply) -> Void) -> Void
+    public typealias Work = (
+        _ context: CommandContext,
+        _ completion: @escaping (WireReply) -> Void
+    ) -> Task<Void, Never>
 
     private enum State {
         case ready
@@ -95,13 +62,20 @@ public final class HostSession {
     }
 
     private let lock = NSLock()
+    private let context: CommandContext
     private let work: Work
     private let onReply: (WireReply) -> Void
     private let onShutdown: () -> Void
-    private let cancellation = HostCancellation()
     private var state = State.ready
+    private var task: Task<Void, Never>?
 
-    public init(work: @escaping Work, onReply: @escaping (WireReply) -> Void, onShutdown: @escaping () -> Void) {
+    public init(
+        context: CommandContext,
+        work: @escaping Work,
+        onReply: @escaping (WireReply) -> Void,
+        onShutdown: @escaping () -> Void
+    ) {
+        self.context = context
         self.work = work
         self.onReply = onReply
         self.onShutdown = onShutdown
@@ -116,8 +90,17 @@ public final class HostSession {
         state = .running
         lock.unlock()
 
-        work(cancellation) { [weak self] reply in
+        let started = work(context) { [weak self] reply in
             self?.workDidFinish(reply)
+        }
+
+        lock.lock()
+        if state == .finished {
+            lock.unlock()
+            started.cancel()
+        } else {
+            task = started
+            lock.unlock()
         }
     }
 
@@ -128,9 +111,12 @@ public final class HostSession {
             return
         }
         state = .finished
+        let activeTask = task
+        task = nil
         lock.unlock()
 
-        cancellation.cancel()
+        context.cancel()
+        activeTask?.cancel()
         onShutdown()
     }
 
@@ -141,6 +127,7 @@ public final class HostSession {
             return
         }
         state = .finished
+        task = nil
         lock.unlock()
 
         onReply(reply)
