@@ -144,6 +144,39 @@ public final class TargetResolver {
         return applications
     }
 
+    /// Resolves only the *application* for `windows`, then enumerates its windows.
+    /// Unlike `resolve`, this does not require launch identity, does not require a
+    /// unique/eligible window, and does not select one — it returns every
+    /// candidate so the caller can report eligibility per window.
+    public func windowsApplication(_ selector: TargetSelector, context: CommandContext) async throws -> ProcessMetadata {
+        try context.check()
+        let applications = try await provider.listApplications()
+        try context.check()
+        let selected: [ProcessMetadata]
+        switch selector {
+        case let .app(name, _):
+            selected = applications.filter { $0.name == name || $0.bundleId == name }
+        case let .pid(pid, _):
+            selected = applications.filter { $0.pid == pid }
+        }
+        guard selected.count == 1 else {
+            throw NativeFailure(
+                selected.isEmpty ? "TARGET_NOT_FOUND" : "AMBIGUOUS_TARGET",
+                "Application selection is not unique"
+            )
+        }
+        return selected[0]
+    }
+
+    /// Enumerates window candidates for a pid for the `windows` command. Returns
+    /// every matched window — eligible or not — so callers can report reasons.
+    public func listWindows(for pid: Int, context: CommandContext) throws -> [TargetWindow] {
+        try context.check()
+        let windows = try provider.windowsForPID(pid, context)
+        try context.check()
+        return windows
+    }
+
     public func resolve(
         _ selector: TargetSelector,
         context: CommandContext

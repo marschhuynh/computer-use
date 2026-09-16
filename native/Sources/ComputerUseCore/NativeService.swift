@@ -36,6 +36,19 @@ public final class NativeService {
                         "bundleId": app.bundleId.map(JSONValue.string) ?? .null,
                     ]) })
                 ])
+            case .windows:
+                guard let selector = TargetSelector.decode(request.object["target"]) else {
+                    return .failure(
+                        command: request.command,
+                        code: "PROTOCOL_ERROR",
+                        message: "Invalid windows request"
+                    )
+                }
+                let application = try await targetResolver.windowsApplication(selector, context: context)
+                let windows = try targetResolver.listWindows(for: application.pid, context: context)
+                return .success(command: .windows, data: [
+                    "windows": .array(windows.map { windowJSON($0) })
+                ])
             case .snapshot:
                 guard let selector = TargetSelector.decode(request.object["target"]),
                       let tree = decodeTreeOptions(request.object["tree"]) else {
@@ -93,6 +106,32 @@ public final class NativeService {
         ])
         return .success(command: .doctor, data: ["ready": .bool(false), "checks": .array([protocolCheck, dependencies, accessibility, screenRecording])])
     }
+}
+
+private func windowJSON(_ window: TargetWindow) -> JSONValue {
+    let eligible = window.cg.onScreen && window.ax.minimized != true
+    let reason: JSONValue
+    if eligible {
+        reason = .null
+    } else if window.ax.minimized == true {
+        reason = .string("minimized")
+    } else if !window.cg.onScreen {
+        reason = .string("offscreen")
+    } else {
+        reason = .string("ineligible")
+    }
+    return .object([
+        "id": .number(Double(window.cg.id)),
+        "title": .string(window.cg.title ?? window.ax.title ?? ""),
+        "bounds": .object([
+            "x": .number(window.cg.bounds.x),
+            "y": .number(window.cg.bounds.y),
+            "width": .number(window.cg.bounds.width),
+            "height": .number(window.cg.bounds.height),
+        ]),
+        "eligible": .bool(eligible),
+        "reason": reason,
+    ])
 }
 
 private func decodeTreeOptions(_ value: Any?) -> TreeOptions? {
