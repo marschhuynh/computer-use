@@ -117,6 +117,13 @@ describe('fresh native protocol integration', { timeout: 120_000 }, () => {
     expect(result.stderr).toBe('');
   });
 
+  it('shuts down silently on empty stdin EOF', async () => {
+    const result = await invoke([], '', true);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toBe('');
+  });
+
   it('rejects a request line over the 1 MiB protocol limit with one structured response', async () => {
     const result = await invoke([], `${'x'.repeat(1_048_577)}\n`, true);
     const replies = result.stdout.trim().split('\n');

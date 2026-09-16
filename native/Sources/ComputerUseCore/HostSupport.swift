@@ -8,6 +8,7 @@ public enum BoundedLineReadResult: Equatable {
     case awaitingInput
     case line(Data)
     case invalid
+    case emptyEndOfFile
 }
 
 public struct BoundedLineReader {
@@ -43,7 +44,7 @@ public struct BoundedLineReader {
         buffer.append(chunk)
         if endOfFile {
             finished = true
-            return .invalid
+            return buffer.isEmpty ? .emptyEndOfFile : .invalid
         }
         return .awaitingInput
     }
@@ -58,6 +59,7 @@ public final class HostSession {
     private enum State {
         case ready
         case running
+        case cancelling
         case finished
     }
 
@@ -95,43 +97,54 @@ public final class HostSession {
         }
 
         lock.lock()
-        if state == .finished {
+        switch state {
+        case .running:
+            task = started
+            lock.unlock()
+        case .cancelling, .finished:
             lock.unlock()
             started.cancel()
-        } else {
-            task = started
+        case .ready:
             lock.unlock()
         }
     }
 
     public func parentDidClose() {
         lock.lock()
-        guard state != .finished else {
+        switch state {
+        case .ready:
+            state = .finished
             lock.unlock()
-            return
+            context.cancel()
+            onShutdown()
+        case .running:
+            state = .cancelling
+            let activeTask = task
+            lock.unlock()
+            context.cancel()
+            activeTask?.cancel()
+        case .cancelling, .finished:
+            lock.unlock()
         }
-        state = .finished
-        let activeTask = task
-        task = nil
-        lock.unlock()
-
-        context.cancel()
-        activeTask?.cancel()
-        onShutdown()
     }
 
     private func workDidFinish(_ reply: WireReply) {
         lock.lock()
-        guard state == .running else {
+        switch state {
+        case .running:
+            state = .finished
+            task = nil
             lock.unlock()
-            return
+            onReply(reply)
+            onShutdown()
+        case .cancelling:
+            state = .finished
+            task = nil
+            lock.unlock()
+            onShutdown()
+        case .ready, .finished:
+            lock.unlock()
         }
-        state = .finished
-        task = nil
-        lock.unlock()
-
-        onReply(reply)
-        onShutdown()
     }
 }
 
