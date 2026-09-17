@@ -100,9 +100,11 @@ private func validRequestsForEveryCommandForm() -> [[String: Any]] {
         ["schemaVersion": 1, "command": "set-value", "snapshotId": snapshotID, "ref": 1, "text": "", "options": options],
         ["schemaVersion": 1, "command": "type", "target": target, "text": "", "allowClipboardReplace": false, "options": options],
         ["schemaVersion": 1, "command": "key", "target": target, "key": "cmd+s", "options": options],
+        ["schemaVersion": 1, "command": "key", "key": "cmd+s", "options": options],
         ["schemaVersion": 1, "command": "scroll", "snapshotId": snapshotID, "ref": 1, "options": options],
         ["schemaVersion": 1, "command": "scroll", "target": target, "direction": "down", "amount": 3, "options": options],
         ["schemaVersion": 1, "command": "screenshot", "target": target, "output": "image.png", "overwrite": false, "annotated": false, "native": false, "tree": tree, "options": options],
+        ["schemaVersion": 1, "command": "screenshot", "display": 1, "output": "image.png", "overwrite": false, "annotated": false, "native": false, "tree": tree, "options": options],
         ["schemaVersion": 1, "command": "click", "captureId": captureID, "point": ["x": 1, "y": 2], "button": "left", "count": 1, "options": options],
         ["schemaVersion": 1, "command": "move", "captureId": captureID, "point": ["x": 1, "y": 2], "options": options],
         ["schemaVersion": 1, "command": "drag", "captureId": captureID, "from": ["x": 1, "y": 2], "to": ["x": 3, "y": 4], "options": options]

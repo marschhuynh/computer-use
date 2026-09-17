@@ -102,6 +102,11 @@ nuvin-computer-use screenshot --app Notes --window 12345 \
     --output /tmp/notes.png --overwrite --json
 # → data.captureId, data.width/height (image px), data.target.bounds (screen pt)
 
+# Whole-desktop computer-use: bare captures the main display,
+# --display <n> picks a monitor (1-based).
+nuvin-computer-use screenshot --output /tmp/screen.png --json
+nuvin-computer-use screenshot --display 2 --output /tmp/screen2.png --json
+
 nuvin-computer-use click --capture <uuid> --x 420 --y 180 --json
 nuvin-computer-use move  --capture <uuid> --x 420 --y 180 --json
 nuvin-computer-use drag  --capture <uuid> --from 420,180 --to 620,300 --json
@@ -113,8 +118,10 @@ nuvin-computer-use drag  --capture <uuid> --from 420,180 --to 620,300 --json
   always image pixels and map back correctly either way.
 - `--annotated` draws numbered ref badges on the PNG *and* returns the AX tree —
   the fastest way to correlate "what I see" with "what I can press."
+  (Window targets only — display captures have no AX tree to annotate.)
 - `--capture` ids expire in 10 min and are invalid if the window moved —
-  `STALE_CAPTURE` → re-screenshot.
+  `STALE_CAPTURE` → re-screenshot. For display captures, `click`/`move`/`drag`
+  map pixels into whole-screen space the same way.
 
 ### 4. Raw input
 
@@ -122,12 +129,15 @@ nuvin-computer-use drag  --capture <uuid> --from 420,180 --to 620,300 --json
 nuvin-computer-use type --app Notes --text "hello"        # keystrokes (Unicode ok)
 nuvin-computer-use type --app Notes --text-file -         # read text from stdin
 nuvin-computer-use key  --app Notes --key cmd+s           # chord: cmd,ctrl,alt,shift + key
+nuvin-computer-use key  --key cmd+space                   # bare = system-wide chord (Spotlight etc.)
 nuvin-computer-use scroll --app Notes --direction down --amount 3
 ```
 
 `type`/`key`/`scroll --direction` target the **app/window**, not a ref — they
 post input to whatever has focus inside that window. Focus the right field
-first (`click` it or `press` it via a ref).
+first (`click` it or `press` it via a ref). A bare `key` (no `--app`/`--pid`)
+posts the chord system-wide to whatever has focus — useful for global
+shortcuts like Spotlight.
 
 ## Safety contract — read this before automating
 

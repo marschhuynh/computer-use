@@ -36,9 +36,9 @@ positional argument.
 | `press` | AXPress an element by `--snapshot <uuid> --ref N` |
 | `set-value` | set AXValue on a ref |
 | `type` | type text into a targeted app |
-| `key` | send a key/modifier chord (`--key cmd+s`) |
+| `key` | send a key/modifier chord (`--key cmd+s`); bare = global chord |
 | `scroll` | directional scroll, or scroll-to-ref |
-| `screenshot` | save a PNG of one window → `--capture` id |
+| `screenshot` | save a PNG of one window or a full display → `--capture` id |
 | `click` `move` `drag` | pointer ops on a `--capture` id's image pixels |
 
 All 13 commands are implemented and dispatch real work.
@@ -88,6 +88,7 @@ nuvin-computer-use set-value --snapshot <uuid> --ref 7 --text "example"
 nuvin-computer-use type --app Notes --text "hello" [--allow-clipboard-replace]
 nuvin-computer-use type --app Notes --text-file -          # stdin; keeps text off argv
 nuvin-computer-use key  --app Notes --key cmd+s
+nuvin-computer-use key  --key cmd+space                      # bare = system-wide chord (e.g. Spotlight)
 nuvin-computer-use scroll --app Notes --direction down --amount 3
 nuvin-computer-use scroll --snapshot <uuid> --ref 20       # mutually exclusive with direction form
 ```
@@ -95,8 +96,10 @@ nuvin-computer-use scroll --snapshot <uuid> --ref 20       # mutually exclusive 
 ## Screenshot → pointer actions
 
 ```sh
-nuvin-computer-use screenshot --app Notes --output ./notes.png [--overwrite] [--annotated] --json
+nuvin-computer-use screenshot [--app Notes|--display <n>] --output ./notes.png [--overwrite] [--annotated] --json
 # -> data.captureId
+# bare (no --app/--pid/--display) captures the main display;
+# --display <n> picks a monitor (1-based)
 
 nuvin-computer-use click --capture <uuid> --x 420 --y 180 [--button left|right|middle] [--count 1|2|3]
 nuvin-computer-use move  --capture <uuid> --x 420 --y 180
@@ -104,8 +107,10 @@ nuvin-computer-use drag  --capture <uuid> --from 420,180 --to 620,300
 ```
 
 `--x`/`--y`/`--from`/`--to` are **image pixels** in the saved PNG, translated
-back to screen coordinates via the capture record (Retina-aware). Pointer ops
-check that the target window is still on screen before dispatch.
+back to screen coordinates via the capture record (Retina-aware). Display
+captures work identically for `click`/`move`/`drag` — pixels map into the
+whole-screen space. Pointer ops check that the target is still on screen
+before dispatch.
 
 ## Global flags
 
