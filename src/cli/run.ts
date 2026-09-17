@@ -30,6 +30,31 @@ function commandOf(invocation: ParsedInvocation): Request['command'] | undefined
   return invocation.kind === 'command' ? invocation.request.command : undefined;
 }
 
+const COMMAND_HELP: Record<Request['command'], string> = {
+  doctor: 'doctor — report platform, helper version, dependencies, and OS permission status. Read-only.',
+  apps: 'apps — list running applications (name, bundleId, pid).',
+  windows: 'windows --app <name>|--pid <pid> [--window <id>] — list windows with eligibility and reason.',
+  snapshot: 'snapshot --app <name>|--pid <pid> [--window <id>] [--depth N] [--max-elements N] [--hint-mode full|leafOnly|leafCompact] — capture the AX tree.',
+  press: 'press --snapshot <uuid> --ref <n> — AXPress an element.',
+  'set-value': 'set-value --snapshot <uuid> --ref <n> (--text <s>|--text-file <path>) — set AXValue.',
+  type: 'type --app <name>|--pid <pid> (--text <s>|--text-file <path>) [--allow-clipboard-replace] — type text.',
+  key: 'key --app <name>|--pid <pid> --key <chord> — send a key/modifier combo.',
+  scroll: 'scroll --app <name>|--pid <pid> --direction up|down|left|right [--amount n]  OR  scroll --snapshot <uuid> --ref <n>.',
+  screenshot: 'screenshot --app <name>|--pid <pid> --output <path> [--overwrite] [--annotated] — save a PNG of one window.',
+  click: 'click --capture <uuid> --x <n> --y <n> [--button left|right|middle] [--count 1|2|3].',
+  move: 'move --capture <uuid> --x <n> --y <n> — move the pointer to an image pixel.',
+  drag: 'drag --capture <uuid> --from <x,y> --to <x,y> — left-button drag between image pixels.',
+};
+
+function helpText(command: Request['command'] | undefined): string {
+  const global = '\nGlobal flags: --json  --timeout <ms>  --cursor on|off  --help  --version\n';
+  if (command === undefined) {
+    const names = Object.keys(COMMAND_HELP).join(', ');
+    return `Usage: nuvin-computer-use <command> [options]\nCommands: ${names}\n${global}`;
+  }
+  return `${COMMAND_HELP[command]}\n${global}`;
+}
+
 export async function run(argv: string[], deps: RunDependencies): Promise<number> {
   let invocation: ParsedInvocation;
   try { invocation = parse(argv); }
@@ -37,7 +62,7 @@ export async function run(argv: string[], deps: RunDependencies): Promise<number
     return writeReply(failure('INVALID_ARGUMENT', error instanceof Error ? error.message : 'Invalid arguments'), requestedJson(argv), deps);
   }
   if (invocation.kind === 'help') {
-    const text = invocation.command === undefined ? 'Usage: nuvin-computer-use <command> [options]\n' : `Usage: nuvin-computer-use ${invocation.command} [options]\n`;
+    const text = helpText(invocation.command);
     deps.writeStdout(invocation.json ? `${JSON.stringify({ schemaVersion: 1, ok: true, data: { help: text } })}\n` : text);
     return 0;
   }

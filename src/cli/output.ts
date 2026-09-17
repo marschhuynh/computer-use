@@ -33,6 +33,52 @@ export function exitCode(reply: Reply): number {
 
 export function formatReply(reply: Reply, json: boolean): string {
   if (json) return `${JSON.stringify(reply)}\n`;
-  if (reply.ok) return `${reply.command} completed successfully\n`;
-  return `${reply.error.code}: ${reply.error.message}\n`;
+  if (!reply.ok) return `${reply.error.code}: ${reply.error.message}\n`;
+  switch (reply.command) {
+    case 'apps': return formatApps(reply.data.apps);
+    case 'windows': return formatWindows(reply.data.windows);
+    case 'doctor': return formatDoctor(reply.data);
+    default: return `${reply.command} completed successfully\n`;
+  }
+}
+
+// Escape terminal control characters so observed text (window titles, app
+// names) cannot inject ANSI/CR into the user's terminal. Keeps the output a
+// single readable line per record.
+function escapeControl(value: unknown): string {
+  return String(value ?? '')
+    // C0 controls + DEL: escape so observed text can't inject ANSI/CR/newlines.
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, ch => `\\x${ch.charCodeAt(0).toString(16).padStart(2, '0')}`);
+}
+
+function formatApps(apps: unknown): string {
+  if (!Array.isArray(apps)) return 'apps completed successfully\n';
+  const lines = apps.map(app => {
+    const a = (app ?? {}) as Record<string, unknown>;
+    const bundle = a.bundleId == null ? '' : `  ${escapeControl(a.bundleId)}`;
+    return `  ${escapeControl(a.name)}  (pid ${escapeControl(a.pid)})${bundle}`;
+  });
+  return `apps (${lines.length})\n${lines.join('\n')}\n`;
+}
+
+function formatWindows(windows: unknown): string {
+  if (!Array.isArray(windows)) return 'windows completed successfully\n';
+  const lines = windows.map(w => {
+    const win = (w ?? {}) as Record<string, unknown>;
+    const bounds = (win.bounds ?? {}) as Record<string, unknown>;
+    const eligibility = win.eligible === true ? 'eligible' : `ineligible (${escapeControl(win.reason)})`;
+    return `  ${escapeControl(win.id)}  ${escapeControl(win.title)}  ${escapeControl(bounds.width)}x${escapeControl(bounds.height)}  ${eligibility}`;
+  });
+  return `windows (${lines.length})\n${lines.join('\n')}\n`;
+}
+
+function formatDoctor(data: Record<string, unknown>): string {
+  const checks = Array.isArray(data.checks) ? data.checks : [];
+  const lines = checks.map(c => {
+    const check = (c ?? {}) as Record<string, unknown>;
+    return `  [${escapeControl(check.status)}] ${escapeControl(check.name)}: ${escapeControl(check.message)}`;
+  });
+  const ready = data.ready === true;
+  return `doctor ${ready ? 'ready' : 'not ready'}\n${lines.join('\n')}\n`;
 }

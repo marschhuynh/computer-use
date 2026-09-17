@@ -62,4 +62,49 @@ describe('CLI output', () => {
     };
     expect(exitCode(reply)).toBe(1);
   });
+
+  it('formats apps as a readable table and escapes control characters', () => {
+    const reply: Reply = {
+      schemaVersion: 1, ok: true, command: 'apps',
+      data: { apps: [
+        { name: 'Editor\r\n', pid: 42, bundleId: 'com.example.Editor' },
+        { name: 'Bad\x1B[31mApp', pid: 43, bundleId: null },
+      ] },
+    };
+    const out = formatReply(reply, false);
+    expect(out).toContain('Editor');
+    // raw control characters must not reach the terminal
+    expect(out).not.toMatch(/\r/);
+    expect(out).not.toMatch(/\x1B\[/);
+    expect(out).not.toMatch(/\n.*\n.*\n.*\n/); // no embedded newlines from the name
+    expect(out).toContain('42');
+    expect(out).toContain('com.example.Editor');
+  });
+
+  it('formats windows with eligibility and reason', () => {
+    const reply: Reply = {
+      schemaVersion: 1, ok: true, command: 'windows',
+      data: { windows: [
+        { id: 7, title: 'Doc', bounds: { x: 0, y: 0, width: 100, height: 100 }, eligible: true, reason: null },
+        { id: 8, title: 'Min', bounds: { x: 0, y: 0, width: 100, height: 100 }, eligible: false, reason: 'minimized' },
+      ] },
+    };
+    const out = formatReply(reply, false);
+    expect(out).toContain('7');
+    expect(out).toContain('Doc');
+    expect(out).toContain('minimized');
+    expect(out).toContain('eligible');
+  });
+
+  it('formats doctor with check statuses', () => {
+    const reply: Reply = {
+      schemaVersion: 1, ok: true, command: 'doctor',
+      data: { ready: false, checks: [
+        { name: 'accessibility', status: 'denied', message: 'no access' },
+      ] },
+    };
+    const out = formatReply(reply, false);
+    expect(out).toContain('accessibility');
+    expect(out).toContain('denied');
+  });
 });
