@@ -345,6 +345,33 @@ public final class TargetResolver {
             throw mapPersistedSelectionFailure(failure)
         }
     }
+
+    /// Re-validates a display target for a persisted capture. Unlike `validate`,
+    /// this does not walk the window path: the synthetic identity carries the
+    /// host's pid/launch identity, which is a *new* process for every command
+    /// (the host is one-request-per-process), so pid equality is meaningless
+    /// across requests. What must be stable for the recorded geometry to still
+    /// map is the display itself — its `displayID` (in `windowId`) and its
+    /// `frame`. A display that disappeared or moved/resized is stale.
+    public func validateDisplay(
+        _ target: ResolvedTarget,
+        context: CommandContext
+    ) async throws -> ResolvedTarget {
+        try context.check()
+        let displays = try await provider.listDisplays()
+        try context.check()
+        let displayID = UInt32(clamping: target.identity.windowId)
+        guard let display = displays.first(where: { $0.displayID == displayID }),
+              display.frame == target.bounds else {
+            throw NativeFailure("STALE_CAPTURE", "Recorded capture target changed")
+        }
+        return ResolvedTarget(
+            identity: target.identity,
+            title: target.title,
+            bounds: display.frame,
+            isDisplay: true
+        )
+    }
 }
 
 enum ProcessLaunchDate {

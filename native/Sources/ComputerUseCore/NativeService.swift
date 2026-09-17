@@ -452,9 +452,16 @@ private extension NativeService {
         do {
             let (data, visualization): ([String: JSONValue], Visualization) = try await desktopLock.withLock(context: context) {
                 try context.check()
-                let fresh = try await targetResolver.validate(target.identity, context: context)
-                guard fresh == target else {
-                    throw NativeFailure("STALE_SNAPSHOT", "Window evidence changed")
+                // Display targets re-validate by displayID+frame; their pid is
+                // the host's own, which is a new process per request, so the
+                // window identity path would always read stale.
+                if target.isDisplay {
+                    _ = try await targetResolver.validateDisplay(target, context: context)
+                } else {
+                    let fresh = try await targetResolver.validate(target.identity, context: context)
+                    guard fresh == target else {
+                        throw NativeFailure("STALE_SNAPSHOT", "Window evidence changed")
+                    }
                 }
                 var viz = Visualization.none
                 if cursorEnabled {
@@ -579,10 +586,16 @@ private extension NativeService {
     ) async throws -> (CGPoint, CaptureRecord) {
         let record = try store.readCapture(id: captureId, context: context)
         // Re-validate the target identity; a changed process/window means the
-        // recorded geometry no longer maps onto what's on screen.
-        let fresh = try await targetResolver.validate(record.target.identity, context: context)
-        guard fresh == record.target else {
-            throw NativeFailure("STALE_CAPTURE", "Recorded capture target changed")
+        // recorded geometry no longer maps onto what's on screen. Display
+        // targets re-validate by displayID+frame, not by the host's synthetic
+        // pid identity (which is a new process on every request).
+        if record.target.isDisplay {
+            _ = try await targetResolver.validateDisplay(record.target, context: context)
+        } else {
+            let fresh = try await targetResolver.validate(record.target.identity, context: context)
+            guard fresh == record.target else {
+                throw NativeFailure("STALE_CAPTURE", "Recorded capture target changed")
+            }
         }
         let screen = try record.geometry.imageToScreen(point)
         return (screen, record)

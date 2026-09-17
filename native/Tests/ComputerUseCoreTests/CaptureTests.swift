@@ -367,4 +367,135 @@ final class CaptureTests: XCTestCase {
         XCTAssertFalse(reply.ok)
         XCTAssertEqual(reply.error?.code, "PROTOCOL_ERROR")
     }
+
+    // MARK: - display-capture spatial path (click/move/drag re-validation)
+
+    /// A capture record for a display target persisted through StateStore, so
+    /// resolveCapturePoint can read + re-validate it. Shares store+lock+input
+    /// across the screenshot and the click so identity survives.
+    private final class ClickRecorder: NativeInputDriver {
+        var clicks: [CGPoint] = []
+        func performAXAction(_ action: String, on element: LiveAXElement, context: CommandContext) throws {}
+        func postKey(_ chord: String, to pid: Int, context: CommandContext) throws {}
+        func postGlobalKey(_ chord: String, context: CommandContext) throws {}
+        func postText(_ text: String, to pid: Int, context: CommandContext) throws {}
+        func scroll(_ direction: String, amount: Int, at element: LiveAXElement?, point: CGPoint?, context: CommandContext) throws {}
+        func click(at point: CGPoint, button: String, count: Int, context: CommandContext) throws {
+            clicks.append(point)
+        }
+        func move(to point: CGPoint, context: CommandContext) throws {}
+        func drag(from start: CGPoint, to end: CGPoint, context: CommandContext) throws {}
+        func releaseHeldInputs() throws {}
+    }
+
+    private func displayClickService(
+        displays: @escaping () -> [DisplayMetadata],
+        recorder: ClickRecorder,
+        store: StateStore,
+        lock: DesktopLock
+    ) -> NativeService {
+        NativeService(
+            desktopLock: lock,
+            targetResolver: TargetResolver(provider: TargetResolverProvider(
+                listApplications: { [] },
+                windowsForPID: { _, _ in [] },
+                listDisplays: displays
+            )),
+            store: store,
+            input: NativeInput(driver: recorder)
+        )
+    }
+
+    /// Seed a display-capture record directly through the store (bypasses the
+    /// live capturer), then click a pixel. `displays` is the live listDisplays
+    /// the resolver will re-validate against.
+    private func seedDisplayCapture(
+        store: StateStore,
+        frame: WindowBounds = WindowBounds(x: 0, y: 0, width: 2056, height: 1329)
+    ) throws -> String {
+        let target = ResolvedTarget(
+            identity: TargetIdentity(
+                pid: Int(ProcessInfo.processInfo.processIdentifier),
+                launchDate: ProcessLaunchDate.format(ProcessInfo.processInfo.hostLaunchDate),
+                bundleId: nil,
+                windowId: 77
+            ),
+            title: "Display 77",
+            bounds: frame,
+            isDisplay: true
+        )
+        let record = CaptureRecord(
+            id: "123e4567-e89b-42d3-a456-4266141740aa",
+            createdAt: "2026-09-08T10:00:00.000Z",
+            expiresAt: "2026-09-08T10:10:00.000Z",
+            target: target,
+            geometry: CaptureGeometry(windowBounds: frame, imageSize: CGSize(width: 2056, height: 1329), scale: 1),
+            path: "/tmp/display-capture.png"
+        )
+        try store.writeCapture(record, context: context())
+        return record.id
+    }
+
+    private func clickRequest(captureId: String) -> WireRequest {
+        WireRequest(command: .click, object: [
+            "schemaVersion": 1,
+            "command": "click",
+            "captureId": captureId,
+            "point": ["x": 100, "y": 50],
+            "button": "left",
+            "count": 1,
+            "options": ["timeoutMs": 1_000, "cursor": "off"],
+        ])
+    }
+
+    func testClickOnDisplayCaptureResolvesScreenPoint() async throws {
+        let dir = temporaryStateRoot()
+        let store = StateStore(rootURL: dir)
+        let lock = DesktopLock(rootURL: dir)
+        let recorder = ClickRecorder()
+        let frame = WindowBounds(x: 0, y: 0, width: 2056, height: 1329)
+        let captureId = try seedDisplayCapture(store: store, frame: frame)
+        let service = displayClickService(
+            displays: { [DisplayMetadata(displayID: 77, frame: frame, width: 2056, height: 1329)] },
+            recorder: recorder, store: store, lock: lock
+        )
+        let reply = await service.execute(clickRequest(captureId: captureId), context: context())
+        XCTAssertTrue(reply.ok, "expected success, got \(String(describing: reply.error))")
+        XCTAssertEqual(recorder.clicks, [CGPoint(x: 100, y: 50)])
+    }
+
+    func testClickOnDisplayCaptureStaleWhenDisplayGone() async throws {
+        let dir = temporaryStateRoot()
+        let store = StateStore(rootURL: dir)
+        let lock = DesktopLock(rootURL: dir)
+        let recorder = ClickRecorder()
+        let captureId = try seedDisplayCapture(store: store)
+        let service = displayClickService(
+            displays: { [] }, // display no longer present
+            recorder: recorder, store: store, lock: lock
+        )
+        let reply = await service.execute(clickRequest(captureId: captureId), context: context())
+        XCTAssertFalse(reply.ok)
+        XCTAssertEqual(reply.error?.code, "STALE_CAPTURE")
+        XCTAssertTrue(recorder.clicks.isEmpty)
+    }
+
+    func testClickOnDisplayCaptureStaleWhenFrameChanged() async throws {
+        let dir = temporaryStateRoot()
+        let store = StateStore(rootURL: dir)
+        let lock = DesktopLock(rootURL: dir)
+        let recorder = ClickRecorder()
+        let captureId = try seedDisplayCapture(store: store)
+        // Same displayID, but the frame moved (resolution/arrangement changed):
+        // the recorded geometry no longer maps onto the screen.
+        let moved = WindowBounds(x: 0, y: 0, width: 1024, height: 768)
+        let service = displayClickService(
+            displays: { [DisplayMetadata(displayID: 77, frame: moved, width: 1024, height: 768)] },
+            recorder: recorder, store: store, lock: lock
+        )
+        let reply = await service.execute(clickRequest(captureId: captureId), context: context())
+        XCTAssertFalse(reply.ok)
+        XCTAssertEqual(reply.error?.code, "STALE_CAPTURE")
+        XCTAssertTrue(recorder.clicks.isEmpty)
+    }
 }
