@@ -291,7 +291,7 @@ public final class NativeService {
                         y: resolved.bounds.y + resolved.bounds.height / 2
                     )
                     try self.input.scroll(direction: direction, amount: amount, at: nil, point: center, context: context)
-                    return mutationResult(method: "cg-event", verification: "verified")
+                    return mutationResult(method: "cg-event", verification: "dispatched")
                 }
             case .key:
                 let selector = TargetSelector.decode(request.object["target"])
@@ -304,7 +304,7 @@ public final class NativeService {
                 guard let selector else {
                     return try await dispatchGlobalMutation(command: .key, context: context) { context in
                         try self.input.globalKey(key, context: context)
-                        return mutationResult(method: "cg-event", verification: "verified")
+                        return mutationResult(method: "cg-event", verification: "dispatched")
                     }
                 }
                 let toProcess = request.object["toProcess"] as? Bool ?? false
@@ -551,7 +551,7 @@ private extension NativeService {
                     entered = true
                     try await input(context)
                 }
-                var payload = mutationResult(method: "cg-event", verification: "verified")
+                var payload = mutationResult(method: "cg-event", verification: "dispatched")
                 payload["visualization"] = .string(viz.rawValue)
                 return (payload, viz)
             }

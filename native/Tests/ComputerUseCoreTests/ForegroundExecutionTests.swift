@@ -143,7 +143,7 @@ final class ForegroundExecutionTests: XCTestCase {
         }
         XCTAssertEqual(scope, "global")
         XCTAssertEqual(reply.data?["method"], .string("cg-event"))
-        XCTAssertEqual(reply.data?["verification"], .string("verified"))
+        XCTAssertEqual(reply.data?["verification"], .string("dispatched"))
     }
 
     func testGlobalTypePostsToHIDTap() async throws {
@@ -325,6 +325,25 @@ final class ForegroundExecutionTests: XCTestCase {
         XCTAssertEqual(activator.calls, [windowPid])   // activated first
         XCTAssertEqual(recorder.tapKeys, ["cmd+s"])    // then tapped to focus
         XCTAssertEqual(recorder.pidKeys, [])
+    }
+
+    func testCGEventResultReportsDispatchedNotVerified() async throws {
+        // cg-event only proves the event was posted — delivery/effect is
+        // unobservable, so the honest value is "dispatched", not "verified".
+        let (service, _) = targetedService(activator: FakeActivator())
+        let targeted = await service.key(chord: "cmd+s", to: windowPid, context: context())
+        XCTAssertTrue(targeted.ok, "expected success, got \(String(describing: targeted.error))")
+        XCTAssertEqual(targeted.data?["method"], .string("cg-event"))
+        XCTAssertEqual(targeted.data?["verification"], .string("dispatched"))
+
+        let bare = NativeService(
+            desktopLock: DesktopLock(rootURL: temporaryStateRoot()),
+            input: NativeInput(driver: RecordingDriver(Recorder()))
+        )
+        let global = await bare.key(chord: "cmd+space", to: nil, context: context())
+        XCTAssertTrue(global.ok, "expected success, got \(String(describing: global.error))")
+        XCTAssertEqual(global.data?["method"], .string("cg-event"))
+        XCTAssertEqual(global.data?["verification"], .string("dispatched"))
     }
 
     func testToProcessKeySkipsActivationAndPostsToQueue() async throws {

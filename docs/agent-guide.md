@@ -139,8 +139,8 @@ pixels. Verified end-to-end (drew on jspaint.app's canvas).
   canvas. Read swatch positions carefully off the PNG (two-row palettes are
   easy to mis-pick — verify the active color with a re-`screenshot` before a
   long draw).
-- **Always re-`screenshot` to confirm.** Pointer ops report `verified` (the
-  event dispatched), not that the canvas changed. Re-capture and look.
+- **Always re-`screenshot` to confirm.** Pointer ops report `dispatched` —
+  the event was posted, not that the canvas changed. Re-capture and look.
 - **Canvas pixels ≠ window pixels.** `--x`/`--y`/`--from`/`--to` are image
   pixels across the *whole captured region* (window or display) — compute a
   control's pixel from the PNG's own coordinates, not from memory of the
@@ -167,10 +167,18 @@ shortcuts like Spotlight.
 - **This is real foreground input.** `click`/`type`/`key` move the physical
   pointer and post real events to the focused app. There is no sandbox and no
   semantic reviewer — a click on "Delete" deletes.
+- **`verification` honesty.** Success replies carry `data.verification`:
+  `verified` = the AX action itself succeeded (`press`/`set-value`/
+  `scroll --ref`); `dispatched` = the event was posted (`key`/`type`/
+  `click`/`move`/`drag`/directional `scroll`) — it may land but be
+  unobserved, so it says nothing about effect. Neither means the UI changed;
+  re-observe when it matters.
 - **`mutationStatus` honesty.** On a failure, `error.details.mutationStatus`
   tells you whether input may have been dispatched:
-  `notStarted` = safe to retry blindly; `potentiallyApplied` = **re-observe
-  before retrying** (the action may have already happened).
+  `notStarted` = dispatch never began (e.g. `FOCUS_FAILED`, a focus-targeted
+  `key`/`type` whose app never came frontmost) — safe to retry blindly;
+  `potentiallyApplied` = **re-observe before retrying** (the action may
+  have already happened).
 - **Never pass secrets via `--text`** — it's visible in shell history and
   process lists. Use `--text-file -` and pipe via stdin. Supplied text is
   never echoed back in replies.

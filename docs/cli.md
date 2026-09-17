@@ -125,6 +125,19 @@ before dispatch.
 Success: `{"schemaVersion":1,"ok":true,"command":"...","data":{...}}`
 Error:   `{"schemaVersion":1,"ok":false,"command":"...","error":{"code":"...","message":"...","details":{...}}}`
 
+Mutation replies (`press`/`set-value`/`key`/`type`/`scroll`/`click`/`move`/`drag`)
+report what is actually provable:
+
+- `data.method` — `accessibility` (AX action on a snapshot ref) or `cg-event`
+  (posted CoreGraphics event).
+- `data.verification` — `verified` when the AX call itself succeeded
+  (`accessibility` method); `dispatched` when the event was posted
+  (`cg-event` method). `dispatched` does **not** mean the input had effect —
+  delivery can't be observed. Re-screenshot/snapshot to confirm.
+- `error.details.mutationStatus` — on failure only: `notStarted` (dispatch
+  never began, e.g. `FOCUS_FAILED`) or `potentiallyApplied` (the event may
+  have run — re-observe before retrying).
+
 | Exit | Codes |
 |---|---|
 | 0 | success |
