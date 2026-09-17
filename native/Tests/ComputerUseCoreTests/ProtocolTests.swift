@@ -37,10 +37,10 @@ final class ProtocolTests: XCTestCase {
              "target": target, "text": "sample", "allowClipboardReplace": 1],
             ["schemaVersion": 1, "command": "screenshot", "options": options,
              "target": target, "output": "/tmp/requested.png", "tree": tree,
-             "overwrite": 0, "annotated": false],
+             "overwrite": 0, "annotated": false, "native": false],
             ["schemaVersion": 1, "command": "screenshot", "options": options,
              "target": target, "output": "/tmp/requested.png", "tree": tree,
-             "overwrite": false, "annotated": 1]
+             "overwrite": false, "annotated": 1, "native": false]
         ]
         for request in cases {
             XCTAssertNil(WireRequest.decode(data: try JSONSerialization.data(withJSONObject: request)))
@@ -54,7 +54,7 @@ final class ProtocolTests: XCTestCase {
         let cases: [[String: Any]] = [
             ["schemaVersion": 1, "command": "key", "options": options, "target": target, "key": ""],
             ["schemaVersion": 1, "command": "screenshot", "options": options,
-             "target": target, "output": "", "tree": tree, "overwrite": false, "annotated": false]
+             "target": target, "output": "", "tree": tree, "overwrite": false, "annotated": false, "native": false]
         ]
         for request in cases {
             XCTAssertNil(WireRequest.decode(data: try JSONSerialization.data(withJSONObject: request)))
@@ -102,7 +102,7 @@ private func validRequestsForEveryCommandForm() -> [[String: Any]] {
         ["schemaVersion": 1, "command": "key", "target": target, "key": "cmd+s", "options": options],
         ["schemaVersion": 1, "command": "scroll", "snapshotId": snapshotID, "ref": 1, "options": options],
         ["schemaVersion": 1, "command": "scroll", "target": target, "direction": "down", "amount": 3, "options": options],
-        ["schemaVersion": 1, "command": "screenshot", "target": target, "output": "image.png", "overwrite": false, "annotated": false, "tree": tree, "options": options],
+        ["schemaVersion": 1, "command": "screenshot", "target": target, "output": "image.png", "overwrite": false, "annotated": false, "native": false, "tree": tree, "options": options],
         ["schemaVersion": 1, "command": "click", "captureId": captureID, "point": ["x": 1, "y": 2], "button": "left", "count": 1, "options": options],
         ["schemaVersion": 1, "command": "move", "captureId": captureID, "point": ["x": 1, "y": 2], "options": options],
         ["schemaVersion": 1, "command": "drag", "captureId": captureID, "from": ["x": 1, "y": 2], "to": ["x": 3, "y": 4], "options": options]

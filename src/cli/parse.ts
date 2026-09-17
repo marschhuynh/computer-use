@@ -12,7 +12,7 @@ export type ParsedInvocation =
   | { kind: 'command'; request: DraftRequest; json: boolean };
 
 type ValueName = 'app' | 'pid' | 'window' | 'depth' | 'max-elements' | 'hint-mode' | 'snapshot' | 'ref' | 'text' | 'text-file' | 'key' | 'direction' | 'amount' | 'output' | 'capture' | 'x' | 'y' | 'button' | 'count' | 'from' | 'to' | 'timeout' | 'cursor';
-type FlagName = 'json' | 'help' | 'version' | 'allow-clipboard-replace' | 'overwrite' | 'annotated';
+type FlagName = 'json' | 'help' | 'version' | 'allow-clipboard-replace' | 'overwrite' | 'annotated' | 'native';
 const commandNames = new Set<Command['command']>(['doctor', 'apps', 'windows', 'snapshot', 'press', 'set-value', 'type', 'key', 'scroll', 'screenshot', 'click', 'move', 'drag']);
 const commonValues: ValueName[] = ['timeout', 'cursor'];
 const commonFlags: FlagName[] = ['json', 'help', 'version'];
@@ -100,7 +100,7 @@ export function parse(argv: string[]): ParsedInvocation {
     press: [['snapshot', 'ref'], []], 'set-value': [['snapshot', 'ref', 'text', 'text-file'], []],
     type: [['app', 'pid', 'window', 'text', 'text-file'], ['allow-clipboard-replace']], key: [['app', 'pid', 'window', 'key'], []],
     scroll: [['app', 'pid', 'window', 'snapshot', 'ref', 'direction', 'amount'], []],
-    screenshot: [['app', 'pid', 'window', 'output', 'depth', 'max-elements', 'hint-mode'], ['overwrite', 'annotated']],
+    screenshot: [['app', 'pid', 'window', 'output', 'depth', 'max-elements', 'hint-mode'], ['overwrite', 'annotated', 'native']],
     click: [['capture', 'x', 'y', 'button', 'count'], []], move: [['capture', 'x', 'y'], []], drag: [['capture', 'from', 'to'], []],
   };
   const [valueNames, flagNames] = valuesFor[command];
@@ -148,7 +148,7 @@ export function parse(argv: string[]): ParsedInvocation {
       }
       break;
     }
-    case 'screenshot': request = { ...base, command, target: target(values), output: required(values, 'output'), overwrite: flag(values, 'overwrite'), annotated: flag(values, 'annotated'), tree: tree(values) }; break;
+    case 'screenshot': request = { ...base, command, target: target(values), output: required(values, 'output'), overwrite: flag(values, 'overwrite'), annotated: flag(values, 'annotated'), native: flag(values, 'native'), tree: tree(values) }; break;
     case 'click': {
       const button = stringValue(values, 'button') ?? 'left'; const count = stringValue(values, 'count') === undefined ? 1 : safeInteger(required(values, 'count'), 'count');
       if (button !== 'left' && button !== 'right' && button !== 'middle') throw new ArgumentError('invalid --button');

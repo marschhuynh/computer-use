@@ -11,8 +11,10 @@ public protocol NativeInputDriver {
     func postKey(_ chord: String, to pid: Int, context: CommandContext) throws
     /// Post Unicode text to a pid's focused element.
     func postText(_ text: String, to pid: Int, context: CommandContext) throws
-    /// Scroll — either a direction in the frontmost window, or scroll-to-ref.
-    func scroll(_ direction: String, amount: Int, at element: LiveAXElement?, context: CommandContext) throws
+    /// Scroll — either a direction in the resolved window, or scroll-to-ref.
+    /// `at element` selects scroll-to-ref (AXScrollToVisible); `at point` is the
+    /// screen location the directional scroll is delivered to.
+    func scroll(_ direction: String, amount: Int, at element: LiveAXElement?, point: CGPoint?, context: CommandContext) throws
     /// Click at a screen point with a validated button/count.
     func click(at point: CGPoint, button: String, count: Int, context: CommandContext) throws
     /// Move the pointer to a screen point.
@@ -54,8 +56,8 @@ public final class NativeInput {
         try driver.postText(text, to: pid, context: context)
     }
 
-    public func scroll(direction: String, amount: Int, at element: LiveAXElement?, context: CommandContext) throws {
-        try driver.scroll(direction, amount: amount, at: element, context: context)
+    public func scroll(direction: String, amount: Int, at element: LiveAXElement?, point: CGPoint?, context: CommandContext) throws {
+        try driver.scroll(direction, amount: amount, at: element, point: point, context: context)
     }
 
     /// Click with a validated button/count — reject unsupported combos before
@@ -182,7 +184,7 @@ public final class LiveInputDriver: NativeInputDriver {
         }
     }
 
-    public func scroll(_ direction: String, amount: Int, at element: LiveAXElement?, context: CommandContext) throws {
+    public func scroll(_ direction: String, amount: Int, at element: LiveAXElement?, point: CGPoint?, context: CommandContext) throws {
         try context.check()
         if let element {
             // scroll-to-ref: bring the element into view.
@@ -194,19 +196,45 @@ public final class LiveInputDriver: NativeInputDriver {
             guard status == .success || status == .actionUnsupported else { throw liveInputFailure(status) }
             return
         }
-        // directional: CGEvent scroll-wheel in the resolved window direction.
+        // directional: a phased pixel-delta scroll gesture delivered at a point.
+        //
+        // A single naked `.line` tick posted with `scrollWheelEvent2Source: nil`
+        // is under-specified: with no event source and no scroll phase the window
+        // server guesses whether it's a legacy wheel or a trackpad gesture, so
+        // (a) Chromium drops most of them and (b) under "natural scrolling" the
+        // sign is reinterpreted and the direction intermittently inverts.
+        //
+        // A continuous `.pixel` gesture with an explicit hidSystemState source and
+        // a Began→Changed→Ended phase is unambiguous: the delta is applied to the
+        // scroll position directly (positive wheel1 = up, positive wheel2 = left)
+        // and is NOT subject to natural-scroll sign re-inversion. ~24 px per
+        // "line" matches AppKit's standard scroll increment.
         let (v1, v2): (Int32, Int32)
+        let delta = Int32(amount) * 24
         switch direction {
-        case "up": v1 = Int32(amount); v2 = 0
-        case "down": v1 = -Int32(amount); v2 = 0
-        case "left": v1 = 0; v2 = Int32(amount)
-        case "right": v1 = 0; v2 = -Int32(amount)
+        case "up": v1 = delta; v2 = 0
+        case "down": v1 = -delta; v2 = 0
+        case "left": v1 = 0; v2 = delta
+        case "right": v1 = 0; v2 = -delta
         default: throw NativeFailure("INVALID_ARGUMENT", "Invalid scroll direction")
         }
-        guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 2, wheel1: v1, wheel2: v2, wheel3: 0) else {
-            throw NativeFailure("NATIVE_FAILURE", "Unable to construct scroll event")
+        guard let source = CGEventSource(stateID: .hidSystemState) else {
+            throw NativeFailure("NATIVE_FAILURE", "Unable to construct scroll event source")
         }
-        event.post(tap: .cghidEventTap)
+        func makeEvent(_ wheel1: Int32, _ wheel2: Int32, _ phase: CGScrollPhase) throws -> CGEvent {
+            guard let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: wheel1, wheel2: wheel2, wheel3: 0) else {
+                throw NativeFailure("NATIVE_FAILURE", "Unable to construct scroll event")
+            }
+            if let point { event.location = point }
+            event.setIntegerValueField(.scrollWheelEventScrollPhase, value: Int64(phase.rawValue))
+            return event
+        }
+        try makeEvent(0, 0, .began).post(tap: .cghidEventTap)
+        usleep(12_000)
+        try context.check()
+        try makeEvent(v1, v2, .changed).post(tap: .cghidEventTap)
+        usleep(12_000)
+        try makeEvent(0, 0, .ended).post(tap: .cghidEventTap)
     }
 
     public func click(at point: CGPoint, button: String, count: Int, context: CommandContext) throws {

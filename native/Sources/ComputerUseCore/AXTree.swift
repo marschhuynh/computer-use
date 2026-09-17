@@ -537,7 +537,7 @@ public enum AXTree {
                   case let .value(bounds) = try reader.bounds(window) else {
                 throw observationFailure()
             }
-            if role == "AXWindow" && title == target.title && bounds == target.bounds {
+            if role == "AXWindow" && windowTitlesMatch(title, target.title) && bounds == target.bounds {
                 matches.append(window)
             }
         }

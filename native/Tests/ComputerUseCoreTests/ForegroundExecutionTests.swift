@@ -32,7 +32,7 @@ final class ForegroundExecutionTests: XCTestCase {
         func postText(_ text: String, to pid: Int, context: CommandContext) throws {
             r.texts.append(text)
         }
-        func scroll(_ direction: String, amount: Int, at element: LiveAXElement?, context: CommandContext) throws {
+        func scroll(_ direction: String, amount: Int, at element: LiveAXElement?, point: CGPoint?, context: CommandContext) throws {
             r.scrolls.append((direction, amount))
         }
         func click(at point: CGPoint, button: String, count: Int, context: CommandContext) throws {
@@ -77,7 +77,7 @@ final class ForegroundExecutionTests: XCTestCase {
     func testScrollDirectionalDispatch() async throws {
         let recorder = Recorder()
         let input = NativeInput(driver: RecordingDriver(recorder))
-        try await input.scroll(direction: "down", amount: 3, at: nil, context: context())
+        try await input.scroll(direction: "down", amount: 3, at: nil, point: nil, context: context())
         XCTAssertEqual(recorder.scrolls.count, 1)
         XCTAssertEqual(recorder.scrolls.first?.0, "down")
         XCTAssertEqual(recorder.scrolls.first?.1, 3)

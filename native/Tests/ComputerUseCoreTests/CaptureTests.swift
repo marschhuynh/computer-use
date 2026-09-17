@@ -102,7 +102,7 @@ final class CaptureTests: XCTestCase {
         let dir = temporaryStateRoot()
         let output = dir.appendingPathComponent("out.png").path
         let service = CaptureService(
-            capturer: { windowID, _ in
+            capturer: { windowID, _, _ in
                 XCTAssertEqual(windowID, 7)
                 return CapturedImage(
                     pixelSize: CGSize(width: 1200, height: 800),
@@ -113,7 +113,7 @@ final class CaptureTests: XCTestCase {
             store: StateStore(rootURL: dir)
         )
         let reply = try await service.screenshot(
-            target: target(), output: output, overwrite: false, context: context()
+            target: target(), output: output, overwrite: false, native: false, context: context()
         )
         guard case let .object(data) = reply else { return XCTFail() }
         guard case let .string(captureId) = data["captureId"],
@@ -137,11 +137,11 @@ final class CaptureTests: XCTestCase {
         let output = dir.appendingPathComponent("exists.png").path
         FileManager.default.createFile(atPath: output, contents: Data())
         let service = CaptureService(
-            capturer: { _, _ in CapturedImage(pixelSize: CGSize(width: 10, height: 10), backingScale: 1, pngData: Data()) },
+            capturer: { _, _, _ in CapturedImage(pixelSize: CGSize(width: 10, height: 10), backingScale: 1, pngData: Data()) },
             store: StateStore(rootURL: dir)
         )
         await XCTAssertThrowsErrorAsync {
-            try await service.screenshot(target: target(), output: output, overwrite: false, context: context())
+            try await service.screenshot(target: target(), output: output, overwrite: false, native: false, context: context())
         }
     }
 
@@ -150,20 +150,20 @@ final class CaptureTests: XCTestCase {
         let output = dir.appendingPathComponent("replace.png").path
         FileManager.default.createFile(atPath: output, contents: Data([1, 2, 3]))
         let service = CaptureService(
-            capturer: { _, _ in CapturedImage(pixelSize: CGSize(width: 10, height: 10), backingScale: 1, pngData: Data([9, 9, 9])) },
+            capturer: { _, _, _ in CapturedImage(pixelSize: CGSize(width: 10, height: 10), backingScale: 1, pngData: Data([9, 9, 9])) },
             store: StateStore(rootURL: dir)
         )
-        _ = try await service.screenshot(target: target(), output: output, overwrite: true, context: context())
+        _ = try await service.screenshot(target: target(), output: output, overwrite: true, native: false, context: context())
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: output)), Data([9, 9, 9]))
     }
 
     func testScreenshotRejectsRelativeOutputPath() async throws {
         let service = CaptureService(
-            capturer: { _, _ in CapturedImage(pixelSize: CGSize(width: 10, height: 10), backingScale: 1, pngData: Data()) },
+            capturer: { _, _, _ in CapturedImage(pixelSize: CGSize(width: 10, height: 10), backingScale: 1, pngData: Data()) },
             store: StateStore(rootURL: temporaryStateRoot())
         )
         await XCTAssertThrowsErrorAsync {
-            try await service.screenshot(target: target(), output: "relative.png", overwrite: false, context: context())
+            try await service.screenshot(target: target(), output: "relative.png", overwrite: false, native: false, context: context())
         }
     }
 }

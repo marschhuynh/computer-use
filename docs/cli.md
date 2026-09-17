@@ -177,7 +177,8 @@ live-acceptance gating.
 - `press`/`set-value` rely on the app honoring the AX action; success means
   the call was accepted, not that the UI visibly changed.
 - `screenshot --annotated` overlays numbered ref-hint badges at each
-  snapshot ref's bounds — read the PNG to map pixels → `--ref`.
+  snapshot ref's bounds — read the PNG to map pixels → `--ref`. Badges scale
+  with the capture: `--native` draws them at Retina size.
 
 See `docs/superpowers/specs/2026-09-08-standalone-cli-design.md` for the full
 contract and `docs/permissions.md` for TCC/attribution detail.

@@ -210,6 +210,29 @@ final class TargetResolverTests: XCTestCase {
     }
 
 
+    func testWindowTitlesMatchToleratesCGSuffixStripping() {
+        // Chrome-style: CGWindowList strips the app/profile suffix that the app
+        // appends to AXTitle. The CG name is a strict prefix of the AX title.
+        XCTAssertTrue(windowTitlesMatch(
+            "Example Domain - Google Chrome - Test-MCP",
+            "Example Domain"
+        ))
+        XCTAssertTrue(windowTitlesMatch(
+            "Example Domain",
+            "Example Domain - Google Chrome - Test-MCP"
+        ))
+        XCTAssertTrue(windowTitlesMatch("Draft", "Draft"))
+        XCTAssertTrue(windowTitlesMatch(nil, nil))
+
+        // Unrelated titles must never match — bounds alone cannot rescue a
+        // genuinely different window.
+        XCTAssertFalse(windowTitlesMatch("Example Domain", "Untitled"))
+        XCTAssertFalse(windowTitlesMatch("Doc A", "Doc B"))
+        XCTAssertFalse(windowTitlesMatch("", "Non-empty"))
+        XCTAssertFalse(windowTitlesMatch("Title", nil))
+        XCTAssertFalse(windowTitlesMatch(nil, "Title"))
+    }
+
     func testEmptyFixtureHandlesAreNotProductionEqual() {
         XCTAssertFalse(liveAXElementsAreIdentical(LiveAXElement(), LiveAXElement()))
     }

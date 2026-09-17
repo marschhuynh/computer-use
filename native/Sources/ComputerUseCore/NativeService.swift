@@ -128,7 +128,8 @@ public final class NativeService {
                       let tree = decodeTreeOptions(request.object["tree"]),
                       let output = request.object["output"] as? String,
                       let overwrite = boolean(request.object["overwrite"]),
-                      let annotated = boolean(request.object["annotated"]) else {
+                      let annotated = boolean(request.object["annotated"]),
+                      let native = boolean(request.object["native"]) else {
                     return .failure(
                         command: request.command,
                         code: "PROTOCOL_ERROR",
@@ -156,7 +157,7 @@ public final class NativeService {
                 }
                 let captureData = try await captureService.screenshot(
                     target: resolved, output: output, overwrite: overwrite,
-                    context: context, annotations: annotations
+                    native: native, context: context, annotations: annotations
                 )
                 var data = captureData
                 if let snap {
@@ -197,7 +198,7 @@ public final class NativeService {
                     return try await dispatchSnapshotMutation(
                         command: .scroll, snapshotID: snapshotId, ref: ref, context: context
                     ) { element, context in
-                        try self.input.scroll(direction: "", amount: 0, at: element, context: context)
+                        try self.input.scroll(direction: "", amount: 0, at: element, point: nil, context: context)
                         return mutationResult(method: "accessibility", verification: "verified")
                     }
                 }
@@ -210,7 +211,13 @@ public final class NativeService {
                 return try await dispatchTargetMutation(
                     command: .scroll, target: resolved, context: context
                 ) { context in
-                    try self.input.scroll(direction: direction, amount: amount, at: nil, context: context)
+                    // Deliver the scroll gesture at the resolved window's centre so
+                    // it lands on the target regardless of where the pointer sits.
+                    let center = CGPoint(
+                        x: resolved.bounds.x + resolved.bounds.width / 2,
+                        y: resolved.bounds.y + resolved.bounds.height / 2
+                    )
+                    try self.input.scroll(direction: direction, amount: amount, at: nil, point: center, context: context)
                     return mutationResult(method: "cg-event", verification: "verified")
                 }
             case .key:

@@ -499,10 +499,31 @@ private func liveCGWindows(
 }
 
 private func matches(ax: AXWindowMetadata, cg: CGWindowMetadata) -> Bool {
-    guard ax.role == "AXWindow", ax.title == cg.title, let bounds = ax.bounds else {
+    guard ax.role == "AXWindow", windowTitlesMatch(ax.title, cg.title), let bounds = ax.bounds else {
         return false
     }
     return bounds == cg.bounds
+}
+
+/// CGWindowList strips the application/profile suffix that many apps append to
+/// `AXTitle` (e.g. Chrome reports `AXTitle` "Example Domain - Google Chrome -
+/// Test-MCP" while `kCGWindowName` is just "Example Domain"). Exact equality
+/// therefore never matches and the window is dropped. Accept a prefix
+/// relationship in either direction; identical bounds still disambiguate.
+/// Shared by TargetResolver (CG↔AX join) and AXTree.capture (re-find by
+/// ResolvedTarget.title) so both match sites tolerate the same suffix.
+func windowTitlesMatch(_ first: String?, _ second: String?) -> Bool {
+    switch (first, second) {
+    case let (a?, b?):
+        if a == b { return true }
+        let (shorter, longer) = a.count <= b.count ? (a, b) : (b, a)
+        guard !shorter.isEmpty else { return false }
+        return longer.hasPrefix(shorter)
+    case (nil, nil):
+        return true
+    default:
+        return false
+    }
 }
 
 private func targetInteger(_ value: Any?) -> Int? {

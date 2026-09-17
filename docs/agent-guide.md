@@ -107,9 +107,10 @@ nuvin-computer-use move  --capture <uuid> --x 420 --y 180 --json
 nuvin-computer-use drag  --capture <uuid> --from 420,180 --to 620,300 --json
 ```
 
-- `--x`/`--y`/`--from`/`--to` are **image pixels** in the saved PNG — the CLI
-  maps them back through the capture's Retina scale. Read the PNG, choose the
-  pixel, pass it.
+- The PNG is **logical resolution** (1×) by default — `data.width/height`
+  equal the window's logical size. Pass `--native` for full Retina pixels
+  when you need sharper text (e.g. OCR); `--x`/`--y`/`--from`/`--to` are
+  always image pixels and map back correctly either way.
 - `--annotated` draws numbered ref badges on the PNG *and* returns the AX tree —
   the fastest way to correlate "what I see" with "what I can press."
 - `--capture` ids expire in 10 min and are invalid if the window moved —

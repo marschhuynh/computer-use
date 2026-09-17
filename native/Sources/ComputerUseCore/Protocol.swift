@@ -154,9 +154,10 @@ private func validRequest(_ request: [String: Any]) -> Bool {
             && ["up", "down", "left", "right"].contains(request["direction"] as? String ?? "")
             && positiveInteger(request["amount"])
     case .screenshot:
-        return hasExactKeys(request, base.union(["target", "output", "overwrite", "annotated", "tree"]))
+        return hasExactKeys(request, base.union(["target", "output", "overwrite", "annotated", "native", "tree"]))
             && validTarget(request["target"]) && !(request["output"] as? String ?? "").isEmpty
             && validBoolean(request["overwrite"]) && validBoolean(request["annotated"])
+            && validBoolean(request["native"])
             && validTree(request["tree"])
     case .click:
         return hasExactKeys(request, base.union(["captureId", "point", "button", "count"]))

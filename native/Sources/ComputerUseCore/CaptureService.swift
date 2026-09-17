@@ -27,8 +27,9 @@ public struct CapturedImage {
 /// Window-only screenshot capture. The `capturer` is injected so tests never
 /// touch ScreenCaptureKit; the live path captures exactly one `SCWindow`.
 public final class CaptureService {
-    /// (windowID, context) -> captured image.
-    public typealias Capturer = (Int, CommandContext) async throws -> CapturedImage
+    /// (windowID, native, context) -> captured image. `native` selects full
+    /// backing-scale pixels; `false` captures at logical (1x) resolution.
+    public typealias Capturer = (Int, Bool, CommandContext) async throws -> CapturedImage
 
     private let capturer: Capturer
     private let store: StateStore
@@ -48,6 +49,7 @@ public final class CaptureService {
         target: ResolvedTarget,
         output: String,
         overwrite: Bool,
+        native: Bool,
         context: CommandContext,
         annotations: [(ref: Int, bounds: WindowBounds)] = []
     ) async throws -> JSONValue {
@@ -60,7 +62,7 @@ public final class CaptureService {
             throw NativeFailure("INVALID_ARGUMENT", "--output exists; pass --overwrite to replace it")
         }
 
-        let captured = try await capturer(target.identity.windowId, context)
+        let captured = try await capturer(target.identity.windowId, native, context)
         try context.check()
         guard captured.pixelSize.width > 0, captured.pixelSize.height > 0 else {
             throw NativeFailure("NATIVE_FAILURE", "Window capture produced an empty image")
@@ -170,7 +172,7 @@ private func targetJSON(_ target: ResolvedTarget) -> JSONValue {
 #if canImport(ScreenCaptureKit)
 /// Live ScreenCaptureKit window capture — window-only, cursor excluded, no
 /// desktop fallback. Verified against the macOS-14 SDK surface at Stage E gate.
-public func liveWindowCapture(windowID: Int, context: CommandContext) async throws -> CapturedImage {
+public func liveWindowCapture(windowID: Int, native: Bool, context: CommandContext) async throws -> CapturedImage {
     guard CGPreflightScreenCaptureAccess() else {
         throw NativeFailure("PERMISSION_DENIED", "Screen Recording access is unavailable")
     }
@@ -183,11 +185,12 @@ public func liveWindowCapture(windowID: Int, context: CommandContext) async thro
     let filter = SCContentFilter(desktopIndependentWindow: window)
     let configuration = SCStreamConfiguration()
     configuration.showsCursor = false
-    // Pin the output to the window's own frame rendered at the containing
-    // display's backing scale. Without explicit dimensions SCK can return a
+    // Pin the output to the window's own frame rendered at the requested
+    // scale: logical (1x) by default, the containing display's backing scale
+    // when `native` is set. Without explicit dimensions SCK can return a
     // display-sized canvas with the window letterboxed into it, which would
     // offset every image→screen coordinate transform.
-    let scale = await displayScale(containing: window.frame)
+    let scale = native ? await displayScale(containing: window.frame) : 1
     configuration.width = Int((window.frame.width * scale).rounded())
     configuration.height = Int((window.frame.height * scale).rounded())
     configuration.sourceRect = CGRect(origin: .zero, size: window.frame.size)
