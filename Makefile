@@ -1,3 +1,8 @@
+.PHONY: build ax-helper ax-demo
+
+build:
+	npm run build
+
 ax-helper:
 	npm run build:native
 
