@@ -14,7 +14,8 @@ and scripts — macOS only.
 
 Every command emits a single JSON reply (`--json`) or a human-readable line,
 with a stable exit-code contract. See **[docs/cli.md](docs/cli.md)** for the
-full reference.
+full reference, and **[docs/agent-guide.md](docs/agent-guide.md)** for how an
+LLM agent drives the desktop through it.
 
 ## Requirements
 

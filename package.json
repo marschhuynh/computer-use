@@ -16,6 +16,7 @@
     "native/Package.swift",
     "native/Sources/",
     "docs/cli.md",
+    "docs/agent-guide.md",
     "docs/permissions.md",
     "docs/testing.md",
     "docs/changeset-computer-use-tool.md",
