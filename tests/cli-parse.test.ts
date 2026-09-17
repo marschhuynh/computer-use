@@ -54,6 +54,29 @@ describe('parse', () => {
     expect(() => parse(argv)).toThrow(/--to-process requires --app or --pid/);
   });
 
+  it('type without a target parses as global text entry', () => {
+    const r = parse(['type', '--text', 'hello']);
+    expect(r.kind).toBe('command');
+    // @ts-expect-error narrow
+    expect(r.request.target).toBeUndefined();
+  });
+  it('type --global parses as global text entry', () => {
+    const r = parse(['type', '--global', '--text', 'hello']);
+    expect(r.kind).toBe('command');
+    // @ts-expect-error narrow
+    expect(r.request.target).toBeUndefined();
+  });
+  it.each([
+    [['type', '--global', '--app', 'TextEdit', '--text', 'x']],
+    [['type', '--global', '--pid', '42', '--text', 'x']],
+    [['type', '--global', '--window', '5', '--text', 'x']],
+  ])('rejects --global combined with a target %j', (argv) => {
+    expect(() => parse(argv)).toThrow(/--global may not be combined/);
+  });
+  it('rejects --window without --app or --pid on type', () => {
+    expect(() => parse(['type', '--window', '5', '--text', 'x'])).toThrow(/--window requires --app or --pid/);
+  });
+
   it('parses targetless key and screenshot', () => {
     const keyRequest = commandRequest(['key', '--key', 'cmd+space']);
     expect(keyRequest).toMatchObject({ command: 'key' });

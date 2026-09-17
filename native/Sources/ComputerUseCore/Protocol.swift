@@ -137,12 +137,19 @@ private func validRequest(_ request: [String: Any]) -> Bool {
             && validID(request["snapshotId"]) && positiveInteger(request["ref"])
             && request["text"] is String
     case .type:
-        guard hasExactKeys(request, base.union(["target", "text", "allowClipboardReplace"]))
-            || hasExactKeys(request, base.union(["target", "text", "allowClipboardReplace", "toProcess"])) else {
+        // `target` is optional: bare `type` posts text to whatever holds
+        // focus via the HID tap (same surface as bare `key`). `toProcess`
+        // only pairs with a target; without one it is meaningless.
+        let required = base.union(["text", "allowClipboardReplace"])
+        guard hasExactKeys(request, required)
+            || hasExactKeys(request, required.union(["target"]))
+            || hasExactKeys(request, required.union(["toProcess"]))
+            || hasExactKeys(request, required.union(["target", "toProcess"])) else {
             return false
         }
-        return validTarget(request["target"]) && request["text"] is String
+        return request["text"] is String
             && validBoolean(request["allowClipboardReplace"])
+            && (request["target"] == nil || validTarget(request["target"]))
             && (request["toProcess"] == nil || validBoolean(request["toProcess"]))
     case .key:
         guard !(request["key"] as? String ?? "").isEmpty,

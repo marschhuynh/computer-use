@@ -81,6 +81,12 @@ public final class NativeInput {
         try driver.postGlobalKey(chord, context: context)
     }
 
+    /// Targetless `type`: text goes to the HID tap and lands on whatever
+    /// holds keyboard focus — the text counterpart of `globalKey`.
+    public func globalText(_ text: String, context: CommandContext) throws {
+        try driver.postFocusedText(text, context: context)
+    }
+
     public func type(_ text: String, to pid: Int, delivery: KeyDelivery = .process, context: CommandContext) throws {
         switch delivery {
         case .focused: try driver.postFocusedText(text, context: context)

@@ -38,8 +38,8 @@ const COMMAND_HELP: Record<Request['command'], string> = {
   snapshot: 'snapshot --app <name>|--pid <pid> [--window <id>] [--depth N] [--max-elements N] [--hint-mode full|leafOnly|leafCompact] — capture the AX tree.',
   press: 'press --snapshot <uuid> --ref <n> — AXPress an element.',
   'set-value': 'set-value --snapshot <uuid> --ref <n> (--text <s>|--text-file <path>) — set AXValue.',
-  type: 'type --app <name>|--pid <pid> (--text <s>|--text-file <path>) [--allow-clipboard-replace] — type text.',
-  key: 'key [--app|--pid] --key <chord> (bare = global chord) — send a key/modifier combo.',
+  type: 'type [--app <name>|--pid <pid>|--global] [--window <id>] (--text <s>|--text-file <path>) [--allow-clipboard-replace] [--to-process] — type text (bare/--global = type into whatever holds focus).',
+  key: 'key [--app <name>|--pid <pid>] [--window <id>] --key <chord> [--to-process] (bare = global chord) — send a key/modifier combo.',
   scroll: 'scroll --app <name>|--pid <pid> --direction up|down|left|right [--amount n]  OR  scroll --snapshot <uuid> --ref <n>.',
   screenshot: 'screenshot [--app|--pid|--display <n>] --output <path> [--overwrite] [--annotated] [--native] — save a PNG of one window or a full display (logical size; --native for full Retina pixels).',
   click: 'click --capture <uuid> --x <n> --y <n> [--button left|right|middle] [--count 1|2|3].',
@@ -121,7 +121,7 @@ async function resolveText(request: Extract<ParsedInvocation, { kind: 'command' 
     throw new ArgumentError('Text input exceeds the 1 MiB limit');
   }
   if (request.command === 'type') {
-    return { schemaVersion: request.schemaVersion, options: request.options, command: 'type', target: request.target, text, allowClipboardReplace: request.allowClipboardReplace, ...(request.toProcess ? { toProcess: true } : {}) };
+    return { schemaVersion: request.schemaVersion, options: request.options, command: 'type', ...(request.target ? { target: request.target } : {}), text, allowClipboardReplace: request.allowClipboardReplace, ...(request.toProcess ? { toProcess: true } : {}) };
   }
   return { schemaVersion: request.schemaVersion, options: request.options, command: 'set-value', snapshotId: request.snapshotId, ref: request.ref, text };
 }

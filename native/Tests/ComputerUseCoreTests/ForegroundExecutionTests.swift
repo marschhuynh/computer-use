@@ -146,6 +146,25 @@ final class ForegroundExecutionTests: XCTestCase {
         XCTAssertEqual(reply.data?["verification"], .string("verified"))
     }
 
+    func testGlobalTypePostsToHIDTap() async throws {
+        let recorder = Recorder()
+        let service = NativeService(
+            desktopLock: DesktopLock(rootURL: temporaryStateRoot()),
+            input: NativeInput(driver: RecordingDriver(recorder))
+        )
+        let reply = await service.type(text: "hello", to: nil, context: context())
+        XCTAssertTrue(reply.ok, "expected success, got \(String(describing: reply.error))")
+        XCTAssertEqual(recorder.tapText, ["hello"])
+        XCTAssertTrue(recorder.usedHIDTap)
+        XCTAssertTrue(recorder.texts.isEmpty, "no target means nothing is posted to a pid")
+        guard case let .object(target) = reply.data?["target"],
+              case let .string(scope) = target["scope"] else {
+            return XCTFail("expected target scope, got \(String(describing: reply.data))")
+        }
+        XCTAssertEqual(scope, "global")
+        XCTAssertEqual(reply.data?["method"], .string("cg-event"))
+    }
+
     func testScrollDirectionalDispatch() async throws {
         let recorder = Recorder()
         let input = NativeInput(driver: RecordingDriver(recorder))

@@ -326,10 +326,22 @@ public final class NativeService {
                     return mutationResult(method: "cg-event", verification: "dispatched")
                 }
             case .type:
-                guard let selector = TargetSelector.decode(request.object["target"]),
-                      let text = request.object["text"] as? String,
+                let selector = TargetSelector.decode(request.object["target"])
+                guard let text = request.object["text"] as? String,
                       let allowClipboardReplace = boolean(request.object["allowClipboardReplace"]) else {
                     return .failure(command: request.command, code: "PROTOCOL_ERROR", message: "Invalid type request")
+                }
+                // No target: the text goes to the HID event tap, landing on
+                // whatever holds keyboard focus. Protocol validation
+                // guarantees any present target dict is well-formed, so nil
+                // means absent.
+                guard let selector else {
+                    return try await dispatchGlobalMutation(command: .type, context: context) { context in
+                        try self.input.globalText(text, context: context)
+                        var result = mutationResult(method: "cg-event", verification: "dispatched")
+                        result["clipboardReplaced"] = .bool(false)
+                        return result
+                    }
                 }
                 let toProcess = request.object["toProcess"] as? Bool ?? false
                 let resolved = try await targetResolver.resolve(selector, context: context)
