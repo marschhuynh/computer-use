@@ -229,3 +229,10 @@ func discoveryContext(timeoutMilliseconds: Int = 1_000) -> CommandContext {
         )
     )
 }
+
+func temporaryStateRoot() -> URL {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent("nuvin-cu-tests-\(UUID().uuidString)", isDirectory: true)
+    try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    return url
+}

@@ -50,6 +50,74 @@ public struct SnapshotRecord: Codable, Equatable {
     func invalidatedCopy() -> SnapshotRecord { SnapshotRecord(copying: self, invalidated: true) }
 }
 
+/// A `capture` record: identity + geometry for a saved screenshot, so a later
+/// click/move/drag can map image pixels back onto the (unchanged) window.
+public struct CaptureRecord: Codable, Equatable {
+    public let version: Int
+    public let kind: String
+    public let id: String
+    public let createdAt: String
+    public let expiresAt: String
+    public let target: ResolvedTarget
+    public let geometry: CaptureGeometry
+    public let path: String
+    public let invalidated: Bool
+
+    public init(
+        id: String,
+        createdAt: String,
+        expiresAt: String,
+        target: ResolvedTarget,
+        geometry: CaptureGeometry,
+        path: String,
+        invalidated: Bool = false
+    ) {
+        version = stateRecordVersion
+        kind = "capture"
+        self.id = id
+        self.createdAt = createdAt
+        self.expiresAt = expiresAt
+        self.target = target
+        self.geometry = geometry
+        self.path = path
+        self.invalidated = invalidated
+    }
+
+    private init(copying record: CaptureRecord, invalidated: Bool) {
+        version = record.version
+        kind = record.kind
+        id = record.id
+        createdAt = record.createdAt
+        expiresAt = record.expiresAt
+        target = record.target
+        geometry = record.geometry
+        path = record.path
+        self.invalidated = invalidated
+    }
+
+    func invalidatedCopy() -> CaptureRecord { CaptureRecord(copying: self, invalidated: true) }
+}
+
+extension CaptureGeometry: Codable {
+    private enum CodingKeys: String, CodingKey { case windowBounds, imageSize, scale }
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let image = try container.decode(ImageSize.self, forKey: .imageSize)
+        self.init(
+            windowBounds: try container.decode(WindowBounds.self, forKey: .windowBounds),
+            imageSize: CGSize(width: image.width, height: image.height),
+            scale: CGFloat(try container.decode(Double.self, forKey: .scale))
+        )
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(windowBounds, forKey: .windowBounds)
+        try container.encode(ImageSize(width: imageSize.width, height: imageSize.height), forKey: .imageSize)
+        try container.encode(Double(scale), forKey: .scale)
+    }
+    private struct ImageSize: Codable { let width: Double; let height: Double }
+}
+
 struct StateStoreIO {
     let directoryNames: (Int32, () throws -> Void) throws -> [String]
     let openRecord: (Int32, String) -> SystemCallResult<Int32>
@@ -112,7 +180,7 @@ public final class StateStore {
     }
 
     public func writeSnapshot(_ record: SnapshotRecord, context: CommandContext) throws {
-        guard validateRecord(record, expectedID: record.id) else { throw staleSnapshot() }
+        guard validateSnapshotRecord(record, expectedID: record.id) else { throw staleSnapshot() }
         try context.check()
         let data: Data
         do { data = try encoder.encode(record) }
@@ -132,12 +200,12 @@ public final class StateStore {
         guard let id = canonicalUUID(id) else { throw staleSnapshot() }
         try context.check()
         return try withSnapshotDirectory(create: false, context: context) { descriptor in
-            let record = try decodeRecord(
+            let record = try decodeSnapshot(
                 named: recordFileName(id),
                 directoryDescriptor: descriptor,
                 context: context
             )
-            guard validateRecord(record, expectedID: id),
+            guard validateSnapshotRecord(record, expectedID: id),
                   !record.invalidated,
                   let expiration = parseSnapshotTimestamp(record.expiresAt)?.date,
                   context.wallNow < expiration else { throw staleSnapshot() }
@@ -146,9 +214,53 @@ public final class StateStore {
         }
     }
 
+    public func writeCapture(_ record: CaptureRecord, context: CommandContext) throws {
+        guard validateCaptureRecord(record, expectedID: record.id) else { throw staleCapture() }
+        try context.check()
+        let data: Data
+        do { data = try encoder.encode(record) }
+        catch { throw stateFailure("Unable to encode capture state") }
+        try withRecordDirectory("captures", create: true, context: context) { descriptor in
+            try atomicWrite(
+                data,
+                named: recordFileName(record.id),
+                directoryDescriptor: descriptor,
+                replacing: false,
+                context: context
+            )
+        }
+    }
+
+    public func readCapture(id: String, context: CommandContext) throws -> CaptureRecord {
+        guard let id = canonicalUUID(id) else { throw staleCapture() }
+        try context.check()
+        return try withRecordDirectory("captures", create: false, context: context) { descriptor in
+            let record = try decodeCapture(
+                named: recordFileName(id),
+                directoryDescriptor: descriptor,
+                context: context
+            )
+            guard validateCaptureRecord(record, expectedID: id),
+                  !record.invalidated,
+                  let expiration = parseSnapshotTimestamp(record.expiresAt)?.date,
+                  context.wallNow < expiration else { throw staleCapture() }
+            try context.check()
+            return record
+        }
+    }
+
+    /// Sweeps expired/invalidated/abandoned-temp records from every record
+    /// directory (snapshots and captures).
     public func sweep(context: CommandContext) throws {
         try context.check()
-        try withSnapshotDirectory(create: true, context: context) { descriptor in
+        for directory in ["snapshots", "captures"] {
+            try sweepDirectory(directory, context: context)
+        }
+        try context.check()
+    }
+
+    private func sweepDirectory(_ directory: String, context: CommandContext) throws {
+        try withRecordDirectory(directory, create: true, context: context) { descriptor in
             let names = try io.directoryNames(descriptor) { try context.check() }
             for name in names {
                 try context.check()
@@ -157,23 +269,36 @@ public final class StateStore {
                     continue
                 }
                 guard let id = recordID(from: name) else { continue }
-                let record: SnapshotRecord
-                do {
-                    record = try decodeRecord(
-                        named: name,
-                        directoryDescriptor: descriptor,
-                        context: context
-                    )
-                } catch let failure as NativeFailure
-                    where failure.code == "INTERRUPTED" || failure.code == "TIMEOUT" {
-                    throw failure
-                } catch {
-                    continue
+                let expired: Bool
+                let invalidated: Bool
+                if directory == "captures" {
+                    let record: CaptureRecord
+                    do {
+                        record = try decodeCapture(named: name, directoryDescriptor: descriptor, context: context)
+                    } catch let failure as NativeFailure
+                        where failure.code == "INTERRUPTED" || failure.code == "TIMEOUT" {
+                        throw failure
+                    } catch {
+                        continue
+                    }
+                    guard record.id == id else { continue }
+                    expired = parseSnapshotTimestamp(record.expiresAt).map { context.wallNow >= $0.date } ?? false
+                    invalidated = record.invalidated
+                } else {
+                    let record: SnapshotRecord
+                    do {
+                        record = try decodeSnapshot(named: name, directoryDescriptor: descriptor, context: context)
+                    } catch let failure as NativeFailure
+                        where failure.code == "INTERRUPTED" || failure.code == "TIMEOUT" {
+                        throw failure
+                    } catch {
+                        continue
+                    }
+                    guard record.id == id else { continue }
+                    expired = parseSnapshotTimestamp(record.expiresAt).map { context.wallNow >= $0.date } ?? false
+                    invalidated = record.invalidated
                 }
-                let expired = parseSnapshotTimestamp(record.expiresAt).map {
-                    context.wallNow >= $0.date
-                } ?? false
-                if record.id == id && (record.invalidated || expired) {
+                if invalidated || expired {
                     _ = unlinkat(descriptor, name, 0)
                 }
             }
@@ -182,43 +307,72 @@ public final class StateStore {
                 throw stateFailure("Unable to synchronize snapshot state")
             }
         }
-        try context.check()
     }
 
+    /// Invalidates every record — snapshot and capture — for the target app, so
+    /// a state-changing command for the app can't leave stale refs/coords live.
     public func invalidateRecords(
         for identity: TargetIdentity,
         context: CommandContext
     ) throws {
         try context.check()
-        try withSnapshotDirectory(create: true, context: context) { descriptor in
-            let names = try io.directoryNames(descriptor) { try context.check() }
-            for name in names {
+        try invalidateSnapshots(for: identity, context: context)
+        try invalidateCaptures(for: identity, context: context)
+        try context.check()
+    }
+
+    private func invalidateSnapshots(for identity: TargetIdentity, context: CommandContext) throws {
+        try withRecordDirectory("snapshots", create: true, context: context) { descriptor in
+            for name in try io.directoryNames(descriptor) { try context.check() } {
                 try context.check()
                 guard let id = recordID(from: name) else { continue }
-                let record = try decodeRecord(
+                let record = try decodeSnapshot(
                     named: name,
                     directoryDescriptor: descriptor,
                     context: context
                 )
-                guard validateRecord(record, expectedID: id) else { throw staleSnapshot() }
+                guard validateSnapshotRecord(record, expectedID: id) else { throw staleSnapshot() }
                 guard sameApplication(record.target.identity, identity),
                       !record.invalidated else { continue }
                 let data: Data
                 do { data = try encoder.encode(record.invalidatedCopy()) }
                 catch { throw stateFailure("Unable to encode invalidated state") }
-                try atomicWrite(
-                    data,
-                    named: name,
-                    directoryDescriptor: descriptor,
-                    replacing: true,
-                    context: context
-                )
+                try atomicWrite(data, named: name, directoryDescriptor: descriptor, replacing: true, context: context)
             }
         }
-        try context.check()
+    }
+
+    private func invalidateCaptures(for identity: TargetIdentity, context: CommandContext) throws {
+        try withRecordDirectory("captures", create: true, context: context) { descriptor in
+            for name in try io.directoryNames(descriptor) { try context.check() } {
+                try context.check()
+                guard let id = recordID(from: name) else { continue }
+                let record = try decodeCapture(
+                    named: name,
+                    directoryDescriptor: descriptor,
+                    context: context
+                )
+                guard validateCaptureRecord(record, expectedID: id) else { throw staleCapture() }
+                guard sameApplication(record.target.identity, identity),
+                      !record.invalidated else { continue }
+                let data: Data
+                do { data = try encoder.encode(record.invalidatedCopy()) }
+                catch { throw stateFailure("Unable to encode invalidated state") }
+                try atomicWrite(data, named: name, directoryDescriptor: descriptor, replacing: true, context: context)
+            }
+        }
     }
 
     private func withSnapshotDirectory<T>(
+        create: Bool,
+        context: CommandContext,
+        _ body: (Int32) throws -> T
+    ) throws -> T {
+        try withRecordDirectory("snapshots", create: create, context: context, body)
+    }
+
+    private func withRecordDirectory<T>(
+        _ name: String,
         create: Bool,
         context: CommandContext,
         _ body: (Int32) throws -> T
@@ -229,10 +383,10 @@ public final class StateStore {
             checkpoint: checkpoint
         )
         defer { close(rootDescriptor) }
-        let snapshotDescriptor: Int32
+        let descriptor: Int32
         do {
-            snapshotDescriptor = try PrivateStateDirectory.openChild(
-                "snapshots",
+            descriptor = try PrivateStateDirectory.openChild(
+                name,
                 rootDescriptor: rootDescriptor,
                 create: create,
                 checkpoint: checkpoint
@@ -241,17 +395,48 @@ public final class StateStore {
             where failure.code == "INTERRUPTED" || failure.code == "TIMEOUT" {
             throw failure
         } catch where !create && errno == ENOENT {
-            throw staleSnapshot()
+            throw name == "captures" ? staleCapture() : staleSnapshot()
         }
-        defer { close(snapshotDescriptor) }
-        return try body(snapshotDescriptor)
+        defer { close(descriptor) }
+        return try body(descriptor)
     }
 
-    private func decodeRecord(
+    private func decodeSnapshot(
         named name: String,
         directoryDescriptor: Int32,
         context: CommandContext
     ) throws -> SnapshotRecord {
+        let data = try readRecordData(
+            named: name, directoryDescriptor: directoryDescriptor,
+            context: context, stale: staleSnapshot
+        )
+        guard let record = try? decoder.decode(SnapshotRecord.self, from: data) else {
+            throw staleSnapshot()
+        }
+        return record
+    }
+
+    private func decodeCapture(
+        named name: String,
+        directoryDescriptor: Int32,
+        context: CommandContext
+    ) throws -> CaptureRecord {
+        let data = try readRecordData(
+            named: name, directoryDescriptor: directoryDescriptor,
+            context: context, stale: staleCapture
+        )
+        guard let record = try? decoder.decode(CaptureRecord.self, from: data) else {
+            throw staleCapture()
+        }
+        return record
+    }
+
+    private func readRecordData(
+        named name: String,
+        directoryDescriptor: Int32,
+        context: CommandContext,
+        stale: () -> NativeFailure
+    ) throws -> Data {
         let descriptor: Int32
         while true {
             try context.check()
@@ -264,15 +449,15 @@ public final class StateStore {
                 try context.check()
                 continue
             }
-            throw staleSnapshot()
+            throw stale()
         }
         defer { close(descriptor) }
-        do { try verifyPrivateFile(descriptor) } catch { throw staleSnapshot() }
+        do { try verifyPrivateFile(descriptor) } catch { throw stale() }
         var info = stat()
         guard fstat(descriptor, &info) == 0,
               info.st_size >= 0,
               info.st_size <= 16 * 1_024 * 1_024,
-              info.st_mode & 0o777 == 0o600 else { throw staleSnapshot() }
+              info.st_mode & 0o777 == 0o600 else { throw stale() }
         var data = Data(count: Int(info.st_size))
         let count = try data.withUnsafeMutableBytes { buffer -> Int in
             var offset = 0
@@ -292,11 +477,8 @@ public final class StateStore {
             }
             return offset
         }
-        guard count == data.count,
-              let record = try? decoder.decode(SnapshotRecord.self, from: data) else {
-            throw staleSnapshot()
-        }
-        return record
+        guard count == data.count else { throw stale() }
+        return data
     }
 
     private func atomicWrite(
@@ -476,19 +658,19 @@ private func parseSnapshotTimestamp(_ value: String) -> SnapshotTimestamp? {
     )
 }
 
-private func validLifetime(_ record: SnapshotRecord) -> Bool {
-    guard let creation = parseSnapshotTimestamp(record.createdAt),
-          let expiration = parseSnapshotTimestamp(record.expiresAt) else { return false }
+private func validLifetime(createdAt: String, expiresAt: String) -> Bool {
+    guard let creation = parseSnapshotTimestamp(createdAt),
+          let expiration = parseSnapshotTimestamp(expiresAt) else { return false }
     return expiration.seconds == creation.seconds + Int64(snapshotLifetime)
         && expiration.nanoseconds == creation.nanoseconds
 }
 
-private func validateRecord(_ record: SnapshotRecord, expectedID: String) -> Bool {
+private func validateSnapshotRecord(_ record: SnapshotRecord, expectedID: String) -> Bool {
     guard canonicalUUID(record.id) == record.id,
           record.id == expectedID,
           record.version == stateRecordVersion,
           record.kind == "snapshot",
-          validLifetime(record),
+          validLifetime(createdAt: record.createdAt, expiresAt: record.expiresAt),
           validPositiveSafe(record.target.identity.pid),
           validPositiveSafe(record.target.identity.windowId),
           validBounds(record.target.bounds) else { return false }
@@ -499,6 +681,22 @@ private func validateRecord(_ record: SnapshotRecord, expectedID: String) -> Boo
     } catch {
         return false
     }
+}
+
+private func validateCaptureRecord(_ record: CaptureRecord, expectedID: String) -> Bool {
+    guard canonicalUUID(record.id) == record.id,
+          record.id == expectedID,
+          record.version == stateRecordVersion,
+          record.kind == "capture",
+          validLifetime(createdAt: record.createdAt, expiresAt: record.expiresAt),
+          validPositiveSafe(record.target.identity.pid),
+          validPositiveSafe(record.target.identity.windowId),
+          validBounds(record.target.bounds),
+          !record.path.isEmpty,
+          record.geometry.imageSize.width > 0,
+          record.geometry.imageSize.height > 0,
+          record.geometry.scale > 0 else { return false }
+    return true
 }
 
 private func validPositiveSafe(_ value: Int) -> Bool {
@@ -512,4 +710,7 @@ private func validBounds(_ bounds: WindowBounds?) -> Bool {
 }
 private func staleSnapshot() -> NativeFailure {
     NativeFailure("STALE_SNAPSHOT", "Snapshot state is missing, invalid, expired, or invalidated")
+}
+private func staleCapture() -> NativeFailure {
+    NativeFailure("STALE_CAPTURE", "Capture state is missing, invalid, expired, or invalidated")
 }

@@ -469,7 +469,9 @@ final class SnapshotTests: XCTestCase {
         var enumerationCount = 0
         let io = StateStoreIO(directoryNames: { descriptor, _ in
             enumerationCount += 1
-            if enumerationCount == 1 { return try testDirectoryNames(descriptor) }
+            // sweep now enumerates both record dirs (snapshots, captures) before
+            // preflight; let those succeed and fail only during invalidation.
+            if enumerationCount <= 2 { return try testDirectoryNames(descriptor) }
             throw NativeFailure("NATIVE_FAILURE", "Injected enumeration failure")
         })
         let store = StateStore(rootURL: root, io: io)
