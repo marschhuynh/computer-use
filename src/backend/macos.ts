@@ -14,8 +14,8 @@ const STABLE_ERROR_CODES = new Set([
   'INELIGIBLE_TARGET', 'STALE_SNAPSHOT', 'STALE_CAPTURE', 'TIMEOUT', 'BUSY', 'INTERRUPTED',
 ]);
 const CONTROLLED_RESULT_VALUES = {
-  method: new Set(['accessibility']),
-  verification: new Set(['verified']),
+  method: new Set(['accessibility', 'cg-event']),
+  verification: new Set(['verified', 'unverified', 'partial']),
   visualization: new Set(['none']),
 };
 

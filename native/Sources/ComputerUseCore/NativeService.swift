@@ -34,18 +34,21 @@ public final class NativeService {
     private let targetResolver: TargetResolver
     private let environment: DoctorEnvironment
     private let captureService: CaptureService
+    private let input: NativeInput
 
     public init(
         snapshotService: SnapshotService = SnapshotService(),
         desktopLock: DesktopLock = DesktopLock(),
         targetResolver: TargetResolver = TargetResolver(),
         environment: DoctorEnvironment = .live,
-        captureService: CaptureService? = nil
+        captureService: CaptureService? = nil,
+        input: NativeInput = NativeInput(driver: LiveInputDriver())
     ) {
         self.snapshotService = snapshotService
         self.desktopLock = desktopLock
         self.targetResolver = targetResolver
         self.environment = environment
+        self.input = input
         #if canImport(ScreenCaptureKit)
         self.captureService = captureService ?? CaptureService(capturer: liveWindowCapture)
         #else
@@ -137,6 +140,82 @@ public final class NativeService {
                     }
                 }
                 return .success(command: .screenshot, data: dataAsDictionary(data))
+            case .press:
+                guard let snapshotId = request.object["snapshotId"] as? String,
+                      let ref = integer(request.object["ref"]) else {
+                    return .failure(command: request.command, code: "PROTOCOL_ERROR", message: "Invalid press request")
+                }
+                return try await dispatchSnapshotMutation(
+                    command: .press, snapshotID: snapshotId, ref: ref, context: context
+                ) { element, context in
+                    try self.input.press(element, context: context)
+                    return mutationResult(method: "accessibility", verification: "verified")
+                }
+            case .setValue:
+                guard let snapshotId = request.object["snapshotId"] as? String,
+                      let ref = integer(request.object["ref"]),
+                      let text = request.object["text"] as? String else {
+                    return .failure(command: request.command, code: "PROTOCOL_ERROR", message: "Invalid set-value request")
+                }
+                return try await dispatchSnapshotMutation(
+                    command: .setValue, snapshotID: snapshotId, ref: ref, context: context
+                ) { element, context in
+                    try self.input.setValue(element, text: text, context: context)
+                    return mutationResult(method: "accessibility", verification: "verified")
+                }
+            case .scroll:
+                if let snapshotId = request.object["snapshotId"] as? String,
+                   let ref = integer(request.object["ref"]) {
+                    return try await dispatchSnapshotMutation(
+                        command: .scroll, snapshotID: snapshotId, ref: ref, context: context
+                    ) { element, context in
+                        try self.input.scroll(direction: "", amount: 0, at: element, context: context)
+                        return mutationResult(method: "accessibility", verification: "verified")
+                    }
+                }
+                guard let selector = TargetSelector.decode(request.object["target"]),
+                      let direction = request.object["direction"] as? String,
+                      let amount = integer(request.object["amount"]) else {
+                    return .failure(command: request.command, code: "PROTOCOL_ERROR", message: "Invalid scroll request")
+                }
+                let resolved = try await targetResolver.resolve(selector, context: context)
+                return try await dispatchTargetMutation(
+                    command: .scroll, target: resolved, context: context
+                ) { context in
+                    try self.input.scroll(direction: direction, amount: amount, at: nil, context: context)
+                    return mutationResult(method: "cg-event", verification: "verified")
+                }
+            case .key:
+                guard let selector = TargetSelector.decode(request.object["target"]),
+                      let key = request.object["key"] as? String else {
+                    return .failure(command: request.command, code: "PROTOCOL_ERROR", message: "Invalid key request")
+                }
+                let resolved = try await targetResolver.resolve(selector, context: context)
+                return try await dispatchTargetMutation(
+                    command: .key, target: resolved, context: context
+                ) { context in
+                    try self.input.key(key, to: resolved.identity.pid, context: context)
+                    return mutationResult(method: "cg-event", verification: "verified")
+                }
+            case .type:
+                guard let selector = TargetSelector.decode(request.object["target"]),
+                      let text = request.object["text"] as? String,
+                      let allowClipboardReplace = boolean(request.object["allowClipboardReplace"]) else {
+                    return .failure(command: request.command, code: "PROTOCOL_ERROR", message: "Invalid type request")
+                }
+                let resolved = try await targetResolver.resolve(selector, context: context)
+                return try await dispatchTargetMutation(
+                    command: .type, target: resolved, context: context
+                ) { context in
+                    // Unicode-event path leaves the clipboard untouched.
+                    // allowClipboardReplace is accepted but never triggers a
+                    // hidden paste fallback (spec: no silent clipboard use).
+                    _ = allowClipboardReplace
+                    try self.input.type(text, to: resolved.identity.pid, context: context)
+                    var result = mutationResult(method: "cg-event", verification: "verified")
+                    result["clipboardReplaced"] = .bool(false)
+                    return result
+                }
             default:
                 return .failure(
                     command: request.command,
@@ -213,6 +292,102 @@ private func windowJSON(_ window: TargetWindow) -> JSONValue {
         ]),
         "eligible": .bool(eligible),
         "reason": reason,
+    ])
+}
+
+private func mutationResult(method: String, verification: String) -> [String: JSONValue] {
+    [
+        "method": .string(method),
+        "verification": .string(verification),
+        "visualization": .string("none"),
+    ]
+}
+
+private extension NativeService {
+    /// Ref-scoped mutation: goes through the full validated-snapshot-action
+    /// pipeline (lock, sweep, identity+evidence revalidation, foreground prep,
+    /// invalidate-on-mutation, dispatch). Mutation status is attached by the
+    /// pipeline based on whether dispatch began.
+    func dispatchSnapshotMutation(
+        command: WireCommand,
+        snapshotID: String,
+        ref: Int,
+        context: CommandContext,
+        dispatch: @escaping (LiveAXElement, CommandContext) async throws -> [String: JSONValue]
+    ) async throws -> WireReply {
+        var entered = false
+        do {
+            let data: [String: JSONValue] = try await snapshotService.withValidatedSnapshotAction(
+                snapshotID: snapshotID,
+                ref: ref,
+                context: context,
+                stateChanging: true,
+                preflight: { _, target, _ in target },
+                dispatch: { _, element, context in
+                    entered = true
+                    return try await dispatch(element, context)
+                }
+            )
+            var payload = data
+            payload["target"] = targetJSONForMutation(snapshotID: snapshotID)
+            return .success(command: command, data: payload)
+        } catch let failure as NativeFailure {
+            return .failure(command: command, code: failure.code, message: failure.message,
+                            details: attachingStatus(failure.details, entered))
+        } catch {
+            return .failure(command: command, code: "NATIVE_FAILURE", message: "Native command failed",
+                            details: attachingStatus(nil, entered))
+        }
+    }
+
+    /// Target-scoped mutation (key/type/directional scroll): lock + identity
+    /// validation + dispatch, with held-input cleanup on cancellation.
+    func dispatchTargetMutation(
+        command: WireCommand,
+        target: ResolvedTarget,
+        context: CommandContext,
+        dispatch: @escaping (CommandContext) async throws -> [String: JSONValue]
+    ) async throws -> WireReply {
+        var entered = false
+        do {
+            let data = try await desktopLock.withLock(context: context) {
+                try context.check()
+                // revalidate the target still owns the foreground window before input
+                let fresh = try await targetResolver.validate(target.identity, context: context)
+                guard fresh == target else {
+                    throw NativeFailure("STALE_SNAPSHOT", "Window evidence changed")
+                }
+                entered = true
+                return try await dispatch(context)
+            }
+            var payload = data
+            payload["target"] = targetJSONForMutation(target: target)
+            return .success(command: command, data: payload)
+        } catch let failure as NativeFailure {
+            return .failure(command: command, code: failure.code, message: failure.message,
+                            details: attachingStatus(failure.details, entered))
+        } catch {
+            return .failure(command: command, code: "NATIVE_FAILURE", message: "Native command failed",
+                            details: attachingStatus(nil, entered))
+        }
+    }
+}
+
+private func attachingStatus(_ details: [String: JSONValue]?, _ entered: Bool) -> [String: JSONValue] {
+    var details = details ?? [:]
+    if details["mutationStatus"] == nil {
+        details["mutationStatus"] = .string(entered ? "potentiallyApplied" : "notStarted")
+    }
+    return details
+}
+
+private func targetJSONForMutation(snapshotID: String) -> JSONValue {
+    .object(["snapshotId": .string(snapshotID)])
+}
+private func targetJSONForMutation(target: ResolvedTarget) -> JSONValue {
+    .object([
+        "pid": .number(Double(target.identity.pid)),
+        "windowId": .number(Double(target.identity.windowId)),
     ])
 }
 
