@@ -16,7 +16,7 @@ const STABLE_ERROR_CODES = new Set([
 const CONTROLLED_RESULT_VALUES = {
   method: new Set(['accessibility', 'cg-event']),
   verification: new Set(['verified', 'unverified', 'partial']),
-  visualization: new Set(['none']),
+  visualization: new Set(['none', 'approach', 'pulse', 'drag']),
 };
 
 type ResultField = keyof typeof CONTROLLED_RESULT_VALUES;

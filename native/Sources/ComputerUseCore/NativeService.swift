@@ -36,6 +36,8 @@ public final class NativeService {
     private let captureService: CaptureService
     private let input: NativeInput
     private let store: StateStore
+    private let makeRenderer: () -> CursorRenderer
+    private var cursorEnabled = true
 
     public init(
         snapshotService: SnapshotService = SnapshotService(),
@@ -44,7 +46,14 @@ public final class NativeService {
         environment: DoctorEnvironment = .live,
         store: StateStore = StateStore(),
         captureService: CaptureService? = nil,
-        input: NativeInput = NativeInput(driver: LiveInputDriver())
+        input: NativeInput = NativeInput(driver: LiveInputDriver()),
+        renderer: @escaping () -> CursorRenderer = {
+            #if canImport(AppKit)
+            return CursorOverlay()
+            #else
+            return NullCursorRenderer()
+            #endif
+        }
     ) {
         self.snapshotService = snapshotService
         self.desktopLock = desktopLock
@@ -52,6 +61,7 @@ public final class NativeService {
         self.environment = environment
         self.store = store
         self.input = input
+        self.makeRenderer = renderer
         #if canImport(ScreenCaptureKit)
         self.captureService = captureService ?? CaptureService(capturer: liveWindowCapture, store: store)
         #else
@@ -62,6 +72,11 @@ public final class NativeService {
     }
 
     public func execute(_ request: WireRequest, context: CommandContext) async -> WireReply {
+        // Read the per-request --cursor option; visualization is feedback only.
+        if let options = request.object["options"] as? [String: Any],
+           (options["cursor"] as? String) == "off" {
+            cursorEnabled = false
+        }
         do {
             try context.check()
             switch request.command {
@@ -227,9 +242,8 @@ public final class NativeService {
                     return .failure(command: request.command, code: "PROTOCOL_ERROR", message: "Invalid click request")
                 }
                 let (screen, capture) = try await resolveCapturePoint(captureId, point: point, context: context)
-                return try await dispatchTargetMutation(command: .click, target: capture.target, context: context) { context in
+                return try await dispatchSpatialMutation(command: .click, target: capture.target, point: screen, kind: .click, context: context) { context in
                     try self.input.click(at: screen, button: button, count: count, context: context)
-                    return mutationResult(method: "cg-event", verification: "verified")
                 }
             case .move:
                 guard let captureId = request.object["captureId"] as? String,
@@ -237,10 +251,8 @@ public final class NativeService {
                     return .failure(command: request.command, code: "PROTOCOL_ERROR", message: "Invalid move request")
                 }
                 let (screen, capture) = try await resolveCapturePoint(captureId, point: point, context: context)
-                // move does not invalidate records (spec).
-                return try await dispatchTargetMutation(command: .move, target: capture.target, context: context) { context in
+                return try await dispatchSpatialMutation(command: .move, target: capture.target, point: screen, kind: .move, context: context) { context in
                     try self.input.move(to: screen, context: context)
-                    return mutationResult(method: "cg-event", verification: "verified")
                 }
             case .drag:
                 guard let captureId = request.object["captureId"] as? String,
@@ -250,16 +262,9 @@ public final class NativeService {
                 }
                 let (fromScreen, capture) = try await resolveCapturePoint(captureId, point: from, context: context)
                 let toScreen = try capture.geometry.imageToScreen(to)
-                return try await dispatchTargetMutation(command: .drag, target: capture.target, context: context) { context in
+                return try await dispatchSpatialMutation(command: .drag, target: capture.target, point: fromScreen, kind: .drag(to: toScreen), context: context) { context in
                     try self.input.drag(from: fromScreen, to: toScreen, context: context)
-                    return mutationResult(method: "cg-event", verification: "verified")
                 }
-            default:
-                return .failure(
-                    command: request.command,
-                    code: "UNSUPPORTED_ACTION",
-                    message: "This command is not implemented by this helper version"
-                )
             }
         } catch let failure as NativeFailure {
             return .failure(
@@ -368,6 +373,53 @@ private extension NativeService {
             )
             var payload = data
             payload["target"] = targetJSONForMutation(snapshotID: snapshotID)
+            return .success(command: command, data: payload)
+        } catch let failure as NativeFailure {
+            return .failure(command: command, code: failure.code, message: failure.message,
+                            details: attachingStatus(failure.details, entered))
+        } catch {
+            return .failure(command: command, code: "NATIVE_FAILURE", message: "Native command failed",
+                            details: attachingStatus(nil, entered))
+        }
+    }
+
+    /// Spatial mutation (click/move/drag): like a target mutation but the
+    /// cursor visualizes the resolved screen point via an ActionTimeline when
+    /// enabled. Visualization is feedback only; input always runs.
+    func dispatchSpatialMutation(
+        command: WireCommand,
+        target: ResolvedTarget,
+        point: CGPoint,
+        kind: SpatialActionKind,
+        context: CommandContext,
+        input: @escaping (CommandContext) async throws -> Void
+    ) async throws -> WireReply {
+        var entered = false
+        do {
+            let (data, visualization): ([String: JSONValue], Visualization) = try await desktopLock.withLock(context: context) {
+                try context.check()
+                let fresh = try await targetResolver.validate(target.identity, context: context)
+                guard fresh == target else {
+                    throw NativeFailure("STALE_SNAPSHOT", "Window evidence changed")
+                }
+                var viz = Visualization.none
+                if cursorEnabled {
+                    let timeline = ActionTimeline(renderer: makeRenderer())
+                    viz = try await timeline.spatialAction(at: point, kind: kind, context: context) { context in
+                        entered = true
+                        try await input(context)
+                    }
+                } else {
+                    entered = true
+                    try await input(context)
+                }
+                var payload = mutationResult(method: "cg-event", verification: "verified")
+                payload["visualization"] = .string(viz.rawValue)
+                return (payload, viz)
+            }
+            var payload = data
+            payload["target"] = targetJSONForMutation(target: target)
+            _ = visualization
             return .success(command: command, data: payload)
         } catch let failure as NativeFailure {
             return .failure(command: command, code: failure.code, message: failure.message,
