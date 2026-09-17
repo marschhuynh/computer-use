@@ -135,4 +135,18 @@ describe('run', () => {
     await run(['set-value', '--snapshot', snapshotId, '--ref', '1', '--text', 'input', '--json'], deps);
     expect(readText).not.toHaveBeenCalled();
   });
+
+  it('rejects text input over 1 MiB as INVALID_ARGUMENT before dispatch', async () => {
+    const execute = vi.fn(async (request: Request) => success(request.command));
+    const deps = dependencies({ execute }, { readText: async () => 'x'.repeat(1_048_577) });
+    await expect(run(['type', '--app', 'TextEdit', '--text-file', 'big.txt', '--json'], deps)).resolves.toBe(2);
+    expect(execute).not.toHaveBeenCalled();
+    expect(JSON.parse(deps.stdout[0])).toMatchObject({ error: { code: 'INVALID_ARGUMENT' } });
+  });
+
+  it('accepts text at exactly 1 MiB', async () => {
+    const execute = vi.fn(async (request: Request) => success(request.command));
+    const deps = dependencies({ execute }, { readText: async () => 'x'.repeat(1_048_576) });
+    await expect(run(['type', '--app', 'TextEdit', '--text-file', 'big.txt', '--json'], deps)).resolves.toBe(0);
+  });
 });

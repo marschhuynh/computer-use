@@ -107,4 +107,38 @@ describe('CLI output', () => {
     expect(out).toContain('accessibility');
     expect(out).toContain('denied');
   });
+
+  // Status acceptance matrix: every command maps a result to the spec's exit
+  // class; mutating commands surface mutationStatus when present.
+  const MUTATING = ['press', 'set-value', 'type', 'key', 'scroll', 'click', 'move', 'drag'];
+  it.each([
+    ['apps', 'TARGET_NOT_FOUND', 5],
+    ['windows', 'AMBIGUOUS_TARGET', 5],
+    ['snapshot', 'STALE_SNAPSHOT', 5],
+    ['press', 'STALE_SNAPSHOT', 5],
+    ['set-value', 'EXECUTION_UNCERTAIN', 1],
+    ['type', 'PERMISSION_DENIED', 4],
+    ['key', 'TIMEOUT', 6],
+    ['scroll', 'BUSY', 6],
+    ['screenshot', 'PERMISSION_DENIED', 4],
+    ['click', 'STALE_CAPTURE', 5],
+    ['move', 'STALE_CAPTURE', 5],
+    ['drag', 'EXECUTION_UNCERTAIN', 1],
+  ])('maps %s/%s to exit %s', (command, code, expected) => {
+    const reply: Reply = {
+      schemaVersion: 1, ok: false, command: command as Reply['command'],
+      error: { code, message: 'failed' },
+    };
+    expect(exitCode(reply)).toBe(expected);
+  });
+
+  it.each(MUTATING)('%s surfaces mutationStatus on failure', command => {
+    const reply: Reply = {
+      schemaVersion: 1, ok: false, command: command as Reply['command'],
+      error: { code: 'NATIVE_FAILURE', message: 'x', details: { mutationStatus: 'potentiallyApplied' } },
+    };
+    const out = formatReply(reply, true);
+    expect(JSON.parse(out).error.details.mutationStatus).toBe('potentiallyApplied');
+    expect(exitCode(reply)).toBe(1);
+  });
 });

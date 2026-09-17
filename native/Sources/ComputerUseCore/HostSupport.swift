@@ -2,7 +2,9 @@ import Darwin
 import Dispatch
 import Foundation
 
-public let maximumRequestLineBytes = 1_048_576
+/// Request-line cap: 2 MiB. Text payloads are separately capped at 1 MiB in the
+/// CLI, so a request line stays well under this bound.
+public let maximumRequestLineBytes = 2 * 1_048_576
 
 public enum BoundedLineReadResult: Equatable {
     case awaitingInput

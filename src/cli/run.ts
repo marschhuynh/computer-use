@@ -1,5 +1,6 @@
 import { exitCode, formatReply } from './output.js';
 import { parse, type ParsedInvocation, type TextSource } from './parse.js';
+import { ArgumentError } from '../core/validate.js';
 import type { Backend, Reply, Request } from '../core/protocol.js';
 
 export type RunDependencies = {
@@ -82,10 +83,11 @@ export async function run(argv: string[], deps: RunDependencies): Promise<number
     if (deps.signal.aborted) return writeReply(failure('INTERRUPTED', 'Interrupted', commandOf(invocation)), invocation.json, deps);
     let request: Request;
     try { request = await resolveText(invocation.request, deps, deadlineController.signal); }
-    catch {
+    catch (error) {
+      const message = error instanceof ArgumentError ? error.message : 'Unable to read text input';
       const reply = deadlineController.signal.aborted
         ? failure(deps.signal.aborted ? 'INTERRUPTED' : 'TIMEOUT', deps.signal.aborted ? 'Interrupted' : 'Timed out', commandOf(invocation))
-        : failure('INVALID_ARGUMENT', 'Unable to read text input', commandOf(invocation));
+        : failure('INVALID_ARGUMENT', message, commandOf(invocation));
       return writeReply(reply, invocation.json, deps);
     }
     const remaining = Math.floor(deadline - performance.now());
@@ -109,10 +111,15 @@ export async function run(argv: string[], deps: RunDependencies): Promise<number
   }
 }
 
+const MAX_TEXT_BYTES = 1_048_576; // 1 MiB
+
 async function resolveText(request: Extract<ParsedInvocation, { kind: 'command' }>['request'], deps: RunDependencies, signal: AbortSignal): Promise<Request> {
   if (!('textSource' in request)) return request;
   const source: TextSource = request.textSource;
   const text = source.kind === 'literal' ? source.value : await deps.readText(source.path, signal);
+  if (Buffer.byteLength(text, 'utf8') > MAX_TEXT_BYTES) {
+    throw new ArgumentError('Text input exceeds the 1 MiB limit');
+  }
   if (request.command === 'type') {
     return { schemaVersion: request.schemaVersion, options: request.options, command: 'type', target: request.target, text, allowClipboardReplace: request.allowClipboardReplace };
   }
