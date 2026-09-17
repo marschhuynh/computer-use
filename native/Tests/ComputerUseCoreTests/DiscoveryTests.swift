@@ -146,6 +146,42 @@ final class DiscoveryTests: XCTestCase {
         XCTAssertEqual(reply.error?.code, "TARGET_NOT_FOUND")
     }
 
+    // MARK: - doctor
+
+    func testDoctorReadyIsComputedFromChecks() async throws {
+        let service = NativeService(environment: DoctorEnvironment(
+            accessibilityTrusted: true,
+            screenRecordingTrusted: true
+        ))
+        let reply = await service.execute(doctorRequest(), context: discoveryContext())
+        XCTAssertTrue(reply.ok, "expected success, got \(String(describing: reply.error))")
+        guard case let .bool(ready) = reply.data?["ready"] else {
+            return XCTFail("expected ready bool")
+        }
+        XCTAssertTrue(ready, "all checks ok => ready true")
+    }
+
+    func testDoctorNotReadyWhenACheckIsNotOk() async throws {
+        let service = NativeService(environment: DoctorEnvironment(
+            accessibilityTrusted: false,
+            screenRecordingTrusted: true
+        ))
+        let reply = await service.execute(doctorRequest(), context: discoveryContext())
+        XCTAssertTrue(reply.ok, "doctor still returns a checks payload when not ready")
+        guard case let .bool(ready) = reply.data?["ready"] else {
+            return XCTFail("expected ready bool")
+        }
+        XCTAssertFalse(ready, "accessibility untrusted => ready false")
+        guard case let .array(checks) = reply.data?["checks"] else {
+            return XCTFail("expected checks array")
+        }
+        let statuses = checks.compactMap { value -> String? in
+            guard case let .object(check) = value, case let .string(status) = check["status"] else { return nil }
+            return status
+        }
+        XCTAssertTrue(statuses.contains("denied") || statuses.contains("unknown") || statuses.contains("missing"))
+    }
+
     // MARK: - helpers
 
     private func appsRequest() -> WireRequest {
@@ -170,6 +206,14 @@ final class DiscoveryTests: XCTestCase {
             "schemaVersion": 1,
             "command": "windows",
             "target": ["app": app],
+            "options": ["timeoutMs": 1_000, "cursor": "off"],
+        ])
+    }
+
+    private func doctorRequest() -> WireRequest {
+        WireRequest(command: .doctor, object: [
+            "schemaVersion": 1,
+            "command": "doctor",
             "options": ["timeoutMs": 1_000, "cursor": "off"],
         ])
     }

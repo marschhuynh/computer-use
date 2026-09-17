@@ -30,4 +30,36 @@ describe('CLI output', () => {
     expect(exitCode(success)).toBe(0);
     expect(exitCode({ schemaVersion: 1, ok: false, error: { code: 'NEW_ERROR', message: 'failed' } })).toBe(1);
   });
+
+  it('exits 0 for a ready doctor', () => {
+    const reply: Reply = { schemaVersion: 1, ok: true, command: 'doctor', data: { ready: true, checks: [] } };
+    expect(exitCode(reply)).toBe(0);
+  });
+
+  it('maps a denied doctor check to the permission exit', () => {
+    const reply: Reply = {
+      schemaVersion: 1, ok: true, command: 'doctor',
+      data: { ready: false, checks: [
+        { name: 'helper-protocol', status: 'ok', message: 'ok' },
+        { name: 'accessibility', status: 'denied', message: 'no access' },
+      ] },
+    };
+    expect(exitCode(reply)).toBe(4);
+  });
+
+  it('maps a missing doctor check to the missing-dependency exit', () => {
+    const reply: Reply = {
+      schemaVersion: 1, ok: true, command: 'doctor',
+      data: { ready: false, checks: [{ name: 'native-dependencies', status: 'missing', message: 'absent' }] },
+    };
+    expect(exitCode(reply)).toBe(3);
+  });
+
+  it('maps an unknown-status doctor check to a generic failure exit', () => {
+    const reply: Reply = {
+      schemaVersion: 1, ok: true, command: 'doctor',
+      data: { ready: false, checks: [{ name: 'accessibility', status: 'unknown', message: 'indeterminate' }] },
+    };
+    expect(exitCode(reply)).toBe(1);
+  });
 });

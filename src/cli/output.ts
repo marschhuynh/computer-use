@@ -10,7 +10,26 @@ const exits: Record<string, number> = {
   INTERRUPTED: 130,
 };
 
-export function exitCode(reply: Reply): number { return reply.ok ? 0 : (exits[reply.error.code] ?? 1); }
+export function exitCode(reply: Reply): number {
+  if (!reply.ok) return exits[reply.error.code] ?? 1;
+  // doctor is a read-only diagnostic: a truthful "not ready" result maps to the
+  // first failing check's category rather than a blanket success exit.
+  if (reply.command === 'doctor' && reply.data.ready === false) {
+    const checks = Array.isArray(reply.data.checks) ? reply.data.checks : [];
+    for (const check of checks) {
+      if (typeof check === 'object' && check !== null && 'status' in check) {
+        const status = (check as { status?: unknown }).status;
+        if (status !== 'ok') {
+          if (status === 'denied') return exits.PERMISSION_DENIED;
+          if (status === 'missing') return exits.MISSING_DEPENDENCY;
+          return 1;
+        }
+      }
+    }
+    return 1;
+  }
+  return 0;
+}
 
 export function formatReply(reply: Reply, json: boolean): string {
   if (json) return `${JSON.stringify(reply)}\n`;

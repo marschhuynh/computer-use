@@ -2,19 +2,48 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 
+/// Read-only environment probes for `doctor`. Injected so the diagnostic runs
+/// without touching real permissions or a lock in tests.
+public struct DoctorEnvironment {
+    public let accessibilityTrusted: () -> Bool
+    public let screenRecordingTrusted: () -> Bool
+
+    public init(accessibilityTrusted: @escaping () -> Bool, screenRecordingTrusted: @escaping () -> Bool) {
+        self.accessibilityTrusted = accessibilityTrusted
+        self.screenRecordingTrusted = screenRecordingTrusted
+    }
+
+    public init(accessibilityTrusted: Bool, screenRecordingTrusted: Bool) {
+        self.init(
+            accessibilityTrusted: { accessibilityTrusted },
+            screenRecordingTrusted: { screenRecordingTrusted }
+        )
+    }
+
+    public static var live: DoctorEnvironment {
+        DoctorEnvironment(
+            accessibilityTrusted: { AXIsProcessTrusted() },
+            screenRecordingTrusted: { CGPreflightScreenCaptureAccess() }
+        )
+    }
+}
+
 public final class NativeService {
     private let snapshotService: SnapshotService
     private let desktopLock: DesktopLock
     private let targetResolver: TargetResolver
+    private let environment: DoctorEnvironment
 
     public init(
         snapshotService: SnapshotService = SnapshotService(),
         desktopLock: DesktopLock = DesktopLock(),
-        targetResolver: TargetResolver = TargetResolver()
+        targetResolver: TargetResolver = TargetResolver(),
+        environment: DoctorEnvironment = .live
     ) {
         self.snapshotService = snapshotService
         self.desktopLock = desktopLock
         self.targetResolver = targetResolver
+        self.environment = environment
     }
 
     public func execute(_ request: WireRequest, context: CommandContext) async -> WireReply {
@@ -22,11 +51,11 @@ public final class NativeService {
             try context.check()
             switch request.command {
             case .doctor:
-                return try await desktopLock.withLock(context: context) {
-                    let result = doctor()
-                    try context.check()
-                    return result
-                }
+                // Read-only diagnostic: no desktop lock, no state sweep. It must
+                // report health even while another operation holds the lock.
+                let result = doctor()
+                try context.check()
+                return result
             case .apps:
                 let apps = try await targetResolver.listApplications(context: context)
                 return .success(command: .apps, data: [
@@ -88,15 +117,17 @@ public final class NativeService {
     }
 
     private func doctor() -> WireReply {
-        let accessibility: JSONValue = AXIsProcessTrusted() ? .object([
+        let accessibilityTrusted = environment.accessibilityTrusted()
+        let screenRecordingTrusted = environment.screenRecordingTrusted()
+        let accessibility: JSONValue = accessibilityTrusted ? .object([
             "name": .string("accessibility"), "status": .string("ok"), "message": .string("Accessibility access is available to this helper")
         ]) : .object([
-            "name": .string("accessibility"), "status": .string("unknown"), "message": .string("Accessibility attribution cannot be determined without prompting")
+            "name": .string("accessibility"), "status": .string("denied"), "message": .string("Accessibility access is not available to this helper")
         ])
-        let screenRecording: JSONValue = CGPreflightScreenCaptureAccess() ? .object([
+        let screenRecording: JSONValue = screenRecordingTrusted ? .object([
             "name": .string("screen-recording"), "status": .string("ok"), "message": .string("Screen Recording access is available to this helper")
         ]) : .object([
-            "name": .string("screen-recording"), "status": .string("unknown"), "message": .string("Screen Recording attribution cannot be determined without prompting")
+            "name": .string("screen-recording"), "status": .string("denied"), "message": .string("Screen Recording access is not available to this helper")
         ])
         let protocolCheck: JSONValue = .object([
             "name": .string("helper-protocol"), "status": .string("ok"), "message": .string("Protocol version \(protocolVersion)")
@@ -104,7 +135,14 @@ public final class NativeService {
         let dependencies: JSONValue = .object([
             "name": .string("native-dependencies"), "status": .string("ok"), "message": .string("No external helper dependency is required by this host version")
         ])
-        return .success(command: .doctor, data: ["ready": .bool(false), "checks": .array([protocolCheck, dependencies, accessibility, screenRecording])])
+        let checks: [JSONValue] = [protocolCheck, dependencies, accessibility, screenRecording]
+        let ready = checks.allSatisfy { check in
+            if case let .object(object) = check, case let .string(status) = object["status"] {
+                return status == "ok"
+            }
+            return false
+        }
+        return .success(command: .doctor, data: ["ready": .bool(ready), "checks": .array(checks)])
     }
 }
 
