@@ -12,6 +12,10 @@ public protocol NativeInputDriver {
     /// Post a key/modifier chord globally via the HID event tap — it lands on
     /// whatever holds keyboard focus, like real hardware input.
     func postGlobalKey(_ chord: String, context: CommandContext) throws
+    /// Post a key/modifier chord to whatever currently holds keyboard focus,
+    /// via the HID event tap. Used by targeted key/type so input reaches
+    /// panel- and helper-hosted UI that does not share the app's event queue.
+    func postFocusedKey(_ chord: String, context: CommandContext) throws
     /// Post Unicode text to a pid's focused element.
     func postText(_ text: String, to pid: Int, context: CommandContext) throws
     /// Scroll — either a direction in the resolved window, or scroll-to-ref.
@@ -48,11 +52,22 @@ public final class NativeInput {
         try driver.performAXAction("AXSetValue:\(text)", on: element, context: context)
     }
 
-    public func key(_ chord: String, to pid: Int, context: CommandContext) throws {
+    public enum KeyDelivery {
+        /// Post to the app's own event queue (reaches background apps, not panels).
+        case process
+        /// Post to the HID tap so the event lands on whatever holds focus (reaches
+        /// panels and helper-hosted UI; the target must be focused).
+        case focused
+    }
+
+    public func key(_ chord: String, to pid: Int, delivery: KeyDelivery = .focused, context: CommandContext) throws {
         guard KeyChord.isValid(chord) else {
             throw NativeFailure("INVALID_ARGUMENT", "Unrecognized key/modifier combination")
         }
-        try driver.postKey(chord, to: pid, context: context)
+        switch delivery {
+        case .focused: try driver.postFocusedKey(chord, context: context)
+        case .process: try driver.postKey(chord, to: pid, context: context)
+        }
     }
 
     public func globalKey(_ chord: String, context: CommandContext) throws {
@@ -172,9 +187,17 @@ public final class LiveInputDriver: NativeInputDriver {
         _ = app
     }
 
+    public func postFocusedKey(_ chord: String, context: CommandContext) throws {
+        try postKeyToTap(chord, context: context)
+    }
+
     public func postGlobalKey(_ chord: String, context: CommandContext) throws {
+        try postKeyToTap(chord, context: context)
+    }
+
+    private func postKeyToTap(_ chord: String, context: CommandContext) throws {
         try context.check()
-        // No target: the chord goes to the HID event tap so it reaches whatever
+        // The chord goes to the HID event tap so it reaches whatever
         // currently holds keyboard focus, like real hardware input.
         guard let (key, modifiers) = KeyChord.toCGEvent(chord) else {
             throw NativeFailure("INVALID_ARGUMENT", "Unrecognized key/modifier combination")

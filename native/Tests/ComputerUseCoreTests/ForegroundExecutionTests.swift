@@ -8,7 +8,8 @@ final class ForegroundExecutionTests: XCTestCase {
     private final class Recorder {
         var actions: [String] = []
         var texts: [String] = []
-        var keys: [String] = []
+        var pidKeys: [String] = []
+        var tapKeys: [String] = []
         var globalKeys: [String] = []
         var usedHIDTap = false
         var scrolls: [(String, Int)] = []
@@ -29,10 +30,14 @@ final class ForegroundExecutionTests: XCTestCase {
             r.actions.append(action)
         }
         func postKey(_ chord: String, to pid: Int, context: CommandContext) throws {
-            r.keys.append(chord)
+            r.pidKeys.append(chord)
         }
         func postGlobalKey(_ chord: String, context: CommandContext) throws {
             r.globalKeys.append(chord)
+            r.usedHIDTap = true
+        }
+        func postFocusedKey(_ chord: String, context: CommandContext) throws {
+            r.tapKeys.append(chord)
             r.usedHIDTap = true
         }
         func postText(_ text: String, to pid: Int, context: CommandContext) throws {
@@ -69,8 +74,8 @@ final class ForegroundExecutionTests: XCTestCase {
     func testKeyParsesChordAndPosts() async throws {
         let recorder = Recorder()
         let input = NativeInput(driver: RecordingDriver(recorder))
-        try await input.key("cmd+s", to: 42, context: context())
-        XCTAssertEqual(recorder.keys, ["cmd+s"])
+        try await input.key("cmd+s", to: 42, delivery: .process, context: context())
+        XCTAssertEqual(recorder.pidKeys, ["cmd+s"])
     }
 
     func testKeyRejectsUnknownKey() async throws {
@@ -80,13 +85,21 @@ final class ForegroundExecutionTests: XCTestCase {
         }) { XCTAssertEqual(($0 as? NativeFailure)?.code, "INVALID_ARGUMENT") }
     }
 
+    func testKeyFocusedDeliveryPostsToHIDTap() throws {
+        let recorder = Recorder()
+        let input = NativeInput(driver: RecordingDriver(recorder))
+        try input.key("cmd+s", to: 42, delivery: .focused, context: context())
+        XCTAssertEqual(recorder.tapKeys, ["cmd+s"])
+        XCTAssertEqual(recorder.pidKeys, [])
+    }
+
     func testGlobalKeyPostsViaHIDTapNotPid() async throws {
         let recorder = Recorder()
         let input = NativeInput(driver: RecordingDriver(recorder))
         try input.globalKey("cmd+space", context: context())
         XCTAssertEqual(recorder.globalKeys, ["cmd+space"])
         XCTAssertTrue(recorder.usedHIDTap)   // global path, not postToPid
-        XCTAssertTrue(recorder.keys.isEmpty) // pid-scoped path untouched
+        XCTAssertTrue(recorder.pidKeys.isEmpty) // pid-scoped path untouched
     }
 
     func testGlobalKeyRejectsUnknownKey() async throws {
@@ -114,7 +127,7 @@ final class ForegroundExecutionTests: XCTestCase {
         XCTAssertTrue(reply.ok, "expected success, got \(String(describing: reply.error))")
         XCTAssertEqual(recorder.globalKeys, ["cmd+space"])
         XCTAssertTrue(recorder.usedHIDTap)
-        XCTAssertTrue(recorder.keys.isEmpty, "no target means nothing is posted to a pid")
+        XCTAssertTrue(recorder.pidKeys.isEmpty, "no target means nothing is posted to a pid")
         guard case let .object(target) = reply.data?["target"],
               case let .string(scope) = target["scope"] else {
             return XCTFail("expected target scope, got \(String(describing: reply.data))")
