@@ -78,6 +78,61 @@ final class AXTrustTests: XCTestCase {
         XCTAssertEqual(axReadDisposition(for: .attributeUnsupported), .unavailable)
     }
 
+    // Notes and Calendar return kAXErrorFailure from
+    // AXUIElementCopyActionNames for elements that simply expose no actions
+    // (verified live: AXSplitter/AXStaticText/AXGroup inside the Notes
+    // window). An unreadable *action list* is not grounds to abort a whole
+    // snapshot — the element is still observable, it just advertises no
+    // actions — so the live adapter must degrade it to `.unavailable`.
+    func testUnreadableActionListDegradesToNoActionsInsteadOfFailing() {
+        XCTAssertEqual(axActionNamesReadResult(status: .failure, names: nil), .unavailable)
+    }
+
+    // Permission and liveness problems must still surface: degrading them
+    // would hide PERMISSION_DENIED and dead-element errors behind an empty
+    // action list.
+    func testActionListPermissionAndLivenessErrorsStayFailures() {
+        XCTAssertEqual(axActionNamesReadResult(status: .apiDisabled, names: nil), .failure)
+        XCTAssertEqual(axActionNamesReadResult(status: .invalidUIElement, names: nil), .failure)
+        XCTAssertEqual(axActionNamesReadResult(status: .cannotComplete, names: nil), .failure)
+    }
+
+    func testActionListSuccessAndAbsenceKeepExistingSemantics() {
+        let names = ["AXPress", "AXShowMenu"] as CFArray
+        XCTAssertEqual(axActionNamesReadResult(status: .success, names: names), .value(["AXPress", "AXShowMenu"]))
+        XCTAssertEqual(axActionNamesReadResult(status: .noValue, names: nil), .unavailable)
+        XCTAssertEqual(axActionNamesReadResult(status: .attributeUnsupported, names: nil), .unavailable)
+        // `.success` with no payload at all is a contract violation, not a
+        // degenerate element: AX claimed it wrote a value and did not. That
+        // stays a failure (see testSuccessfulWrongCFTypeAndMissingValueAreFailures).
+        XCTAssertEqual(axActionNamesReadResult(status: .success, names: nil), .failure)
+    }
+
+    // Same root cause as the action-list case, on a different attribute:
+    // Notes and Calendar answer kAXErrorFailure for an *absent* AXSubrole on
+    // AXGroup/AXButton elements (verified live) where AppKit answers
+    // .noValue. AXSubrole is optional and non-identifying, so an unreadable
+    // one must not abort the snapshot.
+    func testUnreadableOptionalScalarAttributeDegradesToAbsent() {
+        for attribute in [
+            kAXSubroleAttribute,
+            kAXIdentifierAttribute,
+            kAXTitleAttribute,
+            kAXDescriptionAttribute,
+            kAXValueAttribute
+        ] {
+            XCTAssertFalse(axAttributeIsIdentifying(attribute), attribute)
+        }
+    }
+
+    // AXRole is the one scalar the snapshot cannot do without: it is read via
+    // `required()` and every downstream ref/evidence decision keys off it.
+    // An unreadable role must stay a hard failure rather than silently
+    // producing a roleless node.
+    func testUnreadableRoleRemainsIdentifyingAndFatal() {
+        XCTAssertTrue(axAttributeIsIdentifying(kAXRoleAttribute))
+    }
+
     func testSuccessfulWrongCFTypeAndMissingValueAreFailures() {
         let number: CFTypeRef = NSNumber(value: 7)
         let wrongType: AXReadResult<String> = axReadResult(
