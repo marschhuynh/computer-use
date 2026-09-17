@@ -35,12 +35,14 @@ public final class NativeService {
     private let environment: DoctorEnvironment
     private let captureService: CaptureService
     private let input: NativeInput
+    private let store: StateStore
 
     public init(
         snapshotService: SnapshotService = SnapshotService(),
         desktopLock: DesktopLock = DesktopLock(),
         targetResolver: TargetResolver = TargetResolver(),
         environment: DoctorEnvironment = .live,
+        store: StateStore = StateStore(),
         captureService: CaptureService? = nil,
         input: NativeInput = NativeInput(driver: LiveInputDriver())
     ) {
@@ -48,13 +50,14 @@ public final class NativeService {
         self.desktopLock = desktopLock
         self.targetResolver = targetResolver
         self.environment = environment
+        self.store = store
         self.input = input
         #if canImport(ScreenCaptureKit)
-        self.captureService = captureService ?? CaptureService(capturer: liveWindowCapture)
+        self.captureService = captureService ?? CaptureService(capturer: liveWindowCapture, store: store)
         #else
         self.captureService = captureService ?? CaptureService(capturer: { _, _ in
             throw NativeFailure("UNSUPPORTED_PLATFORM", "Screen capture requires macOS")
-        })
+        }, store: store)
         #endif
     }
 
@@ -215,6 +218,41 @@ public final class NativeService {
                     var result = mutationResult(method: "cg-event", verification: "verified")
                     result["clipboardReplaced"] = .bool(false)
                     return result
+                }
+            case .click:
+                guard let captureId = request.object["captureId"] as? String,
+                      let point = decodePoint(request.object["point"]),
+                      let button = request.object["button"] as? String,
+                      let count = integer(request.object["count"]) else {
+                    return .failure(command: request.command, code: "PROTOCOL_ERROR", message: "Invalid click request")
+                }
+                let (screen, capture) = try await resolveCapturePoint(captureId, point: point, context: context)
+                return try await dispatchTargetMutation(command: .click, target: capture.target, context: context) { context in
+                    try self.input.click(at: screen, button: button, count: count, context: context)
+                    return mutationResult(method: "cg-event", verification: "verified")
+                }
+            case .move:
+                guard let captureId = request.object["captureId"] as? String,
+                      let point = decodePoint(request.object["point"]) else {
+                    return .failure(command: request.command, code: "PROTOCOL_ERROR", message: "Invalid move request")
+                }
+                let (screen, capture) = try await resolveCapturePoint(captureId, point: point, context: context)
+                // move does not invalidate records (spec).
+                return try await dispatchTargetMutation(command: .move, target: capture.target, context: context) { context in
+                    try self.input.move(to: screen, context: context)
+                    return mutationResult(method: "cg-event", verification: "verified")
+                }
+            case .drag:
+                guard let captureId = request.object["captureId"] as? String,
+                      let from = decodePoint(request.object["from"]),
+                      let to = decodePoint(request.object["to"]) else {
+                    return .failure(command: request.command, code: "PROTOCOL_ERROR", message: "Invalid drag request")
+                }
+                let (fromScreen, capture) = try await resolveCapturePoint(captureId, point: from, context: context)
+                let toScreen = try capture.geometry.imageToScreen(to)
+                return try await dispatchTargetMutation(command: .drag, target: capture.target, context: context) { context in
+                    try self.input.drag(from: fromScreen, to: toScreen, context: context)
+                    return mutationResult(method: "cg-event", verification: "verified")
                 }
             default:
                 return .failure(
@@ -389,6 +427,33 @@ private func targetJSONForMutation(target: ResolvedTarget) -> JSONValue {
         "pid": .number(Double(target.identity.pid)),
         "windowId": .number(Double(target.identity.windowId)),
     ])
+}
+
+private func decodePoint(_ value: Any?) -> CGPoint? {
+    guard let dict = value as? [String: Any],
+          let x = dict["x"] as? NSNumber, let y = dict["y"] as? NSNumber,
+          x.doubleValue.isFinite, y.doubleValue.isFinite else { return nil }
+    return CGPoint(x: x.doubleValue, y: y.doubleValue)
+}
+
+private extension NativeService {
+    /// Resolve a --capture record + image point to a screen point, after
+    /// re-validating the capture's target identity and geometry are unchanged.
+    func resolveCapturePoint(
+        _ captureId: String,
+        point: CGPoint,
+        context: CommandContext
+    ) async throws -> (CGPoint, CaptureRecord) {
+        let record = try store.readCapture(id: captureId, context: context)
+        // Re-validate the target identity; a changed process/window means the
+        // recorded geometry no longer maps onto what's on screen.
+        let fresh = try await targetResolver.validate(record.target.identity, context: context)
+        guard fresh == record.target else {
+            throw NativeFailure("STALE_CAPTURE", "Recorded capture target changed")
+        }
+        let screen = try record.geometry.imageToScreen(point)
+        return (screen, record)
+    }
 }
 
 private func boolean(_ value: Any?) -> Bool? {

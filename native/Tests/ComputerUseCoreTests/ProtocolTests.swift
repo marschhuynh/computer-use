@@ -9,23 +9,14 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testUnsupportedValidRequestStagesUntilItsTask() async throws {
-        // apps/windows/snapshot/press/etc. are implemented; use a still-
-        // unsupported coordinate command to prove unimplemented commands fail
-        // safe rather than dispatch.
-        let request = try XCTUnwrap(WireRequest.decode([
+        // All commands are implemented as of Stage G; there is no remaining
+        // UNSUPPORTED_ACTION path for a valid request. Prove an *invalid*
+        // command name still fails closed at decode.
+        XCTAssertNil(WireRequest.decode([
             "schemaVersion": 1,
-            "command": "click",
-            "captureId": "123e4567-e89b-42d3-a456-426614174000",
-            "point": ["x": 1, "y": 2],
-            "button": "left",
-            "count": 1,
+            "command": "not-a-command",
             "options": ["timeoutMs": 15_000, "cursor": "on"]
         ]))
-        let reply = await NativeService().execute(
-            request,
-            context: CommandContext(timeoutMilliseconds: 15_000)
-        )
-        XCTAssertEqual(reply.error?.code, "UNSUPPORTED_ACTION")
     }
 
     func testEveryCommandFormRejectsAnUnexpectedTopLevelKey() {

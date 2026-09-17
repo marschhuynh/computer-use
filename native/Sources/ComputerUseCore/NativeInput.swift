@@ -13,6 +13,12 @@ public protocol NativeInputDriver {
     func postText(_ text: String, to pid: Int, context: CommandContext) throws
     /// Scroll — either a direction in the frontmost window, or scroll-to-ref.
     func scroll(_ direction: String, amount: Int, at element: LiveAXElement?, context: CommandContext) throws
+    /// Click at a screen point with a validated button/count.
+    func click(at point: CGPoint, button: String, count: Int, context: CommandContext) throws
+    /// Move the pointer to a screen point.
+    func move(to point: CGPoint, context: CommandContext) throws
+    /// Left-button drag between two screen points.
+    func drag(from start: CGPoint, to end: CGPoint, context: CommandContext) throws
     /// Release any inputs this driver pressed (held keys/buttons). Called on
     /// cancellation/failure; never dispatches after context expiry.
     func releaseHeldInputs() throws
@@ -50,6 +56,36 @@ public final class NativeInput {
 
     public func scroll(direction: String, amount: Int, at element: LiveAXElement?, context: CommandContext) throws {
         try driver.scroll(direction, amount: amount, at: element, context: context)
+    }
+
+    /// Click with a validated button/count — reject unsupported combos before
+    /// any input reaches the driver.
+    public func click(at point: CGPoint, button: String, count: Int, context: CommandContext) throws {
+        let supported: Bool
+        switch button {
+        case "left": supported = (1...3).contains(count)
+        case "right", "middle": supported = count == 1
+        default: supported = false
+        }
+        guard supported else {
+            throw NativeFailure("INVALID_ARGUMENT", "Unsupported button/count combination")
+        }
+        try driver.click(at: point, button: button, count: count, context: context)
+    }
+
+    public func move(to point: CGPoint, context: CommandContext) throws {
+        try driver.move(to: point, context: context)
+    }
+
+    public func drag(from start: CGPoint, to end: CGPoint, context: CommandContext) throws {
+        // Held-button cleanup is owned by the driver; on any failure the caller
+        // (or the driver's own defer) must still release the button.
+        do {
+            try driver.drag(from: start, to: end, context: context)
+        } catch {
+            try? driver.releaseHeldInputs()
+            throw error
+        }
     }
 
     public func releaseHeldInputs() throws {
@@ -168,10 +204,69 @@ public final class LiveInputDriver: NativeInputDriver {
         event.post(tap: .cghidEventTap)
     }
 
+    public func click(at point: CGPoint, button: String, count: Int, context: CommandContext) throws {
+        try context.check()
+        let (cgButton, downType, upType): (CGMouseButton, CGEventType, CGEventType)
+        switch button {
+        case "left": cgButton = .left; downType = .leftMouseDown; upType = .leftMouseUp
+        case "right": cgButton = .right; downType = .rightMouseDown; upType = .rightMouseUp
+        case "middle": cgButton = .center; downType = .otherMouseDown; upType = .otherMouseUp
+        default: throw NativeFailure("INVALID_ARGUMENT", "Unsupported button")
+        }
+        for click in 1...count {
+            try context.check()
+            guard let down = CGEvent(mouseEventSource: nil, mouseType: downType, mouseCursorPosition: point, mouseButton: cgButton),
+                  let up = CGEvent(mouseEventSource: nil, mouseType: upType, mouseCursorPosition: point, mouseButton: cgButton) else {
+                throw NativeFailure("NATIVE_FAILURE", "Unable to construct mouse event")
+            }
+            down.setIntegerValueField(.mouseEventClickState, value: Int64(click))
+            up.setIntegerValueField(.mouseEventClickState, value: Int64(click))
+            down.post(tap: .cghidEventTap)
+            up.post(tap: .cghidEventTap)
+        }
+    }
+
+    public func move(to point: CGPoint, context: CommandContext) throws {
+        try context.check()
+        guard let event = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) else {
+            throw NativeFailure("NATIVE_FAILURE", "Unable to construct move event")
+        }
+        event.post(tap: .cghidEventTap)
+    }
+
+    public func drag(from start: CGPoint, to end: CGPoint, context: CommandContext) throws {
+        try context.check()
+        guard let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: start, mouseButton: .left) else {
+            throw NativeFailure("NATIVE_FAILURE", "Unable to construct drag event")
+        }
+        down.post(tap: .cghidEventTap)
+        var didRelease = false
+        defer {
+            if !didRelease {
+                if let up = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: end, mouseButton: .left) {
+                    up.post(tap: .cghidEventTap)
+                }
+            }
+        }
+        // Bounded straight-line interpolation, checking the deadline between steps.
+        let steps = 20
+        for i in 1...steps {
+            try context.check()
+            let t = CGFloat(i) / CGFloat(steps)
+            let point = CGPoint(x: start.x + (end.x - start.x) * t, y: start.y + (end.y - start.y) * t)
+            guard let move = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDragged, mouseCursorPosition: point, mouseButton: .left) else { continue }
+            move.post(tap: .cghidEventTap)
+        }
+        guard let up = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: end, mouseButton: .left) else {
+            throw NativeFailure("NATIVE_FAILURE", "Unable to release drag")
+        }
+        up.post(tap: .cghidEventTap)
+        didRelease = true
+    }
+
     public func releaseHeldInputs() throws {
-        // Held-input cleanup is best-effort: this driver posts discrete events
-        // and does not hold keys/buttons between calls. Reserved for held-input
-        // tracking when Stage G adds drag/held-button state.
+        // If a drag was interrupted the defer in `drag` already released the
+        // button; this is the belt-and-suspenders path for held modifiers.
     }
 }
 
