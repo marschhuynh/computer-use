@@ -398,17 +398,26 @@ public final class NativeService {
                 }
             }
         } catch let failure as NativeFailure {
+            // A failure that escapes a dispatch pipeline (e.g. resolve's
+            // TARGET_NOT_FOUND, thrown before dispatchTargetMutation runs)
+            // means input was never posted: mutating commands report
+            // notStarted. A status the failure already carries is kept.
             return .failure(
                 command: request.command,
                 code: failure.code,
                 message: failure.message,
-                details: failure.details
+                details: request.command.mutatesDesktop
+                    ? attachingStatus(failure.details, false)
+                    : failure.details
             )
         } catch {
             return .failure(
                 command: request.command,
                 code: "NATIVE_FAILURE",
-                message: "Native command failed"
+                message: "Native command failed",
+                details: request.command.mutatesDesktop
+                    ? attachingStatus(nil, false)
+                    : nil
             )
         }
     }
@@ -629,6 +638,17 @@ private extension NativeService {
         } catch {
             return .failure(command: command, code: "NATIVE_FAILURE", message: "Native command failed",
                             details: attachingStatus(nil, entered))
+        }
+    }
+}
+
+private extension WireCommand {
+    /// Commands whose failure may carry a `mutationStatus` — input may reach
+    /// the desktop. Read-only commands never report one.
+    var mutatesDesktop: Bool {
+        switch self {
+        case .press, .setValue, .type, .key, .scroll, .click, .move, .drag: return true
+        case .doctor, .apps, .windows, .snapshot, .screenshot: return false
         }
     }
 }

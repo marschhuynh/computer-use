@@ -370,6 +370,30 @@ final class ForegroundExecutionTests: XCTestCase {
         XCTAssertEqual(recorder.tapKeys, [])   // nothing was dispatched
     }
 
+    func testKeyResolveFailureReportsNotStarted() async throws {
+        // A resolver that finds no app throws TARGET_NOT_FOUND before
+        // dispatchTargetMutation runs — the failure is caught by execute's
+        // outer catch, which must still report notStarted: no input was
+        // ever posted.
+        let recorder = Recorder()
+        let service = NativeService(
+            desktopLock: DesktopLock(rootURL: temporaryStateRoot()),
+            targetResolver: TargetResolver(provider: TargetResolverProvider(
+                listApplications: { [] },
+                windowsForPID: { _, _ in [] },
+                listDisplays: { [] }
+            )),
+            input: NativeInput(driver: RecordingDriver(recorder)),
+            activator: FakeActivator()
+        )
+        let reply = await service.key(chord: "cmd+s", to: windowPid, context: context())
+        XCTAssertFalse(reply.ok)
+        XCTAssertEqual(reply.error?.code, "TARGET_NOT_FOUND")
+        XCTAssertEqual(reply.error?.details?["mutationStatus"], .string("notStarted"))
+        XCTAssertEqual(recorder.tapKeys, [])   // nothing was dispatched
+        XCTAssertEqual(recorder.pidKeys, [])
+    }
+
     func testKeyMidPostFailureReportsPotentiallyApplied() async throws {
         // Activation succeeds (preflight), but the post itself throws — the
         // chord was dispatched and may have run, so mutationStatus is

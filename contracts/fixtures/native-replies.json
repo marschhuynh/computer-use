@@ -1,6 +1,6 @@
 {
   "mutationStatuses": [
-    {"name":"not-started","wire":"notStarted","public":null},
+    {"name":"not-started","wire":"notStarted","public":"notStarted"},
     {"name":"potentially-applied","wire":"potentiallyApplied","public":"potentiallyApplied"}
   ],
   "invalidMutationStatuses": ["not-started", "potentially_applied", "unknown", ""]

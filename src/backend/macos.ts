@@ -197,8 +197,7 @@ function projectReply(value: unknown, request: Request, requestDispatched: boole
     const wireStatus = readMutationStatus(value.error.details);
     if (wireStatus === null) return undefined;
     const publicStatus = mutatesDesktop(request.command)
-      && (wireStatus === 'potentiallyApplied' || (wireStatus === undefined && requestDispatched))
-      ? 'potentiallyApplied'
+      ? (wireStatus ?? (requestDispatched ? 'potentiallyApplied' : undefined))
       : undefined;
     const details = projectDetails(value.error.details ?? {}, supplied, publicStatus);
     return {
@@ -481,7 +480,7 @@ function readMutationStatus(value: Record<string, JsonValue> | undefined): Mutat
 function projectDetails(
   value: Record<string, JsonValue>,
   supplied: SuppliedValue | undefined,
-  mutationStatus: 'potentiallyApplied' | undefined,
+  mutationStatus: MutationStatus | undefined,
 ): Record<string, JsonValue> | undefined {
   const freeForm: Record<string, JsonValue> = {};
   for (const [key, item] of Object.entries(value)) {
