@@ -13,6 +13,15 @@ final class CaptureTests: XCTestCase {
         )
     }
 
+    private func displayTarget() -> ResolvedTarget {
+        ResolvedTarget(
+            identity: TargetIdentity(pid: 4242, launchDate: "2026-09-08T10:00:00.000Z", bundleId: nil, windowId: 77),
+            title: "Display 77",
+            bounds: WindowBounds(x: 0, y: 0, width: 2056, height: 1329),
+            isDisplay: true
+        )
+    }
+
     private func geometry() -> CaptureGeometry {
         CaptureGeometry(
             windowBounds: WindowBounds(x: 100, y: 100, width: 600, height: 400),
@@ -96,14 +105,45 @@ final class CaptureTests: XCTestCase {
         }
     }
 
+    func testLegacyCaptureRecordDecodesAsWindowTarget() throws {
+        // A capture persisted before `isDisplay` existed must still decode —
+        // the missing key defaults to false (window target).
+        let json = """
+        {
+          "version": 1,
+          "kind": "capture",
+          "id": "123e4567-e89b-42d3-a456-426614174009",
+          "createdAt": "2026-09-08T10:00:00.000Z",
+          "expiresAt": "2026-09-08T10:10:00.000Z",
+          "target": {
+            "identity": {"pid": 42, "launchDate": "2026-09-08T10:00:00.000Z", "bundleId": "com.example.Editor", "windowId": 7},
+            "title": "Doc",
+            "bounds": {"x": 100, "y": 100, "width": 600, "height": 400}
+          },
+          "geometry": {"windowBounds": {"x": 100, "y": 100, "width": 600, "height": 400}, "imageSize": {"width": 1200, "height": 800}, "scale": 2},
+          "path": "/tmp/capture.png",
+          "invalidated": false
+        }
+        """
+        let decoded = try JSONDecoder().decode(CaptureRecord.self, from: Data(json.utf8))
+        XCTAssertFalse(decoded.target.isDisplay)
+        // Round-trip: encode always writes the flag.
+        let reencoded = try JSONEncoder().encode(decoded.target)
+        let object = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: reencoded) as? [String: Any]
+        )
+        XCTAssertEqual(object["isDisplay"] as? Bool, false)
+    }
+
     // MARK: - CaptureService
 
     func testScreenshotReturnsCaptureMetadata() async throws {
         let dir = temporaryStateRoot()
         let output = dir.appendingPathComponent("out.png").path
         let service = CaptureService(
-            capturer: { windowID, _, _ in
-                XCTAssertEqual(windowID, 7)
+            capturer: { target, _, _ in
+                XCTAssertEqual(target.identity.windowId, 7)
+                XCTAssertFalse(target.isDisplay)
                 return CapturedImage(
                     pixelSize: CGSize(width: 1200, height: 800),
                     backingScale: 2,
@@ -165,5 +205,166 @@ final class CaptureTests: XCTestCase {
         await XCTAssertThrowsErrorAsync {
             try await service.screenshot(target: target(), output: "relative.png", overwrite: false, native: false, context: context())
         }
+    }
+
+    func testScreenshotDisplayTargetPersistsIsDisplayCapture() async throws {
+        let dir = temporaryStateRoot()
+        let output = dir.appendingPathComponent("display.png").path
+        let service = CaptureService(
+            capturer: { target, _, _ in
+                XCTAssertTrue(target.isDisplay)
+                XCTAssertEqual(target.identity.windowId, 77)
+                return CapturedImage(
+                    pixelSize: CGSize(width: 2056, height: 1329),
+                    backingScale: 1,
+                    pngData: Data([0x89, 0x50, 0x4E, 0x47])
+                )
+            },
+            store: StateStore(rootURL: dir)
+        )
+        let reply = try await service.screenshot(
+            target: displayTarget(), output: output, overwrite: false, native: false, context: context()
+        )
+        guard case let .object(data) = reply,
+              case let .string(captureId) = data["captureId"] else {
+            return XCTFail("missing captureId in \(reply)")
+        }
+        let rec = try StateStore(rootURL: dir).readCapture(id: captureId, context: context())
+        XCTAssertTrue(rec.target.isDisplay)
+        XCTAssertEqual(rec.target.identity.windowId, 77)
+        XCTAssertEqual(rec.target.identity.pid, 4242)
+    }
+
+    // MARK: - NativeService .screenshot dispatch
+
+    private func displayStubProvider() -> TargetResolverProvider {
+        TargetResolverProvider(
+            listApplications: {
+                [ProcessMetadata(name: "Editor", pid: 42, launchDate: "2026-09-08T10:00:00.000Z", bundleId: "com.example.Editor")]
+            },
+            windowsForPID: { _, _ in
+                [TargetWindow(
+                    ax: AXWindowMetadata(
+                        role: "AXWindow",
+                        title: "Doc",
+                        bounds: WindowBounds(x: 100, y: 100, width: 600, height: 400),
+                        minimized: false
+                    ),
+                    cg: CGWindowMetadata(
+                        id: 7,
+                        title: "Doc",
+                        bounds: WindowBounds(x: 100, y: 100, width: 600, height: 400),
+                        onScreen: true,
+                        minimized: false
+                    )
+                )]
+            },
+            listDisplays: {
+                [
+                    DisplayMetadata(
+                        displayID: 77,
+                        frame: WindowBounds(x: 0, y: 0, width: 2056, height: 1329),
+                        width: 2056,
+                        height: 1329
+                    )
+                ]
+            }
+        )
+    }
+
+    private func screenshotRequest(_ mutate: (inout [String: Any]) -> Void = { _ in }) -> WireRequest {
+        var object: [String: Any] = [
+            "schemaVersion": 1,
+            "command": "screenshot",
+            "output": "/tmp/nuvin-cu-screenshot-test.png",
+            "overwrite": true,
+            "annotated": false,
+            "native": false,
+            "tree": ["maxDepth": 8, "maxElements": 500, "hintMode": "leafCompact"],
+            "options": ["timeoutMs": 1_000, "cursor": "off"],
+        ]
+        mutate(&object)
+        return WireRequest(command: .screenshot, object: object)
+    }
+
+    private func screenshotService(
+        capturer: @escaping (ResolvedTarget) -> CapturedImage
+    ) -> NativeService {
+        NativeService(
+            targetResolver: TargetResolver(provider: displayStubProvider()),
+            store: StateStore(rootURL: temporaryStateRoot()),
+            captureService: CaptureService(
+                capturer: { target, _, _ in capturer(target) },
+                store: StateStore(rootURL: temporaryStateRoot())
+            )
+        )
+    }
+
+    func testBareScreenshotResolvesPrimaryDisplay() async throws {
+        var captured: ResolvedTarget?
+        let service = screenshotService { target in
+            captured = target
+            return CapturedImage(
+                pixelSize: CGSize(width: 2056, height: 1329),
+                backingScale: 1,
+                pngData: Data([0x89, 0x50, 0x4E, 0x47])
+            )
+        }
+        let reply = await service.execute(screenshotRequest(), context: context())
+        XCTAssertTrue(reply.ok, "expected success, got \(String(describing: reply.error))")
+        let target = try XCTUnwrap(captured)
+        XCTAssertTrue(target.isDisplay)
+        XCTAssertEqual(target.identity.windowId, 77)
+        XCTAssertEqual(target.bounds.width, 2056)
+    }
+
+    func testDisplayIndexSelectsDisplay() async throws {
+        var captured: ResolvedTarget?
+        let service = screenshotService { target in
+            captured = target
+            return CapturedImage(
+                pixelSize: CGSize(width: 2056, height: 1329),
+                backingScale: 1,
+                pngData: Data([0x89, 0x50, 0x4E, 0x47])
+            )
+        }
+        let reply = await service.execute(screenshotRequest { $0["display"] = 1 }, context: context())
+        XCTAssertTrue(reply.ok, "expected success, got \(String(describing: reply.error))")
+        XCTAssertEqual(captured?.identity.windowId, 77)
+    }
+
+    func testAnnotatedDisplayScreenshotIsInvalidArgument() async throws {
+        let service = screenshotService { _ in
+            XCTFail("capturer must not run for an annotated display target")
+            return CapturedImage(pixelSize: .zero, backingScale: 1, pngData: Data())
+        }
+        let reply = await service.execute(screenshotRequest { $0["annotated"] = true }, context: context())
+        XCTAssertFalse(reply.ok)
+        XCTAssertEqual(reply.error?.code, "INVALID_ARGUMENT")
+    }
+
+    func testTargetAndDisplayTogetherIsProtocolError() async throws {
+        XCTAssertNil(WireRequest.decode([
+            "schemaVersion": 1,
+            "command": "screenshot",
+            "target": ["pid": 42],
+            "display": 1,
+            "output": "/tmp/x.png",
+            "overwrite": true,
+            "annotated": false,
+            "native": false,
+            "tree": ["maxDepth": 8, "maxElements": 500, "hintMode": "leafCompact"],
+            "options": ["timeoutMs": 1_000, "cursor": "off"],
+        ]))
+        let service = screenshotService { _ in
+            XCTFail("capturer must not run when target and display are both present")
+            return CapturedImage(pixelSize: .zero, backingScale: 1, pngData: Data())
+        }
+        let reply = await service.execute(
+            screenshotRequest { $0["target"] = ["pid": 42]; $0["display"] = 1 },
+            context: context()
+        )
+        XCTAssertFalse(reply.ok)
+        XCTAssertEqual(reply.error?.code, "PROTOCOL_ERROR")
     }
 }

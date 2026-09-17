@@ -1,6 +1,9 @@
 import AppKit
 import ApplicationServices
 import Foundation
+#if canImport(ScreenCaptureKit)
+import ScreenCaptureKit
+#endif
 
 public enum TargetSelector {
     case app(String, windowId: Int?)
@@ -31,6 +34,25 @@ public struct ResolvedTarget: Codable, Equatable {
     public let identity: TargetIdentity
     public let title: String
     public let bounds: WindowBounds
+    /// True for display targets, which carry a synthetic identity (windowId =
+    /// displayID, pid = the host's own). Decode defaults to false so capture
+    /// records persisted before this field existed still load.
+    public let isDisplay: Bool
+
+    public init(identity: TargetIdentity, title: String, bounds: WindowBounds, isDisplay: Bool = false) {
+        self.identity = identity
+        self.title = title
+        self.bounds = bounds
+        self.isDisplay = isDisplay
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        identity = try container.decode(TargetIdentity.self, forKey: .identity)
+        title = try container.decode(String.self, forKey: .title)
+        bounds = try container.decode(WindowBounds.self, forKey: .bounds)
+        isDisplay = try container.decodeIfPresent(Bool.self, forKey: .isDisplay) ?? false
+    }
 }
 
 public struct WindowBounds: Codable, Equatable {
@@ -93,16 +115,35 @@ public struct ProcessMetadata: Equatable, Sendable {
     }
 }
 
+/// SCK-free view of a display for the resolver/test layer. `frame` is in
+/// screen points; `width`/`height` are the display's backing pixels.
+public struct DisplayMetadata: Codable, Equatable, Sendable {
+    public let displayID: UInt32
+    public let frame: WindowBounds
+    public let width: Int
+    public let height: Int
+
+    public init(displayID: UInt32, frame: WindowBounds, width: Int, height: Int) {
+        self.displayID = displayID
+        self.frame = frame
+        self.width = width
+        self.height = height
+    }
+}
+
 public struct TargetResolverProvider {
     public let listApplications: () async throws -> [ProcessMetadata]
     public let windowsForPID: (Int, CommandContext) throws -> [TargetWindow]
+    public let listDisplays: () async throws -> [DisplayMetadata]
 
     public init(
         listApplications: @escaping () async throws -> [ProcessMetadata],
-        windowsForPID: @escaping (Int, CommandContext) throws -> [TargetWindow]
+        windowsForPID: @escaping (Int, CommandContext) throws -> [TargetWindow],
+        listDisplays: @escaping () async throws -> [DisplayMetadata]
     ) {
         self.listApplications = listApplications
         self.windowsForPID = windowsForPID
+        self.listDisplays = listDisplays
     }
 
     public static var live: TargetResolverProvider {
@@ -112,7 +153,8 @@ public struct TargetResolverProvider {
             },
             windowsForPID: { pid, context in
                 try liveWindows(for: pid, context: context)
-            }
+            },
+            listDisplays: liveDisplays
         )
     }
 }
@@ -129,7 +171,8 @@ public final class TargetResolver {
             listApplications: { inventory.apps.map(ProcessMetadata.init(application:)) },
             windowsForPID: { pid, _ in
                 inventory.apps.first(where: { $0.pid == pid })?.windows ?? []
-            }
+            },
+            listDisplays: { [] }
         )
     }
 
@@ -247,6 +290,44 @@ public final class TargetResolver {
         )
     }
 
+    /// Resolves a display for the bare/`--display` screenshot path into a
+    /// synthetic `ResolvedTarget`. There is no real window or app, so the
+    /// identity borrows the host's own pid/launch identity — capture records
+    /// require positive ids — and `isDisplay` marks the kind for the capturer.
+    /// `index` selects into `SCShareableContent.displays` order; nil picks the
+    /// first (primary) display.
+    public func resolveDisplay(_ index: Int?, context: CommandContext) async throws -> ResolvedTarget {
+        try context.check()
+        let displays = try await provider.listDisplays()
+        try context.check()
+        guard !displays.isEmpty else {
+            throw NativeFailure("TARGET_NOT_FOUND", "No display is available")
+        }
+        let display: DisplayMetadata
+        if let index {
+            // --display is 1-based (wire validation requires a positive
+            // integer): display 1 is the first SCShareableContent display.
+            guard index > 0, index <= displays.count else {
+                throw NativeFailure("INVALID_ARGUMENT", "Display index is out of range")
+            }
+            display = displays[index - 1]
+        } else {
+            display = displays[0]
+        }
+        try context.check()
+        return ResolvedTarget(
+            identity: TargetIdentity(
+                pid: Int(ProcessInfo.processInfo.processIdentifier),
+                launchDate: ProcessLaunchDate.format(ProcessInfo.processInfo.hostLaunchDate),
+                bundleId: nil,
+                windowId: Int(display.displayID)
+            ),
+            title: "Display \(display.displayID)",
+            bounds: display.frame,
+            isDisplay: true
+        )
+    }
+
     public func validate(
         _ identity: TargetIdentity,
         context: CommandContext
@@ -274,6 +355,53 @@ enum ProcessLaunchDate {
         return formatter.string(from: date)
     }
 }
+
+extension ProcessInfo {
+    /// Wall-clock instant this host process launched. `processIdentifier` is
+    /// reused across reboots, so the synthetic display identity pairs it with
+    /// the process start time — unique within a boot and stable for the
+    /// host's lifetime.
+    var hostLaunchDate: Date {
+        var mib = [CTL_KERN, KERN_PROC, KERN_PROC_PID, processIdentifier]
+        var process = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.size
+        guard sysctl(&mib, u_int(mib.count), &process, &size, nil, 0) == 0,
+              size > 0 else {
+            return Date(timeIntervalSince1970: ProcessInfo.processInfo.systemUptime)
+        }
+        let start = process.kp_proc.p_starttime
+        return Date(timeIntervalSince1970: Double(start.tv_sec) + Double(start.tv_usec) / 1_000_000)
+    }
+}
+
+#if canImport(ScreenCaptureKit)
+private func liveDisplays() async throws -> [DisplayMetadata] {
+    guard CGPreflightScreenCaptureAccess() else {
+        throw NativeFailure("PERMISSION_DENIED", "Screen Recording access is unavailable")
+    }
+    let content = try await SCShareableContent.excludingDesktopWindows(
+        false,
+        onScreenWindowsOnly: true
+    )
+    return content.displays.map { display in
+        DisplayMetadata(
+            displayID: display.displayID,
+            frame: WindowBounds(
+                x: display.frame.origin.x,
+                y: display.frame.origin.y,
+                width: display.frame.width,
+                height: display.frame.height
+            ),
+            width: display.width,
+            height: display.height
+        )
+    }
+}
+#else
+private func liveDisplays() async throws -> [DisplayMetadata] {
+    throw NativeFailure("UNSUPPORTED_PLATFORM", "Screen capture requires macOS")
+}
+#endif
 
 @MainActor
 private func liveProcessMetadata() -> [ProcessMetadata] {

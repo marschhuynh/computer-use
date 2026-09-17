@@ -63,9 +63,13 @@ public final class NativeService {
         self.input = input
         self.makeRenderer = renderer
         #if canImport(ScreenCaptureKit)
-        self.captureService = captureService ?? CaptureService(capturer: liveWindowCapture, store: store)
+        self.captureService = captureService ?? CaptureService(capturer: { target, native, context in
+            target.isDisplay
+                ? try await liveDisplayCapture(target: target, native: native, context: context)
+                : try await liveWindowCapture(windowID: target.identity.windowId, native: native, context: context)
+        }, store: store)
         #else
-        self.captureService = captureService ?? CaptureService(capturer: { _, _ in
+        self.captureService = captureService ?? CaptureService(capturer: { _, _, _ in
             throw NativeFailure("UNSUPPORTED_PLATFORM", "Screen capture requires macOS")
         }, store: store)
         #endif
@@ -124,8 +128,7 @@ public final class NativeService {
                 )
                 return .success(command: .snapshot, data: result.wireData)
             case .screenshot:
-                guard let selector = TargetSelector.decode(request.object["target"]),
-                      let tree = decodeTreeOptions(request.object["tree"]),
+                guard let tree = decodeTreeOptions(request.object["tree"]),
                       let output = request.object["output"] as? String,
                       let overwrite = boolean(request.object["overwrite"]),
                       let annotated = boolean(request.object["annotated"]),
@@ -136,13 +139,38 @@ public final class NativeService {
                         message: "Invalid screenshot request"
                     )
                 }
-                let resolved = try await targetResolver.resolve(selector, context: context)
+                // target + display is rejected at wire validation; guard again
+                // so a hand-built request can't slip both through.
+                if request.object["target"] != nil, request.object["display"] != nil {
+                    return .failure(
+                        command: request.command,
+                        code: "PROTOCOL_ERROR",
+                        message: "Invalid screenshot request"
+                    )
+                }
+                // `selector` is nil for the display path; annotated snapshots
+                // below are gated on isDisplay and always have a window target.
+                let selector = TargetSelector.decode(request.object["target"])
+                let resolved: ResolvedTarget
+                if let selector {
+                    resolved = try await targetResolver.resolve(selector, context: context)
+                } else {
+                    // No window target: --display n selects displays[n]; bare
+                    // screenshot takes the primary display.
+                    resolved = try await targetResolver.resolveDisplay(
+                        integer(request.object["display"]),
+                        context: context
+                    )
+                }
+                if annotated, resolved.isDisplay {
+                    throw NativeFailure("INVALID_ARGUMENT", "--annotated requires --app/--pid")
+                }
                 // When annotated, snapshot first so the capture can overlay
                 // ref-hint badges at each element's screen bounds — the saved
                 // PNG then maps pixels back to refs.
                 var snap: SnapshotResult?
                 var annotations: [(ref: Int, bounds: WindowBounds)] = []
-                if annotated {
+                if annotated, let selector {
                     let observed = try await snapshotService.snapshot(
                         selector: selector, options: tree, context: context
                     )

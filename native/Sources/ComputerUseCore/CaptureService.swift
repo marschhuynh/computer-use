@@ -24,12 +24,13 @@ public struct CapturedImage {
     }
 }
 
-/// Window-only screenshot capture. The `capturer` is injected so tests never
-/// touch ScreenCaptureKit; the live path captures exactly one `SCWindow`.
+/// Window + display screenshot capture. The `capturer` is injected so tests
+/// never touch ScreenCaptureKit; it routes on `target.isDisplay` — window
+/// targets hit `SCWindow`, display targets hit `SCDisplay`.
 public final class CaptureService {
-    /// (windowID, native, context) -> captured image. `native` selects full
+    /// (target, native, context) -> captured image. `native` selects full
     /// backing-scale pixels; `false` captures at logical (1x) resolution.
-    public typealias Capturer = (Int, Bool, CommandContext) async throws -> CapturedImage
+    public typealias Capturer = (ResolvedTarget, Bool, CommandContext) async throws -> CapturedImage
 
     private let capturer: Capturer
     private let store: StateStore
@@ -62,7 +63,7 @@ public final class CaptureService {
             throw NativeFailure("INVALID_ARGUMENT", "--output exists; pass --overwrite to replace it")
         }
 
-        let captured = try await capturer(target.identity.windowId, native, context)
+        let captured = try await capturer(target, native, context)
         try context.check()
         guard captured.pixelSize.width > 0, captured.pixelSize.height > 0 else {
             throw NativeFailure("NATIVE_FAILURE", "Window capture produced an empty image")
@@ -202,6 +203,41 @@ public func liveWindowCapture(windowID: Int, native: Bool, context: CommandConte
     return CapturedImage(
         pixelSize: CGSize(width: image.width, height: image.height),
         backingScale: CGFloat(image.width) / CGFloat(window.frame.width),
+        pngData: data
+    )
+}
+
+/// Live ScreenCaptureKit display capture — whole `SCDisplay`, cursor excluded.
+/// The display is re-derived from the synthetic target's `windowId`
+/// (= displayID) so the injected-capturer seam stays SCK-free for tests.
+public func liveDisplayCapture(target: ResolvedTarget, native: Bool, context: CommandContext) async throws -> CapturedImage {
+    guard CGPreflightScreenCaptureAccess() else {
+        throw NativeFailure("PERMISSION_DENIED", "Screen Recording access is unavailable")
+    }
+    try context.check()
+    let displayID = CGDirectDisplayID(target.identity.windowId)
+    let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+    try context.check()
+    guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
+        throw NativeFailure("TARGET_NOT_FOUND", "Display is not capturable")
+    }
+    let filter = SCContentFilter(display: display, excludingWindows: [])
+    let configuration = SCStreamConfiguration()
+    configuration.showsCursor = false
+    // Same pin-to-source-rect contract as liveWindowCapture: the image is the
+    // display frame rendered at logical (1x) or native backing scale.
+    let scale = native ? await displayScale(containing: display.frame) : 1
+    configuration.width = Int((display.frame.width * scale).rounded())
+    configuration.height = Int((display.frame.height * scale).rounded())
+    configuration.sourceRect = display.frame
+    let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+    try context.check()
+    guard let data = pngEncode(image) else {
+        throw NativeFailure("NATIVE_FAILURE", "Display capture produced no image data")
+    }
+    return CapturedImage(
+        pixelSize: CGSize(width: image.width, height: image.height),
+        backingScale: CGFloat(image.width) / CGFloat(display.frame.width),
         pngData: data
     )
 }

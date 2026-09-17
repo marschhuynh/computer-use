@@ -156,8 +156,15 @@ private func validRequest(_ request: [String: Any]) -> Bool {
             && ["up", "down", "left", "right"].contains(request["direction"] as? String ?? "")
             && positiveInteger(request["amount"])
     case .screenshot:
-        return hasExactKeys(request, base.union(["target", "output", "overwrite", "annotated", "native", "tree"]))
-            && validTarget(request["target"]) && !(request["output"] as? String ?? "").isEmpty
+        // Three target forms, never mixed: window target (app/pid), display
+        // index, or neither (bare screenshot captures the primary display).
+        let screenshotRequired = base.union(["output", "overwrite", "annotated", "native", "tree"])
+        let hasTarget = hasExactKeys(request, screenshotRequired.union(["target"]))
+        let hasDisplay = hasExactKeys(request, screenshotRequired.union(["display"]))
+        guard hasTarget || hasDisplay || hasExactKeys(request, screenshotRequired) else { return false }
+        if hasTarget, !validTarget(request["target"]) { return false }
+        if hasDisplay, !positiveInteger(request["display"]) { return false }
+        return !(request["output"] as? String ?? "").isEmpty
             && validBoolean(request["overwrite"]) && validBoolean(request["annotated"])
             && validBoolean(request["native"])
             && validTree(request["tree"])

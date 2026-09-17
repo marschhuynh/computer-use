@@ -14,7 +14,8 @@ final class DiscoveryTests: XCTestCase {
         let service = NativeService(
             targetResolver: TargetResolver(provider: TargetResolverProvider(
                 listApplications: { apps },
-                windowsForPID: { _, _ in [] }
+                windowsForPID: { _, _ in [] },
+                listDisplays: { [] }
             ))
         )
         let reply = await service.execute(appsRequest(), context: discoveryContext())
@@ -46,7 +47,8 @@ final class DiscoveryTests: XCTestCase {
                     ProcessMetadata(name: "Editor", pid: 43, launchDate: nil, bundleId: nil),
                 ]
             },
-            windowsForPID: { _, _ in [] }
+            windowsForPID: { _, _ in [] },
+            listDisplays: { [] }
         ))
         let listed = try await resolver.listApplications(context: discoveryContext())
         XCTAssertEqual(listed.count, 2)
@@ -74,7 +76,8 @@ final class DiscoveryTests: XCTestCase {
         let service = NativeService(
             targetResolver: TargetResolver(provider: TargetResolverProvider(
                 listApplications: { [ProcessMetadata(name: "Editor", pid: 42, launchDate: nil, bundleId: nil)] },
-                windowsForPID: { _, _ in windows }
+                windowsForPID: { _, _ in windows },
+                listDisplays: { [] }
             ))
         )
         let reply = await service.execute(windowsRequest(pid: 42), context: discoveryContext())
@@ -109,7 +112,8 @@ final class DiscoveryTests: XCTestCase {
         let service = NativeService(
             targetResolver: TargetResolver(provider: TargetResolverProvider(
                 listApplications: { [ProcessMetadata(name: "Editor", pid: 42, launchDate: nil, bundleId: nil)] },
-                windowsForPID: { _, _ in windows }
+                windowsForPID: { _, _ in windows },
+                listDisplays: { [] }
             ))
         )
         // Multiple eligible windows is fine for listing — it is not AMBIGUOUS.
@@ -126,7 +130,8 @@ final class DiscoveryTests: XCTestCase {
                         ProcessMetadata(name: "Editor", pid: 43, launchDate: nil, bundleId: nil),
                     ]
                 },
-                windowsForPID: { _, _ in [] }
+                windowsForPID: { _, _ in [] },
+                listDisplays: { [] }
             ))
         )
         let reply = await service.execute(windowsRequest(app: "Editor"), context: discoveryContext())
@@ -138,7 +143,8 @@ final class DiscoveryTests: XCTestCase {
         let service = NativeService(
             targetResolver: TargetResolver(provider: TargetResolverProvider(
                 listApplications: { [] },
-                windowsForPID: { _, _ in [] }
+                windowsForPID: { _, _ in [] },
+                listDisplays: { [] }
             ))
         )
         let reply = await service.execute(windowsRequest(pid: 42), context: discoveryContext())

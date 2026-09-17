@@ -12,6 +12,77 @@ final class TargetResolverTests: XCTestCase {
         XCTAssertNil(TargetSelector.decode(["unexpected": true]))
     }
 
+    func testResolveDisplayProducesSyntheticTarget() async throws {
+        let resolver = TargetResolver(provider: TargetResolverProvider(
+            listApplications: { [] },
+            windowsForPID: { _, _ in [] },
+            listDisplays: {
+                [
+                    DisplayMetadata(
+                        displayID: 77,
+                        frame: WindowBounds(x: 0, y: 0, width: 2056, height: 1329),
+                        width: 2056,
+                        height: 1329
+                    )
+                ]
+            }
+        ))
+        let target = try await resolver.resolveDisplay(nil, context: resolverContext())
+        XCTAssertTrue(target.isDisplay)
+        XCTAssertEqual(target.identity.windowId, 77)
+        XCTAssertGreaterThan(target.identity.pid, 0)
+        XCTAssertNil(target.identity.bundleId)
+        XCTAssertFalse(target.identity.launchDate.isEmpty)
+        XCTAssertEqual(target.title, "Display 77")
+        XCTAssertEqual(target.bounds, WindowBounds(x: 0, y: 0, width: 2056, height: 1329))
+        // geometry: pixel == point at 1x over display bounds
+        let geo = CaptureGeometry(
+            windowBounds: target.bounds,
+            imageSize: CGSize(width: 2056, height: 1329),
+            scale: 1
+        )
+        let point = try geo.imageToScreen(CGPoint(x: 100, y: 50))
+        XCTAssertEqual(point, CGPoint(x: 100, y: 50))
+    }
+
+    func testResolveDisplayIndexSelectsAndOutOfRangeFails() async throws {
+        let displays = {
+            [
+                DisplayMetadata(
+                    displayID: 1,
+                    frame: WindowBounds(x: 0, y: 0, width: 100, height: 100),
+                    width: 100,
+                    height: 100
+                ),
+                DisplayMetadata(
+                    displayID: 2,
+                    frame: WindowBounds(x: 100, y: 0, width: 200, height: 100),
+                    width: 200,
+                    height: 100
+                ),
+            ]
+        }
+        let resolver = TargetResolver(provider: TargetResolverProvider(
+            listApplications: { [] },
+            windowsForPID: { _, _ in [] },
+            listDisplays: displays
+        ))
+        // --display is 1-based: 1 selects the first display, 2 the second.
+        let second = try await resolver.resolveDisplay(2, context: resolverContext())
+        XCTAssertEqual(second.identity.windowId, 2)
+        XCTAssertEqual(second.bounds.width, 200)
+        await assertResolverFailure("INVALID_ARGUMENT") {
+            try await resolver.resolveDisplay(3, context: resolverContext())
+        }
+        await assertResolverFailure("TARGET_NOT_FOUND") {
+            try await TargetResolver(provider: TargetResolverProvider(
+                listApplications: { [] },
+                windowsForPID: { _, _ in [] },
+                listDisplays: { [] }
+            )).resolveDisplay(nil, context: resolverContext())
+        }
+    }
+
     func testDuplicateAppNamesAreNotSelected() async {
         let resolver = TargetResolver(inventory: .fixture("duplicate-apps"))
         await assertResolverFailure("AMBIGUOUS_TARGET") {
@@ -69,7 +140,8 @@ final class TargetResolverTests: XCTestCase {
                 queries.append(pid)
                 XCTFail("window provider must not run for an ambiguous app")
                 return []
-            }
+            },
+            listDisplays: { [] }
         ))
         await assertResolverFailure("AMBIGUOUS_TARGET") {
             try await resolver.resolve(.app("Editor", windowId: nil), context: resolverContext())
@@ -89,7 +161,8 @@ final class TargetResolverTests: XCTestCase {
             windowsForPID: { pid, _ in
                 queries.append(pid)
                 return [resolverWindow(id: 7)]
-            }
+            },
+            listDisplays: { [] }
         ))
         let target = try await resolver.resolve(
             .pid(42, windowId: 7),
@@ -111,7 +184,8 @@ final class TargetResolverTests: XCTestCase {
             listApplications: {
                 [ProcessMetadata(name: "Editor", pid: 42, launchDate: second, bundleId: "com.example.Editor")]
             },
-            windowsForPID: { _, _ in [resolverWindow(id: 7)] }
+            windowsForPID: { _, _ in [resolverWindow(id: 7)] },
+            listDisplays: { [] }
         ))
         await assertResolverFailure("STALE_SNAPSHOT") {
             try await resolver.validate(
@@ -127,7 +201,8 @@ final class TargetResolverTests: XCTestCase {
         XCTAssertNil(metadata.launchDate)
         let resolver = TargetResolver(provider: TargetResolverProvider(
             listApplications: { [metadata] },
-            windowsForPID: { pid, _ in queries.append(pid); return [] }
+            windowsForPID: { pid, _ in queries.append(pid); return [] },
+            listDisplays: { [] }
         ))
         await assertResolverFailure("TARGET_NOT_FOUND") {
             try await resolver.resolve(.pid(42, windowId: nil), context: resolverContext())
@@ -147,7 +222,8 @@ final class TargetResolverTests: XCTestCase {
         }
         let missing = TargetResolver(provider: TargetResolverProvider(
             listApplications: applications,
-            windowsForPID: { _, _ in [] }
+            windowsForPID: { _, _ in [] },
+            listDisplays: { [] }
         ))
         await assertResolverFailure("TARGET_NOT_FOUND") {
             try await missing.resolve(.pid(42, windowId: 7), context: resolverContext())
@@ -159,7 +235,8 @@ final class TargetResolverTests: XCTestCase {
         for code in ["PERMISSION_DENIED", "NATIVE_FAILURE"] {
             let resolver = TargetResolver(provider: TargetResolverProvider(
                 listApplications: applications,
-                windowsForPID: { _, _ in throw NativeFailure(code, "classified provider failure") }
+                windowsForPID: { _, _ in throw NativeFailure(code, "classified provider failure") },
+                listDisplays: { [] }
             ))
             await assertResolverFailure(code) {
                 try await resolver.validate(identity, context: resolverContext())
@@ -209,7 +286,8 @@ final class TargetResolverTests: XCTestCase {
                     bundleId: "com.example.Editor"
                 )]
             },
-            windowsForPID: { _, _ in [unsupported, resolverWindow(id: 7)] }
+            windowsForPID: { _, _ in [unsupported, resolverWindow(id: 7)] },
+            listDisplays: { [] }
         ))
 
         let target = try await resolver.resolve(
