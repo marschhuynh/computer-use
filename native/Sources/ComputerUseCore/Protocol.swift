@@ -137,13 +137,20 @@ private func validRequest(_ request: [String: Any]) -> Bool {
             && validID(request["snapshotId"]) && positiveInteger(request["ref"])
             && request["text"] is String
     case .type:
-        return hasExactKeys(request, base.union(["target", "text", "allowClipboardReplace"]))
-            && validTarget(request["target"]) && request["text"] is String
+        guard hasExactKeys(request, base.union(["target", "text", "allowClipboardReplace"]))
+            || hasExactKeys(request, base.union(["target", "text", "allowClipboardReplace", "toProcess"])) else {
+            return false
+        }
+        return validTarget(request["target"]) && request["text"] is String
             && validBoolean(request["allowClipboardReplace"])
+            && (request["toProcess"] == nil || validBoolean(request["toProcess"]))
     case .key:
-        guard !(request["key"] as? String ?? "").isEmpty else { return false }
-        if hasExactKeys(request, base.union(["key"])) { return true }
-        return hasExactKeys(request, base.union(["target", "key"]))
+        guard !(request["key"] as? String ?? "").isEmpty,
+              request["toProcess"] == nil || validBoolean(request["toProcess"]) else { return false }
+        if hasExactKeys(request, base.union(["key"]))
+            || hasExactKeys(request, base.union(["key", "toProcess"])) { return true }
+        return (hasExactKeys(request, base.union(["target", "key"]))
+            || hasExactKeys(request, base.union(["target", "key", "toProcess"])))
             && validTarget(request["target"])
     case .scroll:
         let refKeys = base.union(["snapshotId", "ref"])

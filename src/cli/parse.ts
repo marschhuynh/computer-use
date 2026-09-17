@@ -12,7 +12,7 @@ export type ParsedInvocation =
   | { kind: 'command'; request: DraftRequest; json: boolean };
 
 type ValueName = 'app' | 'pid' | 'window' | 'depth' | 'max-elements' | 'hint-mode' | 'snapshot' | 'ref' | 'text' | 'text-file' | 'key' | 'direction' | 'amount' | 'output' | 'display' | 'capture' | 'x' | 'y' | 'button' | 'count' | 'from' | 'to' | 'timeout' | 'cursor';
-type FlagName = 'json' | 'help' | 'version' | 'allow-clipboard-replace' | 'overwrite' | 'annotated' | 'native';
+type FlagName = 'json' | 'help' | 'version' | 'allow-clipboard-replace' | 'overwrite' | 'annotated' | 'native' | 'to-process';
 const commandNames = new Set<Command['command']>(['doctor', 'apps', 'windows', 'snapshot', 'press', 'set-value', 'type', 'key', 'scroll', 'screenshot', 'click', 'move', 'drag']);
 const commonValues: ValueName[] = ['timeout', 'cursor'];
 const commonFlags: FlagName[] = ['json', 'help', 'version'];
@@ -120,13 +120,16 @@ export function parse(argv: string[]): ParsedInvocation {
     case 'snapshot': request = { ...base, command, target: target(values), tree: tree(values) }; break;
     case 'press': request = { ...base, command, snapshotId: recordId(required(values, 'snapshot'), 'snapshot'), ref: safeInteger(required(values, 'ref'), 'ref') }; break;
     case 'set-value': request = { ...base, command, snapshotId: recordId(required(values, 'snapshot'), 'snapshot'), ref: safeInteger(required(values, 'ref'), 'ref'), textSource: textSource(values) }; break;
-    case 'type': request = { ...base, command, target: target(values), textSource: textSource(values), allowClipboardReplace: flag(values, 'allow-clipboard-replace') }; break;
+    case 'type': request = { ...base, command, target: target(values), textSource: textSource(values), allowClipboardReplace: flag(values, 'allow-clipboard-replace'), ...(flag(values, 'to-process') ? { toProcess: true } : {}) }; break;
     case 'key': {
       const keyTarget = optionalTarget(values);
       if (keyTarget === undefined && stringValue(values, 'window') !== undefined) {
         throw new ArgumentError('--window requires --app or --pid');
       }
-      request = { ...base, command, target: keyTarget, key: required(values, 'key') };
+      if (keyTarget === undefined && flag(values, 'to-process')) {
+        throw new ArgumentError('--to-process requires --app or --pid');
+      }
+      request = { ...base, command, target: keyTarget, key: required(values, 'key'), ...(flag(values, 'to-process') ? { toProcess: true } : {}) };
       break;
     }
     case 'scroll': {

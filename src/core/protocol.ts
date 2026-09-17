@@ -14,8 +14,8 @@ export type Command =
   | { command: 'snapshot'; target: Target; tree: TreeOptions }
   | { command: 'press'; snapshotId: string; ref: number }
   | { command: 'set-value'; snapshotId: string; ref: number; text: string }
-  | { command: 'type'; target: Target; text: string; allowClipboardReplace: boolean }
-  | { command: 'key'; target?: Target; key: string }
+  | { command: 'type'; target: Target; text: string; allowClipboardReplace: boolean; toProcess?: boolean }
+  | { command: 'key'; target?: Target; key: string; toProcess?: boolean }
   | { command: 'scroll'; snapshotId: string; ref: number }
   | { command: 'scroll'; target: Target; direction: Direction; amount: number }
   | { command: 'screenshot'; target?: Target; display?: number; output: string; overwrite: boolean; annotated: boolean; native: boolean; tree: TreeOptions }

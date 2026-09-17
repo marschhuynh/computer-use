@@ -18,6 +18,10 @@ public protocol NativeInputDriver {
     func postFocusedKey(_ chord: String, context: CommandContext) throws
     /// Post Unicode text to a pid's focused element.
     func postText(_ text: String, to pid: Int, context: CommandContext) throws
+    /// Post Unicode text to whatever currently holds keyboard focus, via the
+    /// HID event tap — the text counterpart of `postFocusedKey`, so targeted
+    /// `type` reaches panel- and helper-hosted UI.
+    func postFocusedText(_ text: String, context: CommandContext) throws
     /// Scroll — either a direction in the resolved window, or scroll-to-ref.
     /// `at element` selects scroll-to-ref (AXScrollToVisible); `at point` is the
     /// screen location the directional scroll is delivered to.
@@ -77,8 +81,11 @@ public final class NativeInput {
         try driver.postGlobalKey(chord, context: context)
     }
 
-    public func type(_ text: String, to pid: Int, context: CommandContext) throws {
-        try driver.postText(text, to: pid, context: context)
+    public func type(_ text: String, to pid: Int, delivery: KeyDelivery = .process, context: CommandContext) throws {
+        switch delivery {
+        case .focused: try driver.postFocusedText(text, context: context)
+        case .process: try driver.postText(text, to: pid, context: context)
+        }
     }
 
     public func scroll(direction: String, amount: Int, at element: LiveAXElement?, point: CGPoint?, context: CommandContext) throws {
@@ -230,6 +237,25 @@ public final class LiveInputDriver: NativeInputDriver {
             event.postToPid(pid_t(pid))
             guard let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { continue }
             up.postToPid(pid_t(pid))
+            usleep(4_000)
+        }
+    }
+
+    /// Post Unicode text to the HID event tap so it lands on whatever holds
+    /// keyboard focus — including panels and helper-hosted UI that does not
+    /// share the target's event queue. Same per-scalar pacing as `postText`.
+    public func postFocusedText(_ text: String, context: CommandContext) throws {
+        try context.check()
+        for scalar in text.unicodeScalars {
+            try context.check()
+            var utf16 = Array(String(scalar).utf16)
+            guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else {
+                throw NativeFailure("NATIVE_FAILURE", "Unable to construct text event")
+            }
+            event.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
+            event.post(tap: .cghidEventTap)
+            guard let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { continue }
+            up.post(tap: .cghidEventTap)
             usleep(4_000)
         }
     }

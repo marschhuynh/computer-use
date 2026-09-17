@@ -12,10 +12,11 @@ const STABLE_ERROR_CODES = new Set([
   'INVALID_ARGUMENT', 'UNSUPPORTED_PLATFORM', 'MISSING_HELPER', 'HELPER_VERSION_MISMATCH',
   'MISSING_DEPENDENCY', 'PERMISSION_DENIED', 'TARGET_NOT_FOUND', 'AMBIGUOUS_TARGET',
   'INELIGIBLE_TARGET', 'STALE_SNAPSHOT', 'STALE_CAPTURE', 'TIMEOUT', 'BUSY', 'INTERRUPTED',
+  'FOCUS_FAILED',
 ]);
 const CONTROLLED_RESULT_VALUES = {
   method: new Set(['accessibility', 'cg-event']),
-  verification: new Set(['verified', 'unverified', 'partial']),
+  verification: new Set(['verified', 'dispatched', 'unverified', 'partial']),
   visualization: new Set(['none', 'approach', 'pulse', 'drag']),
 };
 
