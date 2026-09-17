@@ -64,7 +64,7 @@ public final class NativeInput {
         case focused
     }
 
-    public func key(_ chord: String, to pid: Int, delivery: KeyDelivery = .focused, context: CommandContext) throws {
+    public func key(_ chord: String, to pid: Int, delivery: KeyDelivery, context: CommandContext) throws {
         guard KeyChord.isValid(chord) else {
             throw NativeFailure("INVALID_ARGUMENT", "Unrecognized key/modifier combination")
         }

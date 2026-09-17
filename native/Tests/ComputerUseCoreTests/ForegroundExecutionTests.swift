@@ -90,7 +90,7 @@ final class ForegroundExecutionTests: XCTestCase {
     func testKeyRejectsUnknownKey() async throws {
         let input = NativeInput(driver: RecordingDriver(Recorder()))
         await XCTAssertThrowsErrorAsync({
-            try await input.key("cmd+notakey", to: 42, context: context())
+            try await input.key("cmd+notakey", to: 42, delivery: .focused, context: context())
         }) { XCTAssertEqual(($0 as? NativeFailure)?.code, "INVALID_ARGUMENT") }
     }
 

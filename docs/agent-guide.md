@@ -158,9 +158,11 @@ nuvin-computer-use key  --key cmd+space                   # bare = system-wide c
 nuvin-computer-use scroll --app Notes --direction down --amount 3
 ```
 
-`type`/`key`/`scroll --direction` target the **app/window**, not a ref — they
-post input to whatever has focus inside that window. Focus the right field
-first (`click` it or `press` it via a ref).
+`type`/`key`/`scroll --direction` target the **app/window**, not a ref. With
+`--app`/`--pid` they activate the app then post to whatever holds focus inside
+it (reaching panels); `--to-process` instead posts to the app's event queue in
+the background, ignoring focus entirely. Focus the right field first (`click`
+it or `press` it via a ref).
 
 `key`/`type` have three delivery modes:
 
