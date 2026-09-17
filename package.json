@@ -1,9 +1,27 @@
 {
   "name": "nuvin-computer-use",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "type": "module",
-  "description": "Standalone restoration of the ComputerUseTool from marschhuynh/nuvin-cli (macOS accessibility-tree + screenshot automation)",
+  "description": "Drive the macOS desktop from a CLI — accessibility-tree actions (snapshot → press/set-value) and pixel actions (screenshot → click/move/drag). Foreground automation for agents.",
+  "keywords": [
+    "macos",
+    "automation",
+    "computer-use",
+    "accessibility",
+    "screenshot",
+    "agent",
+    "desktop-automation",
+    "ui-automation",
+    "cgevent",
+    "screencapturekit"
+  ],
+  "license": "MIT",
+  "author": "Marsch Huynh <marsch.huynh@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/marschhuynh/nuvin-computer-use.git"
+  },
   "bin": {
     "nuvin-computer-use": "dist/cli.js"
   },
@@ -13,14 +31,13 @@
   "os": ["darwin"],
   "files": [
     "dist/",
-    "native/Package.swift",
-    "native/Sources/",
     "docs/cli.md",
     "docs/agent-guide.md",
     "docs/permissions.md",
     "docs/testing.md",
     "docs/changeset-computer-use-tool.md",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build:ts": "node scripts/clean-dist.mjs && tsc -p tsconfig.build.json && node scripts/make-executable.mjs",
