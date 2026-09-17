@@ -48,7 +48,8 @@ public final class CaptureService {
         target: ResolvedTarget,
         output: String,
         overwrite: Bool,
-        context: CommandContext
+        context: CommandContext,
+        annotations: [(ref: Int, bounds: WindowBounds)] = []
     ) async throws -> JSONValue {
         try context.check()
         guard output.hasPrefix("/") else {
@@ -65,15 +66,28 @@ public final class CaptureService {
             throw NativeFailure("NATIVE_FAILURE", "Window capture produced an empty image")
         }
 
-        // Publish the PNG atomically via a same-dir temp file + rename.
-        try publishAtomically(captured.pngData, to: outputURL, overwrite: overwrite)
-        try context.check()
-
         let geometry = CaptureGeometry(
             windowBounds: target.bounds,
             imageSize: captured.pixelSize,
             scale: captured.backingScale
         )
+
+        // Annotate ref-hint badges onto the captured image before publishing,
+        // so the saved PNG carries the markers agents read back.
+        let pngData: Data
+        if annotations.isEmpty {
+            pngData = captured.pngData
+        } else {
+            guard let annotatedData = annotate(captured.pngData, annotations: annotations, geometry: geometry) else {
+                throw NativeFailure("NATIVE_FAILURE", "Unable to annotate screenshot")
+            }
+            pngData = annotatedData
+        }
+
+        // Publish the PNG atomically via a same-dir temp file + rename.
+        try publishAtomically(pngData, to: outputURL, overwrite: overwrite)
+        try context.check()
+
         // Derive both timestamps from one instant — validLifetime requires
         // expiresAt's sub-second component to equal createdAt's exactly.
         let created = context.wallNow
@@ -232,5 +246,70 @@ private func pngEncode(_ image: CGImage) -> Data? {
     CGImageDestinationAddImage(destination, flat, nil)
     guard CGImageDestinationFinalize(destination) else { return nil }
     return buffer as Data
+}
+
+/// Overlay a numbered ref-hint badge at each element's top-left corner so the
+/// saved PNG maps pixels back to snapshot refs (Vimium-style). `bounds` are in
+/// screen space; `geometry` maps them into image pixels.
+private func annotate(
+    _ pngData: Data,
+    annotations: [(ref: Int, bounds: WindowBounds)],
+    geometry: CaptureGeometry
+) -> Data? {
+    guard let source = CGImageSourceCreateWithData(pngData as CFData, nil),
+          let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
+    let width = image.width, height = image.height
+    guard let context = CGContext(
+        data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ) else { return nil }
+    context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+    // CGContext is bottom-left origin; flip so image y grows downward like the
+    // captured pixels, then badges land on their elements.
+    context.translateBy(x: 0, y: CGFloat(height))
+    context.scaleBy(x: 1, y: -1)
+
+    let badgeFont = CTFontCreateWithName("Helvetica-Bold" as CFString, 11 * geometry.scale, nil)
+    for annotation in annotations {
+        guard let bounds = annotation.bounds as WindowBounds? else { continue }
+        let center = CGPoint(
+            x: CGFloat(bounds.x) + CGFloat(bounds.width) / 2,
+            y: CGFloat(bounds.y) + CGFloat(bounds.height) / 2
+        )
+        guard let imagePoint = try? geometry.screenToImage(center) else { continue }
+        guard imagePoint.x >= 0, imagePoint.y >= 0,
+              imagePoint.x < CGFloat(width), imagePoint.y < CGFloat(height) else { continue }
+
+        let text = "\(annotation.ref)"
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: badgeFont,
+            .foregroundColor: CGColor(red: 1, green: 1, blue: 1, alpha: 1),
+        ]
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes))
+        let textBounds = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
+        let pad: CGFloat = 3 * geometry.scale
+        let badgeW = textBounds.width + pad * 2
+        let badgeH = textBounds.height + pad * 2
+        let badgeRect = CGRect(
+            x: imagePoint.x - badgeW / 2,
+            y: imagePoint.y - badgeH / 2,
+            width: badgeW, height: badgeH
+        )
+        // Badge: filled rounded rect + white ref number.
+        context.setFillColor(CGColor(red: 0.85, green: 0.1, blue: 0.1, alpha: 0.92))
+        let path = CGPath(roundedRect: badgeRect, cornerWidth: 3 * geometry.scale, cornerHeight: 3 * geometry.scale, transform: nil)
+        context.addPath(path)
+        context.fillPath()
+        // Text is drawn in the flipped space; flip it back for the glyph run.
+        context.saveGState()
+        context.translateBy(x: badgeRect.minX + pad, y: badgeRect.minY + pad)
+        context.scaleBy(x: 1, y: -1)
+        context.textPosition = CGPoint(x: 0, y: -(textBounds.height + pad * 0))
+        CTLineDraw(line, context)
+        context.restoreGState()
+    }
+    guard let flat = context.makeImage() else { return nil }
+    return pngEncode(flat)
 }
 #endif

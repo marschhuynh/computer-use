@@ -136,20 +136,30 @@ public final class NativeService {
                     )
                 }
                 let resolved = try await targetResolver.resolve(selector, context: context)
-                let captureData = try await captureService.screenshot(
-                    target: resolved, output: output, overwrite: overwrite, context: context
-                )
-                var data = captureData
+                // When annotated, snapshot first so the capture can overlay
+                // ref-hint badges at each element's screen bounds — the saved
+                // PNG then maps pixels back to refs.
+                var snap: SnapshotResult?
+                var annotations: [(ref: Int, bounds: WindowBounds)] = []
                 if annotated {
-                    // Consistent capture+snapshot pair (Stage E4): the AX
-                    // traversal must observe the same target identity as the
-                    // capture, else fail rather than ship mismatched metadata.
-                    let snap = try await snapshotService.snapshot(
+                    let observed = try await snapshotService.snapshot(
                         selector: selector, options: tree, context: context
                     )
-                    guard snap.record.target.identity == resolved.identity else {
+                    guard observed.record.target.identity == resolved.identity else {
                         throw NativeFailure("NATIVE_FAILURE", "Capture and snapshot targets diverged")
                     }
+                    snap = observed
+                    annotations = observed.snapshot.evidence.refs.compactMap { refEvidence in
+                        guard let bounds = refEvidence.node.bounds else { return nil }
+                        return (ref: refEvidence.ref, bounds: bounds)
+                    }
+                }
+                let captureData = try await captureService.screenshot(
+                    target: resolved, output: output, overwrite: overwrite,
+                    context: context, annotations: annotations
+                )
+                var data = captureData
+                if let snap {
                     if case var .object(dict) = data {
                         dict["snapshotId"] = .string(snap.record.id)
                         dict["tree"] = snap.wireData["tree"] ?? .null

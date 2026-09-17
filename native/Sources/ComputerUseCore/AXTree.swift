@@ -694,6 +694,13 @@ private func liveAXString(
     _ attribute: String
 ) throws -> AXReadResult<String> {
     let read = liveAXAttribute(element, attribute)
+    // Degenerate element: a scalar attribute returning a non-string (e.g. an
+    // AXUIElement) is "no readable value," not a reason to abort the snapshot.
+    if read.status == .success,
+       let value = read.value,
+       CFGetTypeID(value) != CFStringGetTypeID() {
+        return .unavailable
+    }
     return try classifyLiveAXResult(
         status: read.status,
         result: axReadResult(
@@ -710,6 +717,11 @@ private func liveAXBool(
     _ attribute: String
 ) throws -> AXReadResult<Bool> {
     let read = liveAXAttribute(element, attribute)
+    if read.status == .success,
+       let value = read.value,
+       CFGetTypeID(value) != CFBooleanGetTypeID() {
+        return .unavailable
+    }
     return try classifyLiveAXResult(
         status: read.status,
         result: axReadResult(
@@ -726,6 +738,15 @@ private func liveAXChildren(
     attribute: String
 ) throws -> AXReadResult<[AXUIElement]> {
     let read = liveAXAttribute(element, attribute)
+    // Some elements (notably NSScrollView internals) report a collection
+    // attribute as .success but return a non-array value. A degenerate element
+    // isn't a read failure — treat it as "no readable collection" rather than
+    // aborting the whole snapshot.
+    if read.status == .success,
+       let value = read.value,
+       CFGetTypeID(value) != CFArrayGetTypeID() {
+        return .unavailable
+    }
     return try classifyLiveAXResult(
         status: read.status,
         result: axReadResult(
@@ -747,6 +768,11 @@ private func liveAXChildren(
 private func liveAXActions(_ element: AXUIElement) throws -> AXReadResult<[String]> {
     var names: CFArray?
     let status = AXUIElementCopyActionNames(element, &names)
+    if status == .success,
+       let names,
+       CFGetTypeID(names) != CFArrayGetTypeID() {
+        return .unavailable
+    }
     return try classifyLiveAXResult(
         status: status,
         result: axReadResult(
