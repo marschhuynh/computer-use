@@ -71,7 +71,7 @@ Wire: `{command:"key", key:"cmd+space"}` — `target` absent.
 Wire: `target` optional; new optional `display: Int` field.
 
 - `screenshot` bare → `.display(nil)` → main `SCDisplay` (first in `SCShareableContent.displays` / `CGMainDisplayID`).
-- `screenshot --display <n>` → `.display(n)` → nth display; out-of-range → `INVALID_ARGUMENT`.
+- `screenshot --display <n>` → `.display(n)` → nth display, **1-based** (`--display 1` = first/primary display; wire `positiveInteger` excludes 0, matching bare `nil` → primary). Out-of-range → `INVALID_ARGUMENT`.
 - **Capture:** `liveDisplayCapture(displayIndex:native:context:)` — sibling to `liveWindowCapture`. `SCContentFilter(display:excludingWindows:)` over the `SCDisplay`, `sourceRect = display.frame`, `configuration.width/height = frame × (native ? backingScale : 1)`. PNG = whole display at logical res by default.
 - **`--annotated` + display → `INVALID_ARGUMENT`** (`annotated requires --app/--pid`) — AX refs are window-scoped, so badges can't be placed on a full-screen shot. Keeps the two modes honest.
 - Record, geometry, atomic publish, and `captureId` lifecycle identical to window captures.

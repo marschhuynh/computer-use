@@ -151,32 +151,56 @@ func testGlobalKeyPostsViaHIDTapNotPid() async throws {
 **Interfaces:**
 - Consumes: `SCShareableContent.displays`, `SCContentFilter(display:excludingWindows:)`, `displayScale`, `pngEncode`, synthetic `ResolvedTarget` (Task 1).
 - Produces:
-  - `resolveDisplay(_ index: Int?, context:) async throws -> ResolvedTarget` → synthetic target (`windowId=0`, `pid=0`, `bounds=display.frame`, `title="Display <id>"`).
-  - `CaptureService.screenshot(target:output:overwrite:native:context:annotations:)` — unchanged signature; the window `Capturer` closure already yields a `CapturedImage`, and a display target just needs a capturer that hits `SCDisplay`.
-  - **Dispatch seam:** the injected `Capturer` is `(windowId, native, context)`. A display target has `windowId=0`, so the capturer can't distinguish it from a window. Add a second capture entry point — `liveDisplayCapture(display: SCDisplay, native: Bool, context:) async throws -> CapturedImage` — and have `NativeService` pick the capturer by target kind: window targets use `liveWindowCapture`, display targets use `liveDisplayCapture`. Concretely, `CaptureService` takes a `(ResolvedTarget, Bool, CommandContext) async throws -> CapturedImage` closure (widened from `(Int, Bool, CommandContext)`) so it can route on `target.identity.windowId == 0`.
+  - `DisplayMetadata` — a Codable/Equatable value type (`displayID: UInt32`, `frame: WindowBounds`, `width: Int`, `height: Int`) so `TargetResolver` and tests never import ScreenCaptureKit.
+  - `TargetResolverProvider.listDisplays: () async throws -> [DisplayMetadata]` — new provider seam; `.live` maps `SCShareableContent.displays`, `init(inventory:)` returns `[]`. `resolveDisplay` consumes this, not `SCDisplay` directly.
+  - `resolveDisplay(_ index: Int?, context:) async throws -> ResolvedTarget` → synthetic target. `index ?? 0`; out-of-range → `INVALID_ARGUMENT`.
+  - **Synthetic identity (corrected):** `StateStore.validateCaptureRecord` requires `pid > 0` && `windowId > 0` (`validPositiveSafe`), so a `0` sentinel is unreadable → `STALE_CAPTURE`. Instead: `windowId = Int(displayID)` (displayIDs are small positives like 1; real `CGWindowID`s never collide for routing purposes since the capture-path branches on `isDisplay` not the id), `pid = host process pid` (positive, honest — the host owns the capture), `bundleId = nil`, `launchDate` = host launch. `ResolvedTarget` gains a boolean `isDisplay` flag (default `false`) so downstream code distinguishes display captures without magic-number checks; `targetJSON`/record encode it.
+  - `CaptureService.screenshot(target:output:overwrite:native:context:annotations:)` — unchanged signature.
+  - **Dispatch seam:** the injected `Capturer` is `(windowId, native, context)` and can't tell a display target from a window. Widen `CaptureService.Capturer` to `(ResolvedTarget, Bool, CommandContext) async throws -> CapturedImage`; route on `target.isDisplay`. `liveWindowCapture` keeps its signature; the default capturer wraps: `target.isDisplay ? liveDisplayCapture : liveWindowCapture`. `liveDisplayCapture(target: ResolvedTarget, native: Bool, context:)` recovers `displayID = CGDirectDisplayID(target.identity.windowId)`, finds the real `SCDisplay` via `SCShareableContent.displays.first { $0.displayID == displayID }`, builds `SCContentFilter` there.
 
 - [ ] **Step 1: Failing test** — `resolveDisplay` returns synthetic target; geometry maps display pixel→screen point.
 
 ```swift
+// Helper near the top of TargetResolverTests (or a Fixtures file):
+private func displayStubProvider(displays: [DisplayMetadata]) -> TargetResolverProvider {
+    TargetResolverProvider(
+        listApplications: { [] },
+        windowsForPID: { _, _ in [] },
+        listDisplays: { displays }
+    )
+}
+
 func testResolveDisplayProducesSyntheticTarget() async throws {
-    let resolver = TargetResolver(provider: displayStubProvider())
+    let resolver = TargetResolver(provider: displayStubProvider(displays: [
+        DisplayMetadata(displayID: 1, frame: WindowBounds(x: 0, y: 0, width: 2056, height: 1329), width: 2056, height: 1329)
+    ]))
     let target = try await resolver.resolveDisplay(nil, context: context())
-    XCTAssertEqual(target.identity.windowId, 0)
-    XCTAssertEqual(target.identity.pid, 0)
+    XCTAssertTrue(target.isDisplay)
+    XCTAssertEqual(target.identity.windowId, 1)          // carries displayID
+    XCTAssertGreaterThan(target.identity.pid, 0)          // host pid — passes validPositiveSafe
+    XCTAssertNil(target.identity.bundleId)
     XCTAssertEqual(target.bounds, WindowBounds(x: 0, y: 0, width: 2056, height: 1329))
     // geometry: pixel == point at 1x over display bounds
     let geo = CaptureGeometry(windowBounds: target.bounds, imageSize: CGSize(width: 2056, height: 1329), scale: 1)
     let pt = try geo.imageToScreen(CGPoint(x: 100, y: 50))
     XCTAssertEqual(pt, CGPoint(x: 100, y: 50))
 }
+
+func testResolveDisplayOutOfRangeThrows() async throws {
+    let resolver = TargetResolver(provider: displayStubProvider(displays: []))
+    await XCTAssertThrowsErrorAsync {
+        _ = try await resolver.resolveDisplay(9, context: context())
+    } errorCheck: { XCTAssertEqual(($0 as? NativeFailure)?.code, "INVALID_ARGUMENT") }
+}
 ```
 
 - [ ] **Step 2: Run → fail.**
 
 - [ ] **Step 3: Implement.**
-  - `resolveDisplay`: enumerate `SCShareableContent.displays`; pick `index ?? main`; build synthetic `ResolvedTarget` (`identity.pid=0`, `windowId=0`, `launchDate`=host launch, `bundleId=nil`, `bounds=display.frame`, `title="Display \(displayID)"`). Out-of-range → `INVALID_ARGUMENT`.
-  - **Widen the `Capturer`:** `CaptureService.Capturer` becomes `(ResolvedTarget, Bool, CommandContext) async throws -> CapturedImage` (was `(Int, Bool, CommandContext)`). `liveWindowCapture` keeps its signature and is wrapped: the default capturer is `{ target, native, ctx in target.identity.windowId == 0 ? try await liveDisplayCapture(display: lookupDisplay(for: target), native: native, context: ctx) : try await liveWindowCapture(windowID: target.identity.windowId, native: native, context: ctx) }`. `screenshot` calls `capturer(target, native, context)`; `screenshot`'s own signature and the `CapturedImage`/`geometry` path are unchanged. Update the two test-injected capturers in `CaptureTests`/`NativeService` fallback to the new 3-arg target-first shape.
-  - `liveDisplayCapture(display:native:context:)`: `SCContentFilter(display:excludingWindows:[])` over the `SCDisplay`; `sourceRect = display.frame`; `scale = native ? displayScale(containing: display.frame) : 1`; `width/height = frame × scale`; `pngEncode`; `backingScale = image.width / display.frame.width`.
+  - `DisplayMetadata` value type + `TargetResolverProvider.listDisplays` (default `.live` maps `SCShareableContent.displays`; `init(inventory:)` → `[]`). Update `TargetResolverProvider.init` signature — it's the single construction point.
+  - `ResolvedTarget` gains `isDisplay: Bool` (default `false`; `Codable` — decode absent → `false` so old records still load). `resolveDisplay(index:context:)`: `let displays = try await provider.listDisplays()`; `let i = index ?? 0`; `guard displays.indices.contains(i) else { throw INVALID_ARGUMENT }`; build `ResolvedTarget(identity: TargetIdentity(pid: host pid, launchDate: host launch, bundleId: nil, windowId: Int(display.displayID)), title: "Display \(display.displayID)", bounds: display.frame, isDisplay: true)`. Host pid/launch keep `validPositiveSafe` satisfied so the capture record reads back.
+  - **Widen the `Capturer`:** `CaptureService.Capturer` becomes `(ResolvedTarget, Bool, CommandContext) async throws -> CapturedImage` (was `(Int, Bool, CommandContext)`). Default capturer: `{ target, native, ctx in target.isDisplay ? try await liveDisplayCapture(target: target, native: native, context: ctx) : try await liveWindowCapture(windowID: target.identity.windowId, native: native, context: ctx) }`. `screenshot` calls `capturer(target, native, context)`. Update test-injected capturers in `CaptureTests`/`NativeService` fallback to the new 3-arg target-first shape.
+  - `liveDisplayCapture(target:native:context:)`: `let displayID = CGDirectDisplayID(target.identity.windowId)`; find `SCShareableContent.displays.first { $0.displayID == displayID }` (missing → `TARGET_NOT_FOUND`); `SCContentFilter(display:excludingWindows:[])`; `sourceRect = display.frame`; `scale = native ? displayScale(containing: display.frame) : 1`; `width/height = frame × scale`; `pngEncode`; `backingScale = image.width / display.frame.width`.
   - `NativeService .screenshot`: `target` absent → `resolveDisplay(request.object["display"])`; `--annotated` + display → `INVALID_ARGUMENT("annotated requires --app/--pid")`; `target` present → existing window path. `target` + `display` both present → `PROTOCOL_ERROR`.
   - `Protocol.swift .screenshot`: exact-keys = base + `output,overwrite,annotated,native,tree` + optional `target`/`display` (not both); `display` must be `positiveInteger`.
 
