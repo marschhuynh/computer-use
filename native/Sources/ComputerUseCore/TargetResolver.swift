@@ -5,6 +5,8 @@ import Foundation
 public enum TargetSelector {
     case app(String, windowId: Int?)
     case pid(Int, windowId: Int?)
+    case display(index: Int?)
+    case global
 }
 
 extension TargetSelector {
@@ -13,6 +15,7 @@ extension TargetSelector {
         let windowID = targetInteger(target["windowId"])
         if let app = target["app"] as? String { return .app(app, windowId: windowID) }
         if let pid = targetInteger(target["pid"]) { return .pid(pid, windowId: windowID) }
+        if let display = targetInteger(target["display"]) { return .display(index: display) }
         return nil
     }
 }
@@ -158,6 +161,8 @@ public final class TargetResolver {
             selected = applications.filter { $0.name == name || $0.bundleId == name }
         case let .pid(pid, _):
             selected = applications.filter { $0.pid == pid }
+        case .display, .global:
+            throw NativeFailure("INVALID_ARGUMENT", "This target is not a window")
         }
         guard selected.count == 1 else {
             throw NativeFailure(
@@ -191,6 +196,8 @@ public final class TargetResolver {
             selected = applications.filter { $0.name == name || $0.bundleId == name }
         case let .pid(pid, _):
             selected = applications.filter { $0.pid == pid }
+        case .display, .global:
+            throw NativeFailure("INVALID_ARGUMENT", "This target is not a window")
         }
         guard selected.count == 1 else {
             throw NativeFailure(
@@ -210,6 +217,8 @@ public final class TargetResolver {
         switch selector {
         case let .app(_, windowID), let .pid(_, windowID):
             requestedWindow = windowID
+        case .display, .global:
+            throw NativeFailure("INVALID_ARGUMENT", "This target is not a window")
         }
         let candidates = windows.filter {
             requestedWindow == nil || $0.cg.id == requestedWindow

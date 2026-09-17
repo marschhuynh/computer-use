@@ -2,6 +2,16 @@ import XCTest
 @testable import ComputerUseCore
 
 final class TargetResolverTests: XCTestCase {
+    func testDisplayAndGlobalSelectorsDecode() throws {
+        XCTAssertNil(TargetSelector.decode(nil)) // absent target -> caller picks .global/.display
+        guard case .display(let idx) = TargetSelector.decode(["display": 2]) else {
+            return XCTFail("expected .display")
+        }
+        XCTAssertEqual(idx, 2)
+        // A bare dict with no app/pid/display is not a valid selector.
+        XCTAssertNil(TargetSelector.decode(["unexpected": true]))
+    }
+
     func testDuplicateAppNamesAreNotSelected() async {
         let resolver = TargetResolver(inventory: .fixture("duplicate-apps"))
         await assertResolverFailure("AMBIGUOUS_TARGET") {
