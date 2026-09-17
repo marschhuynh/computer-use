@@ -40,6 +40,20 @@ describe('parse', () => {
     expect(parsed).toMatchObject({ kind: 'command', request: { command } });
   });
 
+  it('maps --to-process to toProcess on key and type', () => {
+    const keyRequest = commandRequest(['key', '--app', 'TextEdit', '--key', 'cmd+t', '--to-process']);
+    expect(keyRequest).toMatchObject({ command: 'key', toProcess: true });
+    const typeRequest = commandRequest(['type', '--app', 'TextEdit', '--text', 'y', '--to-process']);
+    expect(typeRequest).toMatchObject({ command: 'type', toProcess: true });
+  });
+
+  it.each([
+    [['key', '--key', 'cmd+t', '--to-process']],
+    [['type', '--text', 'y', '--to-process']],
+  ])('rejects --to-process without a target %j', (argv) => {
+    expect(() => parse(argv)).toThrow(/--to-process requires --app or --pid/);
+  });
+
   it('parses targetless key and screenshot', () => {
     const keyRequest = commandRequest(['key', '--key', 'cmd+space']);
     expect(keyRequest).toMatchObject({ command: 'key' });

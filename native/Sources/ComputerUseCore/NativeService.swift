@@ -310,15 +310,17 @@ public final class NativeService {
                 let toProcess = request.object["toProcess"] as? Bool ?? false
                 let resolved = try await targetResolver.resolve(selector, context: context)
                 return try await dispatchTargetMutation(
-                    command: .key, target: resolved, context: context
-                ) { context in
-                    // --app/--pid means "activate this app, then send to it":
-                    // raise it frontmost so the tap-posted chord lands on the
-                    // named app, not whatever happens to hold focus. FOCUS_FAILED
-                    // here fails before any input runs.
-                    if !toProcess {
-                        try await self.activator.activate(pid: resolved.identity.pid, context: context)
+                    command: .key, target: resolved, context: context,
+                    preflight: { context in
+                        // --app/--pid means "activate this app, then send to it":
+                        // raise it frontmost so the tap-posted chord lands on the
+                        // named app, not whatever happens to hold focus. This is
+                        // dispatch prep — a FOCUS_FAILED reports notStarted.
+                        if !toProcess {
+                            try await self.activator.activate(pid: resolved.identity.pid, context: context)
+                        }
                     }
+                ) { context in
                     try self.input.key(key, to: resolved.identity.pid,
                                        delivery: toProcess ? .process : .focused, context: context)
                     return mutationResult(method: "cg-event", verification: "dispatched")
@@ -332,17 +334,19 @@ public final class NativeService {
                 let toProcess = request.object["toProcess"] as? Bool ?? false
                 let resolved = try await targetResolver.resolve(selector, context: context)
                 return try await dispatchTargetMutation(
-                    command: .type, target: resolved, context: context
+                    command: .type, target: resolved, context: context,
+                    preflight: { context in
+                        // Activate-then-focus delivery, same as `key`: --app/--pid
+                        // names the app that must hold focus before text is typed.
+                        if !toProcess {
+                            try await self.activator.activate(pid: resolved.identity.pid, context: context)
+                        }
+                    }
                 ) { context in
                     // Unicode-event path leaves the clipboard untouched.
                     // allowClipboardReplace is accepted but never triggers a
                     // hidden paste fallback (spec: no silent clipboard use).
                     _ = allowClipboardReplace
-                    // Activate-then-focus delivery, same as `key`: --app/--pid
-                    // names the app that must hold focus before text is typed.
-                    if !toProcess {
-                        try await self.activator.activate(pid: resolved.identity.pid, context: context)
-                    }
                     try self.input.type(text, to: resolved.identity.pid,
                                         delivery: toProcess ? .process : .focused, context: context)
                     var result = mutationResult(method: "cg-event", verification: "dispatched")
@@ -554,10 +558,14 @@ private extension NativeService {
 
     /// Target-scoped mutation (key/type/directional scroll): lock + identity
     /// validation + dispatch, with held-input cleanup on cancellation.
+    /// `preflight` is dispatch prep (e.g. raising the target app frontmost) —
+    /// it runs before dispatch is marked entered, so its failure reports
+    /// `notStarted`: no input was ever posted.
     func dispatchTargetMutation(
         command: WireCommand,
         target: ResolvedTarget,
         context: CommandContext,
+        preflight: @escaping (CommandContext) async throws -> Void = { _ in },
         dispatch: @escaping (CommandContext) async throws -> [String: JSONValue]
     ) async throws -> WireReply {
         var entered = false
@@ -569,6 +577,7 @@ private extension NativeService {
                 guard fresh == target else {
                     throw NativeFailure("STALE_SNAPSHOT", "Window evidence changed")
                 }
+                try await preflight(context)
                 entered = true
                 return try await dispatch(context)
             }

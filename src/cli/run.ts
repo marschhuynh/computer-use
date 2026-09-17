@@ -121,7 +121,7 @@ async function resolveText(request: Extract<ParsedInvocation, { kind: 'command' 
     throw new ArgumentError('Text input exceeds the 1 MiB limit');
   }
   if (request.command === 'type') {
-    return { schemaVersion: request.schemaVersion, options: request.options, command: 'type', target: request.target, text, allowClipboardReplace: request.allowClipboardReplace };
+    return { schemaVersion: request.schemaVersion, options: request.options, command: 'type', target: request.target, text, allowClipboardReplace: request.allowClipboardReplace, ...(request.toProcess ? { toProcess: true } : {}) };
   }
   return { schemaVersion: request.schemaVersion, options: request.options, command: 'set-value', snapshotId: request.snapshotId, ref: request.ref, text };
 }

@@ -15,6 +15,7 @@ final class ForegroundExecutionTests: XCTestCase {
         var usedHIDTap = false
         var scrolls: [(String, Int)] = []
         var failOnDrag = false
+        var failOnFocusedKey = false
         final class Mouse {
             struct Click { let button: String; let count: Int; let point: CGPoint }
             var clicks: [Click] = []
@@ -40,6 +41,9 @@ final class ForegroundExecutionTests: XCTestCase {
         func postFocusedKey(_ chord: String, context: CommandContext) throws {
             r.tapKeys.append(chord)
             r.usedHIDTap = true
+            if r.failOnFocusedKey {
+                throw NativeFailure("NATIVE_FAILURE", "injected key failure")
+            }
         }
         func postText(_ text: String, to pid: Int, context: CommandContext) throws {
             r.texts.append(text)
@@ -322,7 +326,23 @@ final class ForegroundExecutionTests: XCTestCase {
         let reply = await service.key(chord: "cmd+s", to: windowPid, context: shortContext())
         XCTAssertFalse(reply.ok)
         XCTAssertEqual(reply.error?.code, "FOCUS_FAILED")
+        // Focus failure is pre-dispatch: nothing was ever posted, so the
+        // mutation status is notStarted, not potentiallyApplied.
+        XCTAssertEqual(reply.error?.details?["mutationStatus"], .string("notStarted"))
         XCTAssertEqual(recorder.tapKeys, [])   // nothing was dispatched
+    }
+
+    func testKeyMidPostFailureReportsPotentiallyApplied() async throws {
+        // Activation succeeds (preflight), but the post itself throws — the
+        // chord was dispatched and may have run, so mutationStatus is
+        // potentiallyApplied, not notStarted.
+        let activator = FakeActivator()
+        let (service, recorder) = targetedService(activator: activator)
+        recorder.failOnFocusedKey = true
+        let reply = await service.key(chord: "cmd+s", to: windowPid, context: context())
+        XCTAssertFalse(reply.ok)
+        XCTAssertEqual(reply.error?.code, "NATIVE_FAILURE")
+        XCTAssertEqual(reply.error?.details?["mutationStatus"], .string("potentiallyApplied"))
     }
 
     func testTypeFocusedDeliveryPostsToHIDTap() throws {

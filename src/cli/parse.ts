@@ -102,7 +102,7 @@ export function parse(argv: string[]): ParsedInvocation {
     doctor: [[], []], apps: [[], []], windows: [['app', 'pid', 'window'], []],
     snapshot: [['app', 'pid', 'window', 'depth', 'max-elements', 'hint-mode'], []],
     press: [['snapshot', 'ref'], []], 'set-value': [['snapshot', 'ref', 'text', 'text-file'], []],
-    type: [['app', 'pid', 'window', 'text', 'text-file'], ['allow-clipboard-replace']], key: [['app', 'pid', 'window', 'key'], []],
+    type: [['app', 'pid', 'window', 'text', 'text-file'], ['allow-clipboard-replace', 'to-process']], key: [['app', 'pid', 'window', 'key'], ['to-process']],
     scroll: [['app', 'pid', 'window', 'snapshot', 'ref', 'direction', 'amount'], []],
     screenshot: [['app', 'pid', 'window', 'output', 'display', 'depth', 'max-elements', 'hint-mode'], ['overwrite', 'annotated', 'native']],
     click: [['capture', 'x', 'y', 'button', 'count'], []], move: [['capture', 'x', 'y'], []], drag: [['capture', 'from', 'to'], []],
@@ -120,7 +120,13 @@ export function parse(argv: string[]): ParsedInvocation {
     case 'snapshot': request = { ...base, command, target: target(values), tree: tree(values) }; break;
     case 'press': request = { ...base, command, snapshotId: recordId(required(values, 'snapshot'), 'snapshot'), ref: safeInteger(required(values, 'ref'), 'ref') }; break;
     case 'set-value': request = { ...base, command, snapshotId: recordId(required(values, 'snapshot'), 'snapshot'), ref: safeInteger(required(values, 'ref'), 'ref'), textSource: textSource(values) }; break;
-    case 'type': request = { ...base, command, target: target(values), textSource: textSource(values), allowClipboardReplace: flag(values, 'allow-clipboard-replace'), ...(flag(values, 'to-process') ? { toProcess: true } : {}) }; break;
+    case 'type': {
+      if (optionalTarget(values) === undefined && flag(values, 'to-process')) {
+        throw new ArgumentError('--to-process requires --app or --pid');
+      }
+      request = { ...base, command, target: target(values), textSource: textSource(values), allowClipboardReplace: flag(values, 'allow-clipboard-replace'), ...(flag(values, 'to-process') ? { toProcess: true } : {}) };
+      break;
+    }
     case 'key': {
       const keyTarget = optionalTarget(values);
       if (keyTarget === undefined && stringValue(values, 'window') !== undefined) {
