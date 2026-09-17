@@ -40,4 +40,19 @@ function readStdin(signal: AbortSignal): Promise<string> {
   });
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) void main();
+import { realpathSync } from 'node:fs';
+
+function isDirectInvocation(): boolean {
+  const argv1 = process.argv[1];
+  if (argv1 === undefined) return false;
+  // Resolve symlinks so a `.bin/nuvin-computer-use` shim (which npm creates as a
+  // symlink to dist/cli.js) still counts as a direct invocation.
+  try {
+    const resolved = realpathSync(argv1);
+    return import.meta.url === pathToFileURL(resolved).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectInvocation()) void main();
