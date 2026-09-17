@@ -1,0 +1,188 @@
+import CoreGraphics
+import Foundation
+#if canImport(ImageIO)
+import ImageIO
+#endif
+#if canImport(ScreenCaptureKit)
+import ScreenCaptureKit
+#endif
+
+/// The pixels + metadata a window capture produced. `pngData` is the encoded
+/// image; `pixelSize`/`backingScale` describe it for geometry transforms.
+public struct CapturedImage {
+    public let pixelSize: CGSize
+    public let backingScale: CGFloat
+    public let pngData: Data
+
+    public init(pixelSize: CGSize, backingScale: CGFloat, pngData: Data) {
+        self.pixelSize = pixelSize
+        self.backingScale = backingScale
+        self.pngData = pngData
+    }
+}
+
+/// Window-only screenshot capture. The `capturer` is injected so tests never
+/// touch ScreenCaptureKit; the live path captures exactly one `SCWindow`.
+public final class CaptureService {
+    /// (windowID, context) -> captured image.
+    public typealias Capturer = (Int, CommandContext) async throws -> CapturedImage
+
+    private let capturer: Capturer
+    private let store: StateStore
+
+    public init(
+        capturer: @escaping Capturer,
+        store: StateStore = StateStore()
+    ) {
+        self.capturer = capturer
+        self.store = store
+    }
+
+    /// Capture `target`'s window to an absolute `output` path, publish it
+    /// atomically (no overwrite unless `overwrite`), persist a `capture` record,
+    /// and return the reply `data` payload.
+    public func screenshot(
+        target: ResolvedTarget,
+        output: String,
+        overwrite: Bool,
+        context: CommandContext
+    ) async throws -> JSONValue {
+        try context.check()
+        guard output.hasPrefix("/") else {
+            throw NativeFailure("INVALID_ARGUMENT", "--output must be an absolute path")
+        }
+        let outputURL = URL(fileURLWithPath: output)
+        if !overwrite, FileManager.default.fileExists(atPath: output) {
+            throw NativeFailure("INVALID_ARGUMENT", "--output exists; pass --overwrite to replace it")
+        }
+
+        let captured = try await capturer(target.identity.windowId, context)
+        try context.check()
+        guard captured.pixelSize.width > 0, captured.pixelSize.height > 0 else {
+            throw NativeFailure("NATIVE_FAILURE", "Window capture produced an empty image")
+        }
+
+        // Publish the PNG atomically via a same-dir temp file + rename.
+        try publishAtomically(captured.pngData, to: outputURL, overwrite: overwrite)
+        try context.check()
+
+        let geometry = CaptureGeometry(
+            windowBounds: target.bounds,
+            imageSize: captured.pixelSize,
+            scale: captured.backingScale
+        )
+        let createdAt = timestamp(context.wallNow)
+        let record = CaptureRecord(
+            id: UUID().uuidString.lowercased(),
+            createdAt: createdAt,
+            expiresAt: timestamp(context.wallNow.addingTimeInterval(snapshotLifetime)),
+            target: target,
+            geometry: geometry,
+            path: output
+        )
+        try store.writeCapture(record, context: context)
+        try context.check()
+
+        return .object([
+            "captureId": .string(record.id),
+            "target": targetJSON(target),
+            "path": .string(output),
+            "width": .number(Double(captured.pixelSize.width)),
+            "height": .number(Double(captured.pixelSize.height)),
+            "createdAt": .string(record.createdAt),
+            "expiresAt": .string(record.expiresAt),
+        ])
+    }
+
+    /// Atomic publication: write a private temp file in the destination dir,
+    /// fsync, then rename. No partial files are left at `output` on failure.
+    private func publishAtomically(_ data: Data, to url: URL, overwrite: Bool) throws {
+        let directory = url.deletingLastPathComponent()
+        let temporary = directory.appendingPathComponent(".tmp.\(UUID().uuidString).png")
+        do {
+            try data.write(to: temporary, options: [.atomic])
+        } catch {
+            try? FileManager.default.removeItem(at: temporary)
+            throw NativeFailure("NATIVE_FAILURE", "Unable to write screenshot output")
+        }
+        if !overwrite {
+            // Guard the final move: rename would clobber an existing file.
+            if FileManager.default.fileExists(atPath: url.path) {
+                try? FileManager.default.removeItem(at: temporary)
+                throw NativeFailure("INVALID_ARGUMENT", "--output exists; pass --overwrite to replace it")
+            }
+        }
+        do {
+            _ = try FileManager.default.replaceItemAt(url, withItemAt: temporary)
+        } catch {
+            // No prior file: replaceItemAt fails; fall back to move for a fresh path.
+            do { try FileManager.default.moveItem(at: temporary, to: url) }
+            catch {
+                try? FileManager.default.removeItem(at: temporary)
+                throw NativeFailure("NATIVE_FAILURE", "Unable to publish screenshot output")
+            }
+        }
+    }
+
+    private func timestamp(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
+    }
+}
+
+private func targetJSON(_ target: ResolvedTarget) -> JSONValue {
+    .object([
+        "pid": .number(Double(target.identity.pid)),
+        "launchDate": .string(target.identity.launchDate),
+        "bundleId": target.identity.bundleId.map(JSONValue.string) ?? .null,
+        "windowId": .number(Double(target.identity.windowId)),
+        "title": .string(target.title),
+        "bounds": .object([
+            "x": .number(target.bounds.x),
+            "y": .number(target.bounds.y),
+            "width": .number(target.bounds.width),
+            "height": .number(target.bounds.height),
+        ]),
+    ])
+}
+
+#if canImport(ScreenCaptureKit)
+/// Live ScreenCaptureKit window capture — window-only, cursor excluded, no
+/// desktop fallback. Verified against the macOS-14 SDK surface at Stage E gate.
+public func liveWindowCapture(windowID: Int, context: CommandContext) async throws -> CapturedImage {
+    guard CGPreflightScreenCaptureAccess() else {
+        throw NativeFailure("PERMISSION_DENIED", "Screen Recording access is unavailable")
+    }
+    try context.check()
+    let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+    try context.check()
+    guard let window = content.windows.first(where: { $0.windowID == CGWindowID(windowID) }) else {
+        throw NativeFailure("TARGET_NOT_FOUND", "Window is not capturable")
+    }
+    let filter = SCContentFilter(desktopIndependentWindow: window)
+    let configuration = SCStreamConfiguration()
+    configuration.showsCursor = false
+    let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+    try context.check()
+    guard let data = pngEncode(image) else {
+        throw NativeFailure("NATIVE_FAILURE", "Window capture produced no image data")
+    }
+    return CapturedImage(
+        pixelSize: CGSize(width: image.width, height: image.height),
+        backingScale: CGFloat(image.width) / CGFloat(window.frame.width),
+        pngData: data
+    )
+}
+
+private func pngEncode(_ image: CGImage) -> Data? {
+    guard let destination = CGImageDestinationCreateWithData(
+        NSMutableData() as CFMutableData, "public.png" as CFString, 1, nil
+    ) else { return nil }
+    CGImageDestinationAddImage(destination, image, nil)
+    guard CGImageDestinationFinalize(destination) else { return nil }
+    return (destination as? NSMutableData).map { Data(referencing: $0) }
+        ?? (CGImageDestinationCreateWithData as? AnyObject).map { _ in nil } ?? nil
+}
+#endif

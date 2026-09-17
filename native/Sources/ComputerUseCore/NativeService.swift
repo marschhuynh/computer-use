@@ -33,17 +33,26 @@ public final class NativeService {
     private let desktopLock: DesktopLock
     private let targetResolver: TargetResolver
     private let environment: DoctorEnvironment
+    private let captureService: CaptureService
 
     public init(
         snapshotService: SnapshotService = SnapshotService(),
         desktopLock: DesktopLock = DesktopLock(),
         targetResolver: TargetResolver = TargetResolver(),
-        environment: DoctorEnvironment = .live
+        environment: DoctorEnvironment = .live,
+        captureService: CaptureService? = nil
     ) {
         self.snapshotService = snapshotService
         self.desktopLock = desktopLock
         self.targetResolver = targetResolver
         self.environment = environment
+        #if canImport(ScreenCaptureKit)
+        self.captureService = captureService ?? CaptureService(capturer: liveWindowCapture)
+        #else
+        self.captureService = captureService ?? CaptureService(capturer: { _, _ in
+            throw NativeFailure("UNSUPPORTED_PLATFORM", "Screen capture requires macOS")
+        })
+        #endif
     }
 
     public func execute(_ request: WireRequest, context: CommandContext) async -> WireReply {
@@ -93,6 +102,41 @@ public final class NativeService {
                     context: context
                 )
                 return .success(command: .snapshot, data: result.wireData)
+            case .screenshot:
+                guard let selector = TargetSelector.decode(request.object["target"]),
+                      let tree = decodeTreeOptions(request.object["tree"]),
+                      let output = request.object["output"] as? String,
+                      let overwrite = boolean(request.object["overwrite"]),
+                      let annotated = boolean(request.object["annotated"]) else {
+                    return .failure(
+                        command: request.command,
+                        code: "PROTOCOL_ERROR",
+                        message: "Invalid screenshot request"
+                    )
+                }
+                let resolved = try await targetResolver.resolve(selector, context: context)
+                let captureData = try await captureService.screenshot(
+                    target: resolved, output: output, overwrite: overwrite, context: context
+                )
+                var data = captureData
+                if annotated {
+                    // Consistent capture+snapshot pair (Stage E4): the AX
+                    // traversal must observe the same target identity as the
+                    // capture, else fail rather than ship mismatched metadata.
+                    let snap = try await snapshotService.snapshot(
+                        selector: selector, options: tree, context: context
+                    )
+                    guard snap.record.target.identity == resolved.identity else {
+                        throw NativeFailure("NATIVE_FAILURE", "Capture and snapshot targets diverged")
+                    }
+                    if case var .object(dict) = data {
+                        dict["snapshotId"] = .string(snap.record.id)
+                        dict["tree"] = snap.wireData["tree"] ?? .null
+                        dict["truncated"] = snap.wireData["truncated"] ?? .bool(false)
+                        data = .object(dict)
+                    }
+                }
+                return .success(command: .screenshot, data: dataAsDictionary(data))
             default:
                 return .failure(
                     command: request.command,
@@ -170,6 +214,16 @@ private func windowJSON(_ window: TargetWindow) -> JSONValue {
         "eligible": .bool(eligible),
         "reason": reason,
     ])
+}
+
+private func boolean(_ value: Any?) -> Bool? {
+    guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+    return number.boolValue
+}
+
+private func dataAsDictionary(_ value: JSONValue) -> [String: JSONValue] {
+    if case let .object(dict) = value { return dict }
+    return [:]
 }
 
 private func decodeTreeOptions(_ value: Any?) -> TreeOptions? {
