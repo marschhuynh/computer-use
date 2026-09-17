@@ -13,6 +13,12 @@ const protocolFixtures = (JSON.parse(
   (fixture): fixture is ProtocolFixture & { argv: string[] } => fixture.argv !== undefined,
 );
 
+function commandRequest(argv: string[]) {
+  const parsed = parse(argv);
+  if (parsed.kind !== 'command') throw new Error(`expected command parse, got ${parsed.kind}`);
+  return parsed.request;
+}
+
 describe('parse', () => {
   it.each([
     [['doctor'], 'doctor'],
@@ -35,14 +41,29 @@ describe('parse', () => {
   });
 
   it('parses targetless key and screenshot', () => {
-    expect(parse(['key', '--key', 'cmd+space'])).toMatchObject({ request: { command: 'key', target: undefined } });
-    expect(parse(['screenshot', '--output', '/tmp/x.png'])).toMatchObject({ request: { command: 'screenshot', target: undefined } });
-    expect(parse(['screenshot', '--output', '/tmp/x.png', '--display', '1']))
-      .toMatchObject({ request: { command: 'screenshot', display: 1 } });
+    const keyRequest = commandRequest(['key', '--key', 'cmd+space']);
+    expect(keyRequest).toMatchObject({ command: 'key' });
+    expect(JSON.stringify(keyRequest)).not.toContain('"target"');
+    const shotRequest = commandRequest(['screenshot', '--output', '/tmp/x.png']);
+    expect(shotRequest).toMatchObject({ command: 'screenshot' });
+    expect(JSON.stringify(shotRequest)).not.toContain('"target"');
+    const displayRequest = commandRequest(['screenshot', '--output', '/tmp/x.png', '--display', '1']);
+    expect(displayRequest).toMatchObject({ command: 'screenshot', display: 1 });
+    expect(JSON.stringify(displayRequest)).not.toContain('"target"');
   });
 
   it('rejects screenshot target+display', () => {
-    expect(() => parse(['screenshot', '--app', 'X', '--display', '0', '--output', '/tmp/x.png'])).toThrow();
+    expect(() => parse(['screenshot', '--app', 'X', '--display', '1', '--output', '/tmp/x.png'])).toThrow();
+  });
+
+  it.each([
+    [['key', '--key', 'cmd+space', '--window', '5'], /--window requires/],
+    [['screenshot', '--output', '/tmp/x.png', '--window', '5'], /--window requires/],
+    [['screenshot', '--display', '1', '--output', '/tmp/x.png', '--window', '5'], /--window requires/],
+    [['screenshot', '--display', '1', '--output', '/tmp/x.png', '--annotated'], /--annotated requires/],
+    [['screenshot', '--output', '/tmp/x.png', '--annotated'], /--annotated requires/],
+  ])('rejects meaningless targetless options %j', (argv, message) => {
+    expect(() => parse(argv)).toThrow(message);
   });
 
   it('uses documented defaults and explicit snapshot targeting', () => {

@@ -121,7 +121,14 @@ export function parse(argv: string[]): ParsedInvocation {
     case 'press': request = { ...base, command, snapshotId: recordId(required(values, 'snapshot'), 'snapshot'), ref: safeInteger(required(values, 'ref'), 'ref') }; break;
     case 'set-value': request = { ...base, command, snapshotId: recordId(required(values, 'snapshot'), 'snapshot'), ref: safeInteger(required(values, 'ref'), 'ref'), textSource: textSource(values) }; break;
     case 'type': request = { ...base, command, target: target(values), textSource: textSource(values), allowClipboardReplace: flag(values, 'allow-clipboard-replace') }; break;
-    case 'key': request = { ...base, command, target: optionalTarget(values), key: required(values, 'key') }; break;
+    case 'key': {
+      const keyTarget = optionalTarget(values);
+      if (keyTarget === undefined && stringValue(values, 'window') !== undefined) {
+        throw new ArgumentError('--window requires --app or --pid');
+      }
+      request = { ...base, command, target: keyTarget, key: required(values, 'key') };
+      break;
+    }
     case 'scroll': {
       const snapshot = stringValue(values, 'snapshot');
       const ref = stringValue(values, 'ref');
@@ -157,6 +164,12 @@ export function parse(argv: string[]): ParsedInvocation {
       const display = displayValue === undefined ? undefined : safeInteger(displayValue, 'display');
       const parsedTarget = optionalTarget(values);
       if (parsedTarget !== undefined && display !== undefined) throw new ArgumentError('--display may not be combined with --app or --pid');
+      if (parsedTarget === undefined && stringValue(values, 'window') !== undefined) {
+        throw new ArgumentError('--window requires --app or --pid');
+      }
+      if (parsedTarget === undefined && flag(values, 'annotated')) {
+        throw new ArgumentError('--annotated requires --app or --pid');
+      }
       request = { ...base, command, target: parsedTarget, display, output: required(values, 'output'), overwrite: flag(values, 'overwrite'), annotated: flag(values, 'annotated'), native: flag(values, 'native'), tree: tree(values) };
       break;
     }
