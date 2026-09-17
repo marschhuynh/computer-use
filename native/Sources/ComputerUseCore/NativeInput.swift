@@ -9,6 +9,9 @@ public protocol NativeInputDriver {
     func performAXAction(_ action: String, on element: LiveAXElement, context: CommandContext) throws
     /// Post a key/modifier chord to a pid (e.g. "cmd+s").
     func postKey(_ chord: String, to pid: Int, context: CommandContext) throws
+    /// Post a key/modifier chord globally via the HID event tap — it lands on
+    /// whatever holds keyboard focus, like real hardware input.
+    func postGlobalKey(_ chord: String, context: CommandContext) throws
     /// Post Unicode text to a pid's focused element.
     func postText(_ text: String, to pid: Int, context: CommandContext) throws
     /// Scroll — either a direction in the resolved window, or scroll-to-ref.
@@ -50,6 +53,13 @@ public final class NativeInput {
             throw NativeFailure("INVALID_ARGUMENT", "Unrecognized key/modifier combination")
         }
         try driver.postKey(chord, to: pid, context: context)
+    }
+
+    public func globalKey(_ chord: String, context: CommandContext) throws {
+        guard KeyChord.isValid(chord) else {
+            throw NativeFailure("INVALID_ARGUMENT", "Unrecognized key/modifier combination")
+        }
+        try driver.postGlobalKey(chord, context: context)
     }
 
     public func type(_ text: String, to pid: Int, context: CommandContext) throws {
@@ -160,6 +170,23 @@ public final class LiveInputDriver: NativeInputDriver {
         down.postToPid(pid_t(pid))
         up.postToPid(pid_t(pid))
         _ = app
+    }
+
+    public func postGlobalKey(_ chord: String, context: CommandContext) throws {
+        try context.check()
+        // No target: the chord goes to the HID event tap so it reaches whatever
+        // currently holds keyboard focus, like real hardware input.
+        guard let (key, modifiers) = KeyChord.toCGEvent(chord) else {
+            throw NativeFailure("INVALID_ARGUMENT", "Unrecognized key/modifier combination")
+        }
+        guard let down = CGEvent(keyboardEventSource: nil, virtualKey: key, keyDown: true),
+              let up = CGEvent(keyboardEventSource: nil, virtualKey: key, keyDown: false) else {
+            throw NativeFailure("NATIVE_FAILURE", "Unable to construct key event")
+        }
+        down.flags = modifiers
+        up.flags = modifiers
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
     }
 
     public func postText(_ text: String, to pid: Int, context: CommandContext) throws {

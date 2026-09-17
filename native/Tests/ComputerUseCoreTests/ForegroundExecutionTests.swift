@@ -9,6 +9,8 @@ final class ForegroundExecutionTests: XCTestCase {
         var actions: [String] = []
         var texts: [String] = []
         var keys: [String] = []
+        var globalKeys: [String] = []
+        var usedHIDTap = false
         var scrolls: [(String, Int)] = []
         var failOnDrag = false
         final class Mouse {
@@ -28,6 +30,10 @@ final class ForegroundExecutionTests: XCTestCase {
         }
         func postKey(_ chord: String, to pid: Int, context: CommandContext) throws {
             r.keys.append(chord)
+        }
+        func postGlobalKey(_ chord: String, context: CommandContext) throws {
+            r.globalKeys.append(chord)
+            r.usedHIDTap = true
         }
         func postText(_ text: String, to pid: Int, context: CommandContext) throws {
             r.texts.append(text)
@@ -72,6 +78,50 @@ final class ForegroundExecutionTests: XCTestCase {
         await XCTAssertThrowsErrorAsync({
             try await input.key("cmd+notakey", to: 42, context: context())
         }) { XCTAssertEqual(($0 as? NativeFailure)?.code, "INVALID_ARGUMENT") }
+    }
+
+    func testGlobalKeyPostsViaHIDTapNotPid() async throws {
+        let recorder = Recorder()
+        let input = NativeInput(driver: RecordingDriver(recorder))
+        try input.globalKey("cmd+space", context: context())
+        XCTAssertEqual(recorder.globalKeys, ["cmd+space"])
+        XCTAssertTrue(recorder.usedHIDTap)   // global path, not postToPid
+        XCTAssertTrue(recorder.keys.isEmpty) // pid-scoped path untouched
+    }
+
+    func testGlobalKeyRejectsUnknownKey() async throws {
+        let recorder = Recorder()
+        let input = NativeInput(driver: RecordingDriver(recorder))
+        await XCTAssertThrowsErrorAsync({
+            try await input.globalKey("cmd+notakey", context: context())
+        }) { XCTAssertEqual(($0 as? NativeFailure)?.code, "INVALID_ARGUMENT") }
+        XCTAssertTrue(recorder.globalKeys.isEmpty)
+    }
+
+    func testKeyWithoutTargetPostsGlobally() async throws {
+        let recorder = Recorder()
+        let service = NativeService(
+            desktopLock: DesktopLock(rootURL: temporaryStateRoot()),
+            input: NativeInput(driver: RecordingDriver(recorder))
+        )
+        let request = WireRequest(command: .key, object: [
+            "schemaVersion": 1,
+            "command": "key",
+            "key": "cmd+space",
+            "options": ["timeoutMs": 1_000, "cursor": "off"],
+        ])
+        let reply = await service.execute(request, context: context())
+        XCTAssertTrue(reply.ok, "expected success, got \(String(describing: reply.error))")
+        XCTAssertEqual(recorder.globalKeys, ["cmd+space"])
+        XCTAssertTrue(recorder.usedHIDTap)
+        XCTAssertTrue(recorder.keys.isEmpty, "no target means nothing is posted to a pid")
+        guard case let .object(target) = reply.data?["target"],
+              case let .string(scope) = target["scope"] else {
+            return XCTFail("expected target scope, got \(String(describing: reply.data))")
+        }
+        XCTAssertEqual(scope, "global")
+        XCTAssertEqual(reply.data?["method"], .string("cg-event"))
+        XCTAssertEqual(reply.data?["verification"], .string("verified"))
     }
 
     func testScrollDirectionalDispatch() async throws {

@@ -221,9 +221,18 @@ public final class NativeService {
                     return mutationResult(method: "cg-event", verification: "verified")
                 }
             case .key:
-                guard let selector = TargetSelector.decode(request.object["target"]),
-                      let key = request.object["key"] as? String else {
+                let selector = TargetSelector.decode(request.object["target"])
+                guard let key = request.object["key"] as? String else {
                     return .failure(command: request.command, code: "PROTOCOL_ERROR", message: "Invalid key request")
+                }
+                // No target: the chord goes to the HID event tap, landing on
+                // whatever holds keyboard focus. Protocol validation guarantees
+                // any present target dict is well-formed, so nil means absent.
+                guard let selector else {
+                    return try await dispatchGlobalMutation(command: .key, context: context) { context in
+                        try self.input.globalKey(key, context: context)
+                        return mutationResult(method: "cg-event", verification: "verified")
+                    }
                 }
                 let resolved = try await targetResolver.resolve(selector, context: context)
                 return try await dispatchTargetMutation(
@@ -469,6 +478,33 @@ private extension NativeService {
             }
             var payload = data
             payload["target"] = targetJSONForMutation(target: target)
+            return .success(command: command, data: payload)
+        } catch let failure as NativeFailure {
+            return .failure(command: command, code: failure.code, message: failure.message,
+                            details: attachingStatus(failure.details, entered))
+        } catch {
+            return .failure(command: command, code: "NATIVE_FAILURE", message: "Native command failed",
+                            details: attachingStatus(nil, entered))
+        }
+    }
+
+    /// Global mutation (target-less key): lock + dispatch. There is no target
+    /// identity to revalidate — the input lands wherever focus sits — so the
+    /// reply only reports the global scope.
+    func dispatchGlobalMutation(
+        command: WireCommand,
+        context: CommandContext,
+        dispatch: @escaping (CommandContext) async throws -> [String: JSONValue]
+    ) async throws -> WireReply {
+        var entered = false
+        do {
+            let data = try await desktopLock.withLock(context: context) {
+                try context.check()
+                entered = true
+                return try await dispatch(context)
+            }
+            var payload = data
+            payload["target"] = .object(["scope": .string("global")])
             return .success(command: command, data: payload)
         } catch let failure as NativeFailure {
             return .failure(command: command, code: failure.code, message: failure.message,

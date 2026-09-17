@@ -141,8 +141,10 @@ private func validRequest(_ request: [String: Any]) -> Bool {
             && validTarget(request["target"]) && request["text"] is String
             && validBoolean(request["allowClipboardReplace"])
     case .key:
+        guard !(request["key"] as? String ?? "").isEmpty else { return false }
+        if hasExactKeys(request, base.union(["key"])) { return true }
         return hasExactKeys(request, base.union(["target", "key"]))
-            && validTarget(request["target"]) && !(request["key"] as? String ?? "").isEmpty
+            && validTarget(request["target"])
     case .scroll:
         let refKeys = base.union(["snapshotId", "ref"])
         if hasExactKeys(request, refKeys) {
