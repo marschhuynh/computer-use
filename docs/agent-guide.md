@@ -15,7 +15,7 @@ Two ways to act on the screen:
 | Path | When to use | Flow |
 |---|---|---|
 | **Semantic (AX)** | Buttons, fields, menus — anything with an accessible identity | `snapshot` → find `ref` → `press`/`set-value`/`scroll --ref` |
-| **Spatial (pixels)** | Canvas, games, custom-drawn UI, anything AX can't reach | `screenshot` → pick pixel → `click`/`move`/`drag` |
+| **Spatial (pixels)** | Canvas, games, custom-drawn UI, anything AX can't reach — incl. drawing | `screenshot` → pick pixel → `click`/`move`/`drag` |
 
 Prefer **semantic** when an element has a `ref` — it's robust to position
 changes and HiDPI. Fall back to **spatial** when the element isn't in the AX
@@ -122,6 +122,29 @@ nuvin-computer-use drag  --capture <uuid> --from 420,180 --to 620,300 --json
 - `--capture` ids expire in 10 min and are invalid if the window moved —
   `STALE_CAPTURE` → re-screenshot. For display captures, `click`/`move`/`drag`
   map pixels into whole-screen space the same way.
+
+#### Canvas & custom-drawn UI
+
+Canvas, games, paint apps, and any pixel-rendered surface have **no AX tree** —
+`--annotated` and `press`/`set-value` can't reach them. The spatial path is the
+only way in, and it's sufficient: `screenshot` → read the PNG → `click`/`drag`
+pixels. Verified end-to-end (drew on jspaint.app's canvas).
+
+- **Drawing = many `drag`s.** A `drag` is one straight left-button stroke.
+  Compose shapes from short drags: an octagon ≈ 8 drags vertex-to-vertex; an
+  arc ≈ 2-3 drags. There's no multi-point path primitive — build curves from
+  segments. `click` = a point (dot, a toolbar cell, a color swatch).
+- **Tools & colors are just pixels.** Toolbar cells and swatch rows aren't AX
+  elements — `click` their image-pixel centers to select, then `drag` on the
+  canvas. Read swatch positions carefully off the PNG (two-row palettes are
+  easy to mis-pick — verify the active color with a re-`screenshot` before a
+  long draw).
+- **Always re-`screenshot` to confirm.** Pointer ops report `verified` (the
+  event dispatched), not that the canvas changed. Re-capture and look.
+- **Canvas pixels ≠ window pixels.** `--x`/`--y`/`--from`/`--to` are image
+  pixels across the *whole captured region* (window or display) — compute a
+  control's pixel from the PNG's own coordinates, not from memory of the
+  window layout.
 
 ### 4. Raw input
 
