@@ -13,7 +13,7 @@
   "os": ["darwin"],
   "files": ["dist/", "native/", "docs/"],
   "scripts": {
-    "build:ts": "node scripts/clean-dist.mjs && tsc -p tsconfig.build.json",
+    "build:ts": "node scripts/clean-dist.mjs && tsc -p tsconfig.build.json && node scripts/make-executable.mjs",
     "build:native": "node scripts/build-native.mjs",
     "build": "npm run build:ts && npm run build:native",
     "native-tests": "node scripts/native-tests.mjs",

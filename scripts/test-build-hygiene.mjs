@@ -36,6 +36,14 @@ assert.equal(await exists(staleTool), false, 'build:ts must remove stale dist/to
 assert.equal(await exists(staleToolsDirectory), false, 'build:ts must leave no dist/tools directory');
 assert.equal(await exists(stalePort), false, 'build:ts must remove stale dist/ports.js output');
 assert.equal(await exists(new URL('../dist/cli.js', import.meta.url)), true, 'build:ts must emit the CLI');
+{
+  const { stat, readFile } = await import('node:fs/promises');
+  const cli = new URL('../dist/cli.js', import.meta.url);
+  const head = (await readFile(cli, 'utf8')).slice(0, 19);
+  assert.equal(head.startsWith('#!'), true, 'dist/cli.js must keep its shebang');
+  const mode = (await stat(cli)).mode & 0o777;
+  assert.equal(mode & 0o111, 0o111, 'dist/cli.js must be executable');
+}
 assert.equal(await exists(originalTool), true, 'build:ts must not delete original src/tools sources');
 
 process.stdout.write('build hygiene regression passed\n');
