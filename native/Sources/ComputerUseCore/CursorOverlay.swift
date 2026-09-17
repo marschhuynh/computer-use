@@ -153,23 +153,32 @@ public final class CursorOverlay: CursorRenderer {
 
     public init() {}
 
+    /// AppKit requires NSWindow/NSPanel creation and window-mutation calls on
+    /// the main thread; the command pipeline runs on a Swift concurrency task
+    /// thread, so every AppKit touch below is confined to `DispatchQueue.main`.
+    /// `prepare` runs synchronously so a failure still aborts before input.
     public func prepare() throws {
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 32, height: 32),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
-        )
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.ignoresMouseEvents = true
-        panel.level = .floating
-        panel.hasShadow = false
-        let view = CursorView(frame: panel.contentView!.bounds)
-        panel.contentView = view
-        self.panel = panel
-        self.view = view
-        panel.orderFront(nil)
+        // NSPanel.init doesn't throw — a nil contentView is the only failure
+        // surface. Fatal ObjC exceptions (e.g. off-main-thread) can't be caught
+        // here; confining to main prevents them rather than handling them.
+        DispatchQueue.main.sync {
+            let panel = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 32, height: 32),
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false
+            )
+            panel.isOpaque = false
+            panel.backgroundColor = .clear
+            panel.ignoresMouseEvents = true
+            panel.level = .floating
+            panel.hasShadow = false
+            let view = CursorView(frame: panel.contentView!.bounds)
+            panel.contentView = view
+            self.panel = panel
+            self.view = view
+            panel.orderFront(nil)
+        }
     }
 
     public func approach(_ point: CGPoint, context: CommandContext) async throws {
@@ -194,19 +203,24 @@ public final class CursorOverlay: CursorRenderer {
         guard let panel else { return }
         for point in points {
             try context.check()
-            panel.setFrameOrigin(NSPoint(x: point.x - 16, y: point.y - 16))
+            let origin = NSPoint(x: point.x - 16, y: point.y - 16)
+            await MainActor.run { panel.setFrameOrigin(origin) }
         }
     }
 
     public func hide() async throws {
-        panel?.orderOut(nil)
+        guard let panel else { return }
+        await MainActor.run { panel.orderOut(nil) }
     }
 
     public func teardown() async throws {
-        panel?.orderOut(nil)
-        panel?.close()
-        panel = nil
-        view = nil
+        guard let panel else { panel = nil; view = nil; return }
+        await MainActor.run {
+            panel.orderOut(nil)
+            panel.close()
+        }
+        self.panel = nil
+        self.view = nil
     }
 }
 

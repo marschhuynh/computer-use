@@ -164,6 +164,10 @@ public final class LiveInputDriver: NativeInputDriver {
         try context.check()
         // Post each Unicode scalar as a keyboard event so the clipboard is
         // untouched (no hidden paste). Bounded by the command deadline.
+        // Pace each scalar: a burst of back-to-back keyDown/keyUp pairs posted
+        // to a pid can be reordered or dropped while the target's field is
+        // still activating. ~4ms between events is enough for the receiver to
+        // keep up and stays well within any command deadline for sane input.
         for scalar in text.unicodeScalars {
             try context.check()
             var utf16 = Array(String(scalar).utf16)
@@ -174,6 +178,7 @@ public final class LiveInputDriver: NativeInputDriver {
             event.postToPid(pid_t(pid))
             guard let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { continue }
             up.postToPid(pid_t(pid))
+            usleep(4_000)
         }
     }
 
@@ -213,6 +218,12 @@ public final class LiveInputDriver: NativeInputDriver {
         case "middle": cgButton = .center; downType = .otherMouseDown; upType = .otherMouseUp
         default: throw NativeFailure("INVALID_ARGUMENT", "Unsupported button")
         }
+        // Move the pointer to the point first — controls need the cursor to
+        // arrive (and the window to see a hover) before a click registers,
+        // especially when the target window isn't key.
+        if let arrive = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) {
+            arrive.post(tap: .cghidEventTap)
+        }
         for click in 1...count {
             try context.check()
             guard let down = CGEvent(mouseEventSource: nil, mouseType: downType, mouseCursorPosition: point, mouseButton: cgButton),
@@ -222,6 +233,9 @@ public final class LiveInputDriver: NativeInputDriver {
             down.setIntegerValueField(.mouseEventClickState, value: Int64(click))
             up.setIntegerValueField(.mouseEventClickState, value: Int64(click))
             down.post(tap: .cghidEventTap)
+            // A real press has a down→up interval; a 0ms synthetic click is
+            // dropped by many AppKit controls. 50ms is within any deadline.
+            usleep(50_000)
             up.post(tap: .cghidEventTap)
         }
     }

@@ -1,5 +1,8 @@
 import CoreGraphics
 import Foundation
+#if canImport(AppKit)
+import AppKit
+#endif
 #if canImport(ImageIO)
 import ImageIO
 #endif
@@ -71,11 +74,13 @@ public final class CaptureService {
             imageSize: captured.pixelSize,
             scale: captured.backingScale
         )
-        let createdAt = timestamp(context.wallNow)
+        // Derive both timestamps from one instant — validLifetime requires
+        // expiresAt's sub-second component to equal createdAt's exactly.
+        let created = context.wallNow
         let record = CaptureRecord(
             id: UUID().uuidString.lowercased(),
-            createdAt: createdAt,
-            expiresAt: timestamp(context.wallNow.addingTimeInterval(snapshotLifetime)),
+            createdAt: timestamp(created),
+            expiresAt: timestamp(created.addingTimeInterval(snapshotLifetime)),
             target: target,
             geometry: geometry,
             path: output
@@ -164,6 +169,14 @@ public func liveWindowCapture(windowID: Int, context: CommandContext) async thro
     let filter = SCContentFilter(desktopIndependentWindow: window)
     let configuration = SCStreamConfiguration()
     configuration.showsCursor = false
+    // Pin the output to the window's own frame rendered at the containing
+    // display's backing scale. Without explicit dimensions SCK can return a
+    // display-sized canvas with the window letterboxed into it, which would
+    // offset every image→screen coordinate transform.
+    let scale = await displayScale(containing: window.frame)
+    configuration.width = Int((window.frame.width * scale).rounded())
+    configuration.height = Int((window.frame.height * scale).rounded())
+    configuration.sourceRect = CGRect(origin: .zero, size: window.frame.size)
     let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
     try context.check()
     guard let data = pngEncode(image) else {
@@ -176,13 +189,48 @@ public func liveWindowCapture(windowID: Int, context: CommandContext) async thro
     )
 }
 
+/// `SCScreenshotManager` can return a `CGImage` whose pixel format ImageIO
+/// won't encode directly (destination `Finalize` fails). Draw it into a
+/// plain RGBA bitmap context first so the encode always has a supported
+/// source.
+/// Backing scale (px per point) of the display containing the window's frame.
+/// `NSScreen` frame is bottom-left origin; `SCWindow.frame` is top-left, so we
+/// flip Y before containment testing. Runs on the main actor for AppKit.
+@MainActor
+private func displayScale(containing windowFrame: CGRect) -> CGFloat {
+    #if canImport(AppKit)
+    guard let primary = NSScreen.screens.first else { return 1 }
+    let primaryHeight = primary.frame.height
+    // Convert the window's top-left-origin frame to AppKit's bottom-left origin.
+    let flipped = CGRect(
+        x: windowFrame.minX,
+        y: primaryHeight - windowFrame.maxY,
+        width: windowFrame.width,
+        height: windowFrame.height
+    )
+    for screen in NSScreen.screens where screen.frame.intersects(flipped) {
+        return screen.backingScaleFactor
+    }
+    #endif
+    return 1
+}
+
 private func pngEncode(_ image: CGImage) -> Data? {
-    guard let destination = CGImageDestinationCreateWithData(
-        NSMutableData() as CFMutableData, "public.png" as CFString, 1, nil
+    let width = image.width, height = image.height
+    guard width > 0, height > 0 else { return nil }
+    guard let context = CGContext(
+        data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
     ) else { return nil }
-    CGImageDestinationAddImage(destination, image, nil)
+    context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+    guard let flat = context.makeImage() else { return nil }
+    let buffer = NSMutableData()
+    guard let destination = CGImageDestinationCreateWithData(
+        buffer as CFMutableData, "public.png" as CFString, 1, nil
+    ) else { return nil }
+    CGImageDestinationAddImage(destination, flat, nil)
     guard CGImageDestinationFinalize(destination) else { return nil }
-    return (destination as? NSMutableData).map { Data(referencing: $0) }
-        ?? (CGImageDestinationCreateWithData as? AnyObject).map { _ in nil } ?? nil
+    return buffer as Data
 }
 #endif
