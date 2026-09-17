@@ -87,11 +87,27 @@ nuvin-computer-use set-value --snapshot <uuid> --ref 7 --text "example"
 ```sh
 nuvin-computer-use type --app Notes --text "hello" [--allow-clipboard-replace]
 nuvin-computer-use type --app Notes --text-file -          # stdin; keeps text off argv
+nuvin-computer-use type --app Notes --text "x" --to-process  # background queue; no activation
+nuvin-computer-use type --text "x"                         # bare = type into whatever holds focus
 nuvin-computer-use key  --app Notes --key cmd+s
+nuvin-computer-use key  --app Notes --key cmd+s --to-process # background queue; no activation
 nuvin-computer-use key  --key cmd+space                      # bare = system-wide chord (e.g. Spotlight)
 nuvin-computer-use scroll --app Notes --direction down --amount 3
 nuvin-computer-use scroll --snapshot <uuid> --ref 20       # mutually exclusive with direction form
 ```
+
+`key`/`type` delivery modes:
+
+- **`--app`/`--pid` (default)** — the named app is **activated** (raised, takes
+  focus) before the input is posted to the HID event tap, so it lands on the
+  app *and* its panels/helper-hosted windows that don't share the app's event
+  queue. If the app can't be raised, the command fails `FOCUS_FAILED` before
+  any input is posted.
+- **`--to-process`** — posts to the app's own event queue in the background
+  without activating it. Reaches the app but not open/save panels. Requires
+  `--app`/`--pid`.
+- **bare `key`, bare `type`, `type --global`** — no activation; the input goes
+  to the HID tap and lands on whatever currently holds focus.
 
 ## Screenshot → pointer actions
 
@@ -145,7 +161,7 @@ report what is actually provable:
 | 2 | `INVALID_ARGUMENT` |
 | 3 | `UNSUPPORTED_PLATFORM` `MISSING_HELPER` `HELPER_VERSION_MISMATCH` `MISSING_DEPENDENCY` |
 | 4 | `PERMISSION_DENIED` |
-| 5 | `TARGET_NOT_FOUND` `AMBIGUOUS_TARGET` `INELIGIBLE_TARGET` `STALE_SNAPSHOT` `STALE_CAPTURE` |
+| 5 | `TARGET_NOT_FOUND` `AMBIGUOUS_TARGET` `INELIGIBLE_TARGET` `STALE_SNAPSHOT` `STALE_CAPTURE` `FOCUS_FAILED` |
 | 6 | `TIMEOUT` `BUSY` |
 | 130 | `INTERRUPTED` (Ctrl+C) |
 

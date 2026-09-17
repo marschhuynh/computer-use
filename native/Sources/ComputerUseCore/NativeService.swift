@@ -294,10 +294,18 @@ public final class NativeService {
                     return mutationResult(method: "cg-event", verification: "dispatched")
                 }
             case .key:
-                let selector = TargetSelector.decode(request.object["target"])
                 guard let key = request.object["key"] as? String else {
                     return .failure(command: request.command, code: "PROTOCOL_ERROR", message: "Invalid key request")
                 }
+                // Chord validity is a caller error, not a dispatch failure:
+                // reject before resolve/lock/activation so a bad chord fails
+                // INVALID_ARGUMENT pre-dispatch (notStarted) and never steals
+                // focus. Covers the targetless path too — this runs before
+                // dispatchGlobalMutation is even invoked.
+                guard KeyChord.isValid(key) else {
+                    throw NativeFailure("INVALID_ARGUMENT", "Unrecognized key/modifier combination")
+                }
+                let selector = TargetSelector.decode(request.object["target"])
                 // No target: the chord goes to the HID event tap, landing on
                 // whatever holds keyboard focus. Protocol validation guarantees
                 // any present target dict is well-formed, so nil means absent.

@@ -87,7 +87,10 @@ public final class NativeInput {
         try driver.postFocusedText(text, context: context)
     }
 
-    public func type(_ text: String, to pid: Int, delivery: KeyDelivery = .process, context: CommandContext) throws {
+    /// `delivery` is required (no default): `.focused` without the caller
+    /// having activated the pid types into whatever holds focus, so the mode
+    /// must always be chosen explicitly.
+    public func type(_ text: String, to pid: Int, delivery: KeyDelivery, context: CommandContext) throws {
         switch delivery {
         case .focused: try driver.postFocusedText(text, context: context)
         case .process: try driver.postText(text, to: pid, context: context)
@@ -183,8 +186,6 @@ public final class LiveInputDriver: NativeInputDriver {
 
     public func postKey(_ chord: String, to pid: Int, context: CommandContext) throws {
         try context.check()
-        // AXUIElementPostKeyboardEvent posts to the app without changing focus.
-        let app = AXUIElementCreateApplication(pid_t(pid))
         // Parse chord into a virtual key + modifier mask; post key down + up.
         guard let (key, modifiers) = KeyChord.toCGEvent(chord) else {
             throw NativeFailure("INVALID_ARGUMENT", "Unrecognized key/modifier combination")
@@ -197,7 +198,6 @@ public final class LiveInputDriver: NativeInputDriver {
         up.flags = modifiers
         down.postToPid(pid_t(pid))
         up.postToPid(pid_t(pid))
-        _ = app
     }
 
     public func postFocusedKey(_ chord: String, context: CommandContext) throws {

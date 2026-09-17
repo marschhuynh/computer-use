@@ -143,7 +143,6 @@ private func validRequest(_ request: [String: Any]) -> Bool {
         let required = base.union(["text", "allowClipboardReplace"])
         guard hasExactKeys(request, required)
             || hasExactKeys(request, required.union(["target"]))
-            || hasExactKeys(request, required.union(["toProcess"]))
             || hasExactKeys(request, required.union(["target", "toProcess"])) else {
             return false
         }
@@ -154,8 +153,7 @@ private func validRequest(_ request: [String: Any]) -> Bool {
     case .key:
         guard !(request["key"] as? String ?? "").isEmpty,
               request["toProcess"] == nil || validBoolean(request["toProcess"]) else { return false }
-        if hasExactKeys(request, base.union(["key"]))
-            || hasExactKeys(request, base.union(["key", "toProcess"])) { return true }
+        if hasExactKeys(request, base.union(["key"])) { return true }
         return (hasExactKeys(request, base.union(["target", "key"]))
             || hasExactKeys(request, base.union(["target", "key", "toProcess"])))
             && validTarget(request["target"])

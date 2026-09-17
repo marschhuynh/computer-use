@@ -159,6 +159,18 @@ if (process.argv.slice(2).includes('--protocol-version')) {
           },
         })}\n`);
         break;
+      case 'focus-failed':
+        writeAndExit(`${JSON.stringify({
+          schemaVersion: 1,
+          ok: false,
+          command: request.command,
+          error: {
+            code: 'FOCUS_FAILED',
+            message: 'App could not be brought to the front',
+            details: { mutationStatus: 'notStarted' },
+          },
+        })}\n`);
+        break;
       case 'target-not-found':
         writeAndExit(`${JSON.stringify({
           schemaVersion: 1,

@@ -27,7 +27,7 @@ const modes = [
   'reflected-visualization', 'future-result-values', 'type-result', 'invalid-type-result',
   'reflected-error-message', 'reflected-error-details', 'reflected-root-error-details',
   'stable-error-code', 'unknown-error-code', 'slow-version', 'mutation-status',
-  'target-not-found',
+  'target-not-found', 'focus-failed',
   ...snapshotReplyModes,
 ];
 let fixtureDirectory: string;
@@ -262,6 +262,23 @@ describe('MacOSBackend', { timeout: 25_000 }, () => {
       error: {
         code: 'TARGET_NOT_FOUND',
         message: 'Application selection is not unique',
+        details: { mutationStatus: 'notStarted' },
+      },
+    });
+  });
+
+  it('projects a wire FOCUS_FAILED reply with its notStarted status', async () => {
+    // Guards the STABLE_ERROR_CODES entry: a focus failure must reach the
+    // reply intact, not be reclassified as a protocol error.
+    const backend = new MacOSBackend({ helper: fixture('focus-failed') });
+    const reply = await backend.execute(keyRequest(), new AbortController().signal);
+    expect(reply).toEqual({
+      schemaVersion: 1,
+      ok: false,
+      command: 'key',
+      error: {
+        code: 'FOCUS_FAILED',
+        message: 'App could not be brought to the front',
         details: { mutationStatus: 'notStarted' },
       },
     });

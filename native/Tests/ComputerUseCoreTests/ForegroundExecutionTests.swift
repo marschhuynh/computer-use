@@ -177,7 +177,7 @@ final class ForegroundExecutionTests: XCTestCase {
     func testTypePostsText() async throws {
         let recorder = Recorder()
         let input = NativeInput(driver: RecordingDriver(recorder))
-        try await input.type("hello", to: 42, context: context())
+        try await input.type("hello", to: 42, delivery: .process, context: context())
         XCTAssertEqual(recorder.texts, ["hello"])
     }
 
@@ -368,6 +368,37 @@ final class ForegroundExecutionTests: XCTestCase {
         // mutation status is notStarted, not potentiallyApplied.
         XCTAssertEqual(reply.error?.details?["mutationStatus"], .string("notStarted"))
         XCTAssertEqual(recorder.tapKeys, [])   // nothing was dispatched
+    }
+
+    func testTargetedKeyRejectsInvalidChordBeforeActivation() async throws {
+        // A malformed chord is an argument error: it must fail before the
+        // target is resolved and before the app is activated — no focus
+        // steal, and notStarted because nothing was ever dispatched.
+        let activator = FakeActivator()
+        let (service, recorder) = targetedService(activator: activator)
+        let reply = await service.key(chord: "cmd+bogus", to: windowPid, context: context())
+        XCTAssertFalse(reply.ok)
+        XCTAssertEqual(reply.error?.code, "INVALID_ARGUMENT")
+        XCTAssertEqual(reply.error?.details?["mutationStatus"], .string("notStarted"))
+        XCTAssertEqual(activator.calls, [])
+        XCTAssertEqual(recorder.tapKeys, [])
+        XCTAssertEqual(recorder.pidKeys, [])
+    }
+
+    func testGlobalKeyRejectsInvalidChordAsNotStarted() async throws {
+        // Bare `key` has the same wart to guard against: the chord must be
+        // rejected before dispatch is entered, so the failure reports
+        // notStarted rather than potentiallyApplied.
+        let recorder = Recorder()
+        let service = NativeService(
+            desktopLock: DesktopLock(rootURL: temporaryStateRoot()),
+            input: NativeInput(driver: RecordingDriver(recorder))
+        )
+        let reply = await service.key(chord: "cmd+bogus", to: nil, context: context())
+        XCTAssertFalse(reply.ok)
+        XCTAssertEqual(reply.error?.code, "INVALID_ARGUMENT")
+        XCTAssertEqual(reply.error?.details?["mutationStatus"], .string("notStarted"))
+        XCTAssertEqual(recorder.globalKeys, [])
     }
 
     func testKeyResolveFailureReportsNotStarted() async throws {
