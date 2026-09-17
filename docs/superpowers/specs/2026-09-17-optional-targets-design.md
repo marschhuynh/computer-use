@@ -45,14 +45,15 @@ public enum TargetSelector {
 
 | Field | Window capture | Display capture |
 |---|---|---|
-| `identity.pid` | owning app pid | `0` |
+| `identity.pid` | owning app pid | host process pid |
 | `identity.launchDate` | app launch date | capture-host launch date |
 | `identity.bundleId` | app bundle id | `nil` |
-| `identity.windowId` | `CGWindowID` | `0` |
+| `identity.windowId` | `CGWindowID` | `displayID` |
 | `title` | window title | `"Display <n>"` |
 | `bounds` | window frame | `display.frame` (screen pt) |
+| `isDisplay` | `false` | `true` |
 
-`windowId = 0` and `pid = 0` mark a display capture. `CaptureGeometry` maps image↔screen over `display.frame`, so `click --capture <id> --x --y` on a full-screen capture lands anywhere on screen with **zero downstream changes** — `pixelsPerWindow` is still `imageSize / bounds`.
+A display capture is marked by `isDisplay = true`, not zero ids — `StateStore.validateCaptureRecord` requires `pid > 0` && `windowId > 0`, so a `0` sentinel would be unreadable → `STALE_CAPTURE`. `windowId` carries the `displayID` so `liveDisplayCapture` recovers the `SCDisplay`; `pid` is the host's own pid (positive, honest). `CaptureGeometry` maps image↔screen over `display.frame`, so `click --capture <id> --x --y` on a full-screen capture lands anywhere on screen with **zero downstream changes** — `pixelsPerWindow` is still `imageSize / bounds`. Display captures re-validate via a display-aware check (displayID still present + `bounds` unchanged), not the window path.
 
 ### 2. `key` — global mode
 
