@@ -167,10 +167,17 @@ live-acceptance gating.
 - Target resolution fails for login-launched apps (Finder, Dock,
   SystemUIServer) where `NSRunningApplication.launchDate` is `nil` —
   reports `TARGET_NOT_FOUND`.
+- **`NSOpenPanel`/`NSSavePanel` are untargetable.** Open/Save dialogs run in
+  a separate `openAndSavePanelService` process (no `launchDate`), so the
+  dialog window can't be resolved by `--app` (the app owns no such window) or
+  by `--pid` (the service has no start identity). Dismiss the panel via
+  `key --app <app> --key escape`, then target the app's real window.
 - Apps on an inactive Space, minimized, or with non-standard window-server
   reporting report `TARGET_NOT_FOUND` / `INELIGIBLE_TARGET`.
 - `press`/`set-value` rely on the app honoring the AX action; success means
   the call was accepted, not that the UI visibly changed.
+- `screenshot --annotated` overlays numbered ref-hint badges at each
+  snapshot ref's bounds — read the PNG to map pixels → `--ref`.
 
 See `docs/superpowers/specs/2026-09-08-standalone-cli-design.md` for the full
 contract and `docs/permissions.md` for TCC/attribution detail.
