@@ -233,8 +233,9 @@ it('parses targetless key and screenshot', () => {
   expect(parse(['screenshot', '--output', '/tmp/x.png', '--display', '1']))
     .toMatchObject({ request: { command: 'screenshot', display: 1 } });
 });
-it('rejects screenshot target+display', () => {
-  expect(() => parse(['screenshot', '--app', 'X', '--display', '0', '--output', '/tmp/x.png'])).toThrow();
+it('rejects screenshot target+display and non-positive display', () => {
+  expect(() => parse(['screenshot', '--app', 'X', '--display', '1', '--output', '/tmp/x.png'])).toThrow();
+  expect(() => parse(['screenshot', '--display', '0', '--output', '/tmp/x.png'])).toThrow(); // display is 1-based
 });
 ```
 
@@ -242,8 +243,8 @@ it('rejects screenshot target+display', () => {
 
 - [ ] **Step 3: Implement.**
   - `protocol.ts`: `key` → `target?: Target`; `screenshot` → `target?: Target; display?: number`.
-  - `parse.ts`: add `'display'` to `ValueName`; screenshot values += `'display'`; for `key`/`screenshot` call a `optionalTarget(values)` that returns `undefined` when neither `--app` nor `--pid` given (instead of throwing); `display` → `safeInteger`; enforce `!(target && display !== undefined)`.
-  - `run.ts` help: `key --app <name>|--pid <pid> [--key <chord>]` → `key [--app|--pid] --key <chord> (bare = global chord)`; `screenshot` → `screenshot [--app|--pid|--display <n>] --output <path> ...`.
+  - `parse.ts`: add `'display'` to `ValueName`; screenshot values += `'display'`; for `key`/`screenshot` call a `optionalTarget(values)` that returns `undefined` when neither `--app` nor `--pid` given (instead of throwing `exactly one of`); `--display` → a positive int (use `safeInteger` then `> 0` check — display is **1-based**, `0` → `ArgumentError`); when `--app`/`--pid` AND `--display` are both present → `ArgumentError` (mutually exclusive). Emit `target` only when defined; emit `display` only when defined.
+  - `run.ts` help: `key --app <name>|--pid <pid> --key <chord>` → `key [--app|--pid] --key <chord> (bare = global chord)`; `screenshot` → `screenshot [--app|--pid|--display <n>] --output <path> [--overwrite] [--annotated] [--native] (bare = main display)`.
 
 - [ ] **Step 4: Run → pass.**
 
