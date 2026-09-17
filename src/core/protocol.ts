@@ -15,10 +15,10 @@ export type Command =
   | { command: 'press'; snapshotId: string; ref: number }
   | { command: 'set-value'; snapshotId: string; ref: number; text: string }
   | { command: 'type'; target: Target; text: string; allowClipboardReplace: boolean }
-  | { command: 'key'; target: Target; key: string }
+  | { command: 'key'; target?: Target; key: string }
   | { command: 'scroll'; snapshotId: string; ref: number }
   | { command: 'scroll'; target: Target; direction: Direction; amount: number }
-  | { command: 'screenshot'; target: Target; output: string; overwrite: boolean; annotated: boolean; native: boolean; tree: TreeOptions }
+  | { command: 'screenshot'; target?: Target; display?: number; output: string; overwrite: boolean; annotated: boolean; native: boolean; tree: TreeOptions }
   | { command: 'click'; captureId: string; point: Point; button: 'left' | 'right' | 'middle'; count: 1 | 2 | 3 }
   | { command: 'move'; captureId: string; point: Point }
   | { command: 'drag'; captureId: string; from: Point; to: Point };

@@ -34,6 +34,17 @@ describe('parse', () => {
     expect(parsed).toMatchObject({ kind: 'command', request: { command } });
   });
 
+  it('parses targetless key and screenshot', () => {
+    expect(parse(['key', '--key', 'cmd+space'])).toMatchObject({ request: { command: 'key', target: undefined } });
+    expect(parse(['screenshot', '--output', '/tmp/x.png'])).toMatchObject({ request: { command: 'screenshot', target: undefined } });
+    expect(parse(['screenshot', '--output', '/tmp/x.png', '--display', '1']))
+      .toMatchObject({ request: { command: 'screenshot', display: 1 } });
+  });
+
+  it('rejects screenshot target+display', () => {
+    expect(() => parse(['screenshot', '--app', 'X', '--display', '0', '--output', '/tmp/x.png'])).toThrow();
+  });
+
   it('uses documented defaults and explicit snapshot targeting', () => {
     expect(parse(['snapshot', '--pid', '42', '--window', '7', '--json'])).toMatchObject({
       kind: 'command', json: true,

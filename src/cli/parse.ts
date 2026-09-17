@@ -11,7 +11,7 @@ export type ParsedInvocation =
   | { kind: 'version'; json: boolean }
   | { kind: 'command'; request: DraftRequest; json: boolean };
 
-type ValueName = 'app' | 'pid' | 'window' | 'depth' | 'max-elements' | 'hint-mode' | 'snapshot' | 'ref' | 'text' | 'text-file' | 'key' | 'direction' | 'amount' | 'output' | 'capture' | 'x' | 'y' | 'button' | 'count' | 'from' | 'to' | 'timeout' | 'cursor';
+type ValueName = 'app' | 'pid' | 'window' | 'depth' | 'max-elements' | 'hint-mode' | 'snapshot' | 'ref' | 'text' | 'text-file' | 'key' | 'direction' | 'amount' | 'output' | 'display' | 'capture' | 'x' | 'y' | 'button' | 'count' | 'from' | 'to' | 'timeout' | 'cursor';
 type FlagName = 'json' | 'help' | 'version' | 'allow-clipboard-replace' | 'overwrite' | 'annotated' | 'native';
 const commandNames = new Set<Command['command']>(['doctor', 'apps', 'windows', 'snapshot', 'press', 'set-value', 'type', 'key', 'scroll', 'screenshot', 'click', 'move', 'drag']);
 const commonValues: ValueName[] = ['timeout', 'cursor'];
@@ -62,6 +62,10 @@ function target(values: Record<string, string | boolean | undefined>): Target {
   const parsedPid = safeInteger(required(values, 'pid'), 'pid');
   return windowId === undefined ? { pid: parsedPid } : { pid: parsedPid, windowId };
 }
+function optionalTarget(values: Record<string, string | boolean | undefined>): Target | undefined {
+  if (stringValue(values, 'app') === undefined && stringValue(values, 'pid') === undefined) return undefined;
+  return target(values);
+}
 function tree(values: Record<string, string | boolean | undefined>): TreeOptions {
   const hintMode = stringValue(values, 'hint-mode') ?? 'leafCompact';
   if (hintMode !== 'full' && hintMode !== 'leafOnly' && hintMode !== 'leafCompact') throw new ArgumentError('invalid --hint-mode');
@@ -100,7 +104,7 @@ export function parse(argv: string[]): ParsedInvocation {
     press: [['snapshot', 'ref'], []], 'set-value': [['snapshot', 'ref', 'text', 'text-file'], []],
     type: [['app', 'pid', 'window', 'text', 'text-file'], ['allow-clipboard-replace']], key: [['app', 'pid', 'window', 'key'], []],
     scroll: [['app', 'pid', 'window', 'snapshot', 'ref', 'direction', 'amount'], []],
-    screenshot: [['app', 'pid', 'window', 'output', 'depth', 'max-elements', 'hint-mode'], ['overwrite', 'annotated', 'native']],
+    screenshot: [['app', 'pid', 'window', 'output', 'display', 'depth', 'max-elements', 'hint-mode'], ['overwrite', 'annotated', 'native']],
     click: [['capture', 'x', 'y', 'button', 'count'], []], move: [['capture', 'x', 'y'], []], drag: [['capture', 'from', 'to'], []],
   };
   const [valueNames, flagNames] = valuesFor[command];
@@ -117,7 +121,7 @@ export function parse(argv: string[]): ParsedInvocation {
     case 'press': request = { ...base, command, snapshotId: recordId(required(values, 'snapshot'), 'snapshot'), ref: safeInteger(required(values, 'ref'), 'ref') }; break;
     case 'set-value': request = { ...base, command, snapshotId: recordId(required(values, 'snapshot'), 'snapshot'), ref: safeInteger(required(values, 'ref'), 'ref'), textSource: textSource(values) }; break;
     case 'type': request = { ...base, command, target: target(values), textSource: textSource(values), allowClipboardReplace: flag(values, 'allow-clipboard-replace') }; break;
-    case 'key': request = { ...base, command, target: target(values), key: required(values, 'key') }; break;
+    case 'key': request = { ...base, command, target: optionalTarget(values), key: required(values, 'key') }; break;
     case 'scroll': {
       const snapshot = stringValue(values, 'snapshot');
       const ref = stringValue(values, 'ref');
@@ -148,7 +152,14 @@ export function parse(argv: string[]): ParsedInvocation {
       }
       break;
     }
-    case 'screenshot': request = { ...base, command, target: target(values), output: required(values, 'output'), overwrite: flag(values, 'overwrite'), annotated: flag(values, 'annotated'), native: flag(values, 'native'), tree: tree(values) }; break;
+    case 'screenshot': {
+      const displayValue = stringValue(values, 'display');
+      const display = displayValue === undefined ? undefined : safeInteger(displayValue, 'display');
+      const parsedTarget = optionalTarget(values);
+      if (parsedTarget !== undefined && display !== undefined) throw new ArgumentError('--display may not be combined with --app or --pid');
+      request = { ...base, command, target: parsedTarget, display, output: required(values, 'output'), overwrite: flag(values, 'overwrite'), annotated: flag(values, 'annotated'), native: flag(values, 'native'), tree: tree(values) };
+      break;
+    }
     case 'click': {
       const button = stringValue(values, 'button') ?? 'left'; const count = stringValue(values, 'count') === undefined ? 1 : safeInteger(required(values, 'count'), 'count');
       if (button !== 'left' && button !== 'right' && button !== 'middle') throw new ArgumentError('invalid --button');
