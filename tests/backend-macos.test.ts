@@ -27,6 +27,7 @@ const modes = [
   'reflected-visualization', 'future-result-values', 'type-result', 'invalid-type-result',
   'reflected-error-message', 'reflected-error-details', 'reflected-root-error-details',
   'stable-error-code', 'unknown-error-code', 'slow-version', 'mutation-status',
+  'target-not-found', 'focus-failed',
   ...snapshotReplyModes,
 ];
 let fixtureDirectory: string;
@@ -53,6 +54,15 @@ function typeRequest(text: string, timeoutMs = DEFAULT_TIMEOUT_MS): Request {
     target: { app: 'TextEdit' },
     text,
     allowClipboardReplace: true,
+  };
+}
+function keyRequest(timeoutMs = DEFAULT_TIMEOUT_MS): Request {
+  return {
+    schemaVersion: 1,
+    command: 'key',
+    options: { timeoutMs, cursor: 'on' },
+    target: { app: 'Editor' },
+    key: 'cmd+s',
   };
 }
 function snapshotRequest(): Request {
@@ -238,6 +248,40 @@ describe('MacOSBackend', { timeout: 25_000 }, () => {
         },
       });
     }
+  });
+
+  it('projects notStarted for a pre-dispatch target failure', async () => {
+    // The native side reports TARGET_NOT_FOUND before dispatch begins and marks
+    // it notStarted; the boundary must emit that status, not drop it.
+    const backend = new MacOSBackend({ helper: fixture('target-not-found') });
+    const reply = await backend.execute(keyRequest(), new AbortController().signal);
+    expect(reply).toEqual({
+      schemaVersion: 1,
+      ok: false,
+      command: 'key',
+      error: {
+        code: 'TARGET_NOT_FOUND',
+        message: 'Application selection is not unique',
+        details: { mutationStatus: 'notStarted' },
+      },
+    });
+  });
+
+  it('projects a wire FOCUS_FAILED reply with its notStarted status', async () => {
+    // Guards the STABLE_ERROR_CODES entry: a focus failure must reach the
+    // reply intact, not be reclassified as a protocol error.
+    const backend = new MacOSBackend({ helper: fixture('focus-failed') });
+    const reply = await backend.execute(keyRequest(), new AbortController().signal);
+    expect(reply).toEqual({
+      schemaVersion: 1,
+      ok: false,
+      command: 'key',
+      error: {
+        code: 'FOCUS_FAILED',
+        message: 'App could not be brought to the front',
+        details: { mutationStatus: 'notStarted' },
+      },
+    });
   });
 
   it('conservatively marks a structured mutation failure with missing status', async () => {

@@ -12,10 +12,11 @@ const STABLE_ERROR_CODES = new Set([
   'INVALID_ARGUMENT', 'UNSUPPORTED_PLATFORM', 'MISSING_HELPER', 'HELPER_VERSION_MISMATCH',
   'MISSING_DEPENDENCY', 'PERMISSION_DENIED', 'TARGET_NOT_FOUND', 'AMBIGUOUS_TARGET',
   'INELIGIBLE_TARGET', 'STALE_SNAPSHOT', 'STALE_CAPTURE', 'TIMEOUT', 'BUSY', 'INTERRUPTED',
+  'FOCUS_FAILED',
 ]);
 const CONTROLLED_RESULT_VALUES = {
   method: new Set(['accessibility', 'cg-event']),
-  verification: new Set(['verified', 'unverified', 'partial']),
+  verification: new Set(['verified', 'dispatched', 'unverified', 'partial']),
   visualization: new Set(['none', 'approach', 'pulse', 'drag']),
 };
 
@@ -196,8 +197,7 @@ function projectReply(value: unknown, request: Request, requestDispatched: boole
     const wireStatus = readMutationStatus(value.error.details);
     if (wireStatus === null) return undefined;
     const publicStatus = mutatesDesktop(request.command)
-      && (wireStatus === 'potentiallyApplied' || (wireStatus === undefined && requestDispatched))
-      ? 'potentiallyApplied'
+      ? (wireStatus ?? (requestDispatched ? 'potentiallyApplied' : undefined))
       : undefined;
     const details = projectDetails(value.error.details ?? {}, supplied, publicStatus);
     return {
@@ -480,7 +480,7 @@ function readMutationStatus(value: Record<string, JsonValue> | undefined): Mutat
 function projectDetails(
   value: Record<string, JsonValue>,
   supplied: SuppliedValue | undefined,
-  mutationStatus: 'potentiallyApplied' | undefined,
+  mutationStatus: MutationStatus | undefined,
 ): Record<string, JsonValue> | undefined {
   const freeForm: Record<string, JsonValue> = {};
   for (const [key, item] of Object.entries(value)) {

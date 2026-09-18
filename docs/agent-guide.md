@@ -45,7 +45,7 @@ same info (see below) — `0` success, nonzero failure.
 | 2 | `INVALID_ARGUMENT` | fix flags; don't retry as-is |
 | 3 | `MISSING_HELPER` `HELPER_VERSION_MISMATCH` `MISSING_DEPENDENCY` `UNSUPPORTED_PLATFORM` | environment problem — surface to user, run `doctor` |
 | 4 | `PERMISSION_DENIED` | Accessibility/Screen Recording not granted — tell user to grant it |
-| 5 | `TARGET_NOT_FOUND` `AMBIGUOUS_TARGET` `INELIGIBLE_TARGET` `STALE_SNAPSHOT` `STALE_CAPTURE` | re-target: re-run `apps`/`windows`/`snapshot`/`screenshot` |
+| 5 | `TARGET_NOT_FOUND` `AMBIGUOUS_TARGET` `INELIGIBLE_TARGET` `STALE_SNAPSHOT` `STALE_CAPTURE` `FOCUS_FAILED` | re-target: re-run `apps`/`windows`/`snapshot`/`screenshot`; `FOCUS_FAILED` = the named app couldn't be raised — check it's running, then retry |
 | 6 | `TIMEOUT` `BUSY` | retry with larger `--timeout`, or wait and retry |
 | 130 | interrupted | abort the task |
 
@@ -139,8 +139,8 @@ pixels. Verified end-to-end (drew on jspaint.app's canvas).
   canvas. Read swatch positions carefully off the PNG (two-row palettes are
   easy to mis-pick — verify the active color with a re-`screenshot` before a
   long draw).
-- **Always re-`screenshot` to confirm.** Pointer ops report `verified` (the
-  event dispatched), not that the canvas changed. Re-capture and look.
+- **Always re-`screenshot` to confirm.** Pointer ops report `dispatched` —
+  the event was posted, not that the canvas changed. Re-capture and look.
 - **Canvas pixels ≠ window pixels.** `--x`/`--y`/`--from`/`--to` are image
   pixels across the *whole captured region* (window or display) — compute a
   control's pixel from the PNG's own coordinates, not from memory of the
@@ -151,26 +151,52 @@ pixels. Verified end-to-end (drew on jspaint.app's canvas).
 ```sh
 nuvin-computer-use type --app Notes --text "hello"        # keystrokes (Unicode ok)
 nuvin-computer-use type --app Notes --text-file -         # read text from stdin
+nuvin-computer-use type --app Notes --text "x" --to-process  # post to the app's queue, no activation
+nuvin-computer-use type --text "x"                        # bare = type into whatever holds focus
 nuvin-computer-use key  --app Notes --key cmd+s           # chord: cmd,ctrl,alt,shift + key
 nuvin-computer-use key  --key cmd+space                   # bare = system-wide chord (Spotlight etc.)
 nuvin-computer-use scroll --app Notes --direction down --amount 3
 ```
 
-`type`/`key`/`scroll --direction` target the **app/window**, not a ref — they
-post input to whatever has focus inside that window. Focus the right field
-first (`click` it or `press` it via a ref). A bare `key` (no `--app`/`--pid`)
-posts the chord system-wide to whatever has focus — useful for global
-shortcuts like Spotlight.
+`type`/`key`/`scroll --direction` target the **app/window**, not a ref. With
+`--app`/`--pid` they activate the app then post to whatever holds focus inside
+it (reaching panels); `--to-process` instead posts to the app's event queue in
+the background, ignoring focus entirely. Focus the right field first (`click`
+it or `press` it via a ref).
+
+`key`/`type` have three delivery modes:
+
+- **`--app`/`--pid` (default): activate, then type.** The named app is raised
+  frontmost (stealing focus) and the input is posted to the HID event tap, so
+  it reaches the app *and* its panels/helper-hosted windows — this is what
+  lets `key --app X --key escape` dismiss an `NSOpenPanel`. If the app can't
+  be raised the command fails `FOCUS_FAILED` with `mutationStatus:
+  "notStarted"` — nothing was posted.
+- **`--to-process`: background queue.** Posts to the app's own event queue
+  without activating it — for input to an app that must stay in the
+  background. It cannot reach panels (they live in another process's queue).
+  Requires `--app`/`--pid`.
+- **bare `key`, bare `type`, `type --global`: whatever holds focus.** No
+  activation; the input lands on the currently focused app — useful for
+  global shortcuts like Spotlight.
 
 ## Safety contract — read this before automating
 
 - **This is real foreground input.** `click`/`type`/`key` move the physical
   pointer and post real events to the focused app. There is no sandbox and no
   semantic reviewer — a click on "Delete" deletes.
+- **`verification` honesty.** Success replies carry `data.verification`:
+  `verified` = the AX action itself succeeded (`press`/`set-value`/
+  `scroll --ref`); `dispatched` = the event was posted (`key`/`type`/
+  `click`/`move`/`drag`/directional `scroll`) — it may land but be
+  unobserved, so it says nothing about effect. Neither means the UI changed;
+  re-observe when it matters.
 - **`mutationStatus` honesty.** On a failure, `error.details.mutationStatus`
   tells you whether input may have been dispatched:
-  `notStarted` = safe to retry blindly; `potentiallyApplied` = **re-observe
-  before retrying** (the action may have already happened).
+  `notStarted` = dispatch never began (e.g. `FOCUS_FAILED`, a focus-targeted
+  `key`/`type` whose app never came frontmost) — safe to retry blindly;
+  `potentiallyApplied` = **re-observe before retrying** (the action may
+  have already happened).
 - **Never pass secrets via `--text`** — it's visible in shell history and
   process lists. Use `--text-file -` and pipe via stdin. Supplied text is
   never echoed back in replies.
@@ -186,6 +212,7 @@ shortcuts like Spotlight.
 | `TARGET_NOT_FOUND` | App login-launched (Finder/Dock) or panel-service dialog → target a real window; dismiss `NSOpenPanel` with `key --app X --key escape` |
 | `AMBIGUOUS_TARGET` | add `--window <id>` from `windows` output |
 | `INELIGIBLE_TARGET` | window minimized/off-Space — bring it on-screen first |
+| `FOCUS_FAILED` | `--app`/`--pid` `key`/`type` couldn't raise the app — verify it's running (`apps`), then retry; `notStarted`, so a retry is safe |
 | `STALE_SNAPSHOT` / `STALE_CAPTURE` | re-run `snapshot`/`screenshot`, re-derive ref/coords |
 | `PERMISSION_DENIED` | Accessibility/Screen Recording missing → `doctor`, tell user to grant to the launching terminal |
 | `EXECUTION_UNCERTAIN`/`potentiallyApplied` | **don't blind-retry** — snapshot/screenshot to see if it already happened |

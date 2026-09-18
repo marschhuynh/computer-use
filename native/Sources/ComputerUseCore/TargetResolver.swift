@@ -588,37 +588,35 @@ private func liveWindows(for pid: Int, context: CommandContext) throws -> [Targe
     case .failure: throw resolverReadFailure(status)
     }
 
-    var axWindows: [AXWindowMetadata] = []
+    let resolver = WindowIDResolver.live
+    var candidates: [AXWindowCandidate] = []
     for element in windowElements {
         try context.check()
         try prepareLiveAXMessaging(element, context: context)
-        axWindows.append(AXWindowMetadata(
+        let metadata = AXWindowMetadata(
             role: try resolverString(element, kAXRoleAttribute),
             title: try resolverString(element, kAXTitleAttribute),
             bounds: try resolverBounds(element),
             minimized: try resolverBool(element, kAXMinimizedAttribute)
+        )
+        candidates.append(AXWindowCandidate(
+            resolvedWindowID: resolver.windowID(for: element),
+            metadata: metadata
         ))
     }
     let cgWindows = try liveCGWindows(for: pid, context: context)
-    var matched: [TargetWindow] = []
-    for ax in axWindows {
-        try context.check()
-        for cg in cgWindows {
-            try context.check()
-            guard matches(ax: ax, cg: cg) else { continue }
-            matched.append(TargetWindow(
-                ax: ax,
-                cg: CGWindowMetadata(
-                    id: cg.id,
-                    title: cg.title,
-                    bounds: cg.bounds,
-                    onScreen: cg.onScreen,
-                    minimized: ax.minimized == true
-                )
-            ))
-        }
-    }
-    return matched
+    try context.check()
+    // Strict only when ids are available: with resolution working, AX
+    // advertising a window that joins to nothing means the correlation
+    // collapsed and the caller must hear about it rather than receive an
+    // empty list. On the fallback path an unmatched window is expected
+    // (that path is already lossy), so it stays non-fatal.
+    return try joinWindows(
+        axWindows: candidates,
+        cgWindows: cgWindows,
+        idResolutionAvailable: resolver.isAvailable,
+        strictJoin: resolver.isAvailable
+    )
 }
 
 private func liveCGWindows(
@@ -660,13 +658,6 @@ private func liveCGWindows(
         ))
     }
     return windows
-}
-
-private func matches(ax: AXWindowMetadata, cg: CGWindowMetadata) -> Bool {
-    guard ax.role == "AXWindow", windowTitlesMatch(ax.title, cg.title), let bounds = ax.bounds else {
-        return false
-    }
-    return bounds == cg.bounds
 }
 
 /// CGWindowList strips the application/profile suffix that many apps append to

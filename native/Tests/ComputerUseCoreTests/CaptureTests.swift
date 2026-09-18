@@ -378,7 +378,9 @@ final class CaptureTests: XCTestCase {
         func performAXAction(_ action: String, on element: LiveAXElement, context: CommandContext) throws {}
         func postKey(_ chord: String, to pid: Int, context: CommandContext) throws {}
         func postGlobalKey(_ chord: String, context: CommandContext) throws {}
+        func postFocusedKey(_ chord: String, context: CommandContext) throws {}
         func postText(_ text: String, to pid: Int, context: CommandContext) throws {}
+        func postFocusedText(_ text: String, context: CommandContext) throws {}
         func scroll(_ direction: String, amount: Int, at element: LiveAXElement?, point: CGPoint?, context: CommandContext) throws {}
         func click(at point: CGPoint, button: String, count: Int, context: CommandContext) throws {
             clicks.append(point)

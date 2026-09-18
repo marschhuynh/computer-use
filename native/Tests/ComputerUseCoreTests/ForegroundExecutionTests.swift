@@ -8,11 +8,14 @@ final class ForegroundExecutionTests: XCTestCase {
     private final class Recorder {
         var actions: [String] = []
         var texts: [String] = []
-        var keys: [String] = []
+        var tapText: [String] = []
+        var pidKeys: [String] = []
+        var tapKeys: [String] = []
         var globalKeys: [String] = []
         var usedHIDTap = false
         var scrolls: [(String, Int)] = []
         var failOnDrag = false
+        var failOnFocusedKey = false
         final class Mouse {
             struct Click { let button: String; let count: Int; let point: CGPoint }
             var clicks: [Click] = []
@@ -29,14 +32,25 @@ final class ForegroundExecutionTests: XCTestCase {
             r.actions.append(action)
         }
         func postKey(_ chord: String, to pid: Int, context: CommandContext) throws {
-            r.keys.append(chord)
+            r.pidKeys.append(chord)
         }
         func postGlobalKey(_ chord: String, context: CommandContext) throws {
             r.globalKeys.append(chord)
             r.usedHIDTap = true
         }
+        func postFocusedKey(_ chord: String, context: CommandContext) throws {
+            r.tapKeys.append(chord)
+            r.usedHIDTap = true
+            if r.failOnFocusedKey {
+                throw NativeFailure("NATIVE_FAILURE", "injected key failure")
+            }
+        }
         func postText(_ text: String, to pid: Int, context: CommandContext) throws {
             r.texts.append(text)
+        }
+        func postFocusedText(_ text: String, context: CommandContext) throws {
+            r.tapText.append(text)
+            r.usedHIDTap = true
         }
         func scroll(_ direction: String, amount: Int, at element: LiveAXElement?, point: CGPoint?, context: CommandContext) throws {
             r.scrolls.append((direction, amount))
@@ -69,15 +83,23 @@ final class ForegroundExecutionTests: XCTestCase {
     func testKeyParsesChordAndPosts() async throws {
         let recorder = Recorder()
         let input = NativeInput(driver: RecordingDriver(recorder))
-        try await input.key("cmd+s", to: 42, context: context())
-        XCTAssertEqual(recorder.keys, ["cmd+s"])
+        try await input.key("cmd+s", to: 42, delivery: .process, context: context())
+        XCTAssertEqual(recorder.pidKeys, ["cmd+s"])
     }
 
     func testKeyRejectsUnknownKey() async throws {
         let input = NativeInput(driver: RecordingDriver(Recorder()))
         await XCTAssertThrowsErrorAsync({
-            try await input.key("cmd+notakey", to: 42, context: context())
+            try await input.key("cmd+notakey", to: 42, delivery: .focused, context: context())
         }) { XCTAssertEqual(($0 as? NativeFailure)?.code, "INVALID_ARGUMENT") }
+    }
+
+    func testKeyFocusedDeliveryPostsToHIDTap() throws {
+        let recorder = Recorder()
+        let input = NativeInput(driver: RecordingDriver(recorder))
+        try input.key("cmd+s", to: 42, delivery: .focused, context: context())
+        XCTAssertEqual(recorder.tapKeys, ["cmd+s"])
+        XCTAssertEqual(recorder.pidKeys, [])
     }
 
     func testGlobalKeyPostsViaHIDTapNotPid() async throws {
@@ -86,7 +108,7 @@ final class ForegroundExecutionTests: XCTestCase {
         try input.globalKey("cmd+space", context: context())
         XCTAssertEqual(recorder.globalKeys, ["cmd+space"])
         XCTAssertTrue(recorder.usedHIDTap)   // global path, not postToPid
-        XCTAssertTrue(recorder.keys.isEmpty) // pid-scoped path untouched
+        XCTAssertTrue(recorder.pidKeys.isEmpty) // pid-scoped path untouched
     }
 
     func testGlobalKeyRejectsUnknownKey() async throws {
@@ -114,14 +136,33 @@ final class ForegroundExecutionTests: XCTestCase {
         XCTAssertTrue(reply.ok, "expected success, got \(String(describing: reply.error))")
         XCTAssertEqual(recorder.globalKeys, ["cmd+space"])
         XCTAssertTrue(recorder.usedHIDTap)
-        XCTAssertTrue(recorder.keys.isEmpty, "no target means nothing is posted to a pid")
+        XCTAssertTrue(recorder.pidKeys.isEmpty, "no target means nothing is posted to a pid")
         guard case let .object(target) = reply.data?["target"],
               case let .string(scope) = target["scope"] else {
             return XCTFail("expected target scope, got \(String(describing: reply.data))")
         }
         XCTAssertEqual(scope, "global")
         XCTAssertEqual(reply.data?["method"], .string("cg-event"))
-        XCTAssertEqual(reply.data?["verification"], .string("verified"))
+        XCTAssertEqual(reply.data?["verification"], .string("dispatched"))
+    }
+
+    func testGlobalTypePostsToHIDTap() async throws {
+        let recorder = Recorder()
+        let service = NativeService(
+            desktopLock: DesktopLock(rootURL: temporaryStateRoot()),
+            input: NativeInput(driver: RecordingDriver(recorder))
+        )
+        let reply = await service.type(text: "hello", to: nil, context: context())
+        XCTAssertTrue(reply.ok, "expected success, got \(String(describing: reply.error))")
+        XCTAssertEqual(recorder.tapText, ["hello"])
+        XCTAssertTrue(recorder.usedHIDTap)
+        XCTAssertTrue(recorder.texts.isEmpty, "no target means nothing is posted to a pid")
+        guard case let .object(target) = reply.data?["target"],
+              case let .string(scope) = target["scope"] else {
+            return XCTFail("expected target scope, got \(String(describing: reply.data))")
+        }
+        XCTAssertEqual(scope, "global")
+        XCTAssertEqual(reply.data?["method"], .string("cg-event"))
     }
 
     func testScrollDirectionalDispatch() async throws {
@@ -136,7 +177,7 @@ final class ForegroundExecutionTests: XCTestCase {
     func testTypePostsText() async throws {
         let recorder = Recorder()
         let input = NativeInput(driver: RecordingDriver(recorder))
-        try await input.type("hello", to: 42, context: context())
+        try await input.type("hello", to: 42, delivery: .process, context: context())
         XCTAssertEqual(recorder.texts, ["hello"])
     }
 
@@ -193,5 +234,266 @@ final class ForegroundExecutionTests: XCTestCase {
         })
         // button must be released even though dispatch failed mid-drag
         XCTAssertEqual(recorder.mouse.events.last, "up")
+    }
+
+    // MARK: - activation seam
+
+    /// A controllable AppActivator. `pollsUntilFrontmost` lets the test decide
+    /// how many frontmost checks pass before the app reports frontmost;
+    /// nil = never.
+    private final class FakeActivator: AppActivator {
+        var calls: [Int] = []
+        var polls = 0
+        let pollsUntilFrontmost: Int?
+        init(pid: Int = 0, pollsUntilFrontmost: Int? = 1) { self.pollsUntilFrontmost = pollsUntilFrontmost }
+        func activate(pid: Int, context: CommandContext) async throws {
+            calls.append(pid)
+            polls = 0
+            guard let limit = pollsUntilFrontmost else {
+                // Never comes front — spin until the deadline trips, then
+                // surface the seam's contract: activation expiry is FOCUS_FAILED.
+                do {
+                    while true {
+                        try context.check()
+                        try await context.sleep(nanoseconds: 1_000_000)
+                    }
+                } catch let failure as NativeFailure where failure.code == "TIMEOUT" {
+                    throw NativeFailure("FOCUS_FAILED", "App could not be brought to the front")
+                }
+            }
+            while polls < limit {
+                polls += 1
+                try await context.sleep(nanoseconds: 1_000_000)
+            }
+        }
+    }
+
+    /// A real-clock context with a short deadline, for paths that must spin
+    /// until expiry (the fake clock's monotonicNow is pinned at 0).
+    private func shortContext() -> CommandContext {
+        CommandContext(timeoutMilliseconds: 50)
+    }
+
+    func testActivateWaitsUntilAppIsFrontmost() async throws {
+        let activator = FakeActivator(pollsUntilFrontmost: 3)
+        try await activator.activate(pid: 42, context: context())
+        XCTAssertEqual(activator.calls, [42])
+        XCTAssertGreaterThanOrEqual(activator.polls, 1)
+    }
+
+    func testActivateFailsWhenAppNeverComesFront() async throws {
+        let activator = FakeActivator(pollsUntilFrontmost: nil)   // never frontmost
+        await XCTAssertThrowsErrorAsync({
+            try await activator.activate(pid: 42, context: shortContext())  // short deadline
+        }) { XCTAssertEqual(($0 as? NativeFailure)?.code, "FOCUS_FAILED") }
+    }
+
+    // MARK: - targeted key/type: activate then deliver to focus
+
+    private let windowPid = 4_242
+
+    /// A service whose resolver always resolves `windowPid` to the same single
+    /// eligible window, with a recording driver and a controllable activator.
+    private func targetedService(activator: AppActivator) -> (NativeService, Recorder) {
+        let recorder = Recorder()
+        let pid = windowPid
+        let bounds = WindowBounds(x: 0, y: 0, width: 100, height: 100)
+        let window = TargetWindow(
+            ax: AXWindowMetadata(role: "AXWindow", title: "Draft", bounds: bounds, minimized: false),
+            cg: CGWindowMetadata(id: 7, title: "Draft", bounds: bounds, onScreen: true, minimized: false)
+        )
+        let service = NativeService(
+            desktopLock: DesktopLock(rootURL: temporaryStateRoot()),
+            targetResolver: TargetResolver(provider: TargetResolverProvider(
+                listApplications: {
+                    [ProcessMetadata(name: "Editor", pid: pid, launchDate: "2026-09-17T00:00:00.000Z", bundleId: nil)]
+                },
+                windowsForPID: { _, _ in [window] },
+                listDisplays: { [] }
+            )),
+            input: NativeInput(driver: RecordingDriver(recorder)),
+            activator: activator
+        )
+        return (service, recorder)
+    }
+
+    func testTargetedKeyActivatesThenPostsToTap() async throws {
+        let activator = FakeActivator()
+        let (service, recorder) = targetedService(activator: activator)
+        let reply = await service.key(chord: "cmd+s", to: windowPid, context: context())
+        XCTAssertTrue(reply.ok, "expected success, got \(String(describing: reply.error))")
+        XCTAssertEqual(activator.calls, [windowPid])   // activated first
+        XCTAssertEqual(recorder.tapKeys, ["cmd+s"])    // then tapped to focus
+        XCTAssertEqual(recorder.pidKeys, [])
+    }
+
+    func testCGEventResultReportsDispatchedNotVerified() async throws {
+        // cg-event only proves the event was posted — delivery/effect is
+        // unobservable, so the honest value is "dispatched", not "verified".
+        let (service, _) = targetedService(activator: FakeActivator())
+        let targeted = await service.key(chord: "cmd+s", to: windowPid, context: context())
+        XCTAssertTrue(targeted.ok, "expected success, got \(String(describing: targeted.error))")
+        XCTAssertEqual(targeted.data?["method"], .string("cg-event"))
+        XCTAssertEqual(targeted.data?["verification"], .string("dispatched"))
+
+        let bare = NativeService(
+            desktopLock: DesktopLock(rootURL: temporaryStateRoot()),
+            input: NativeInput(driver: RecordingDriver(Recorder()))
+        )
+        let global = await bare.key(chord: "cmd+space", to: nil, context: context())
+        XCTAssertTrue(global.ok, "expected success, got \(String(describing: global.error))")
+        XCTAssertEqual(global.data?["method"], .string("cg-event"))
+        XCTAssertEqual(global.data?["verification"], .string("dispatched"))
+    }
+
+    func testToProcessKeySkipsActivationAndPostsToQueue() async throws {
+        let activator = FakeActivator()
+        let (service, recorder) = targetedService(activator: activator)
+        let reply = await service.key(chord: "cmd+s", to: windowPid, toProcess: true, context: context())
+        XCTAssertTrue(reply.ok, "expected success, got \(String(describing: reply.error))")
+        XCTAssertEqual(activator.calls, [])
+        XCTAssertEqual(recorder.pidKeys, ["cmd+s"])
+        XCTAssertEqual(recorder.tapKeys, [])
+    }
+
+    func testKeyFailsRatherThanTypingIntoWrongAppWhenFocusFails() async throws {
+        // Never comes frontmost — the command must fail rather than type into
+        // whatever happens to be focused.
+        let activator = FakeActivator(pollsUntilFrontmost: nil)
+        let (service, recorder) = targetedService(activator: activator)
+        let reply = await service.key(chord: "cmd+s", to: windowPid, context: shortContext())
+        XCTAssertFalse(reply.ok)
+        XCTAssertEqual(reply.error?.code, "FOCUS_FAILED")
+        // Focus failure is pre-dispatch: nothing was ever posted, so the
+        // mutation status is notStarted, not potentiallyApplied.
+        XCTAssertEqual(reply.error?.details?["mutationStatus"], .string("notStarted"))
+        XCTAssertEqual(recorder.tapKeys, [])   // nothing was dispatched
+    }
+
+    func testTargetedKeyRejectsInvalidChordBeforeActivation() async throws {
+        // A malformed chord is an argument error: it must fail before the
+        // target is resolved and before the app is activated — no focus
+        // steal, and notStarted because nothing was ever dispatched.
+        let activator = FakeActivator()
+        let (service, recorder) = targetedService(activator: activator)
+        let reply = await service.key(chord: "cmd+bogus", to: windowPid, context: context())
+        XCTAssertFalse(reply.ok)
+        XCTAssertEqual(reply.error?.code, "INVALID_ARGUMENT")
+        XCTAssertEqual(reply.error?.details?["mutationStatus"], .string("notStarted"))
+        XCTAssertEqual(activator.calls, [])
+        XCTAssertEqual(recorder.tapKeys, [])
+        XCTAssertEqual(recorder.pidKeys, [])
+    }
+
+    func testGlobalKeyRejectsInvalidChordAsNotStarted() async throws {
+        // Bare `key` has the same wart to guard against: the chord must be
+        // rejected before dispatch is entered, so the failure reports
+        // notStarted rather than potentiallyApplied.
+        let recorder = Recorder()
+        let service = NativeService(
+            desktopLock: DesktopLock(rootURL: temporaryStateRoot()),
+            input: NativeInput(driver: RecordingDriver(recorder))
+        )
+        let reply = await service.key(chord: "cmd+bogus", to: nil, context: context())
+        XCTAssertFalse(reply.ok)
+        XCTAssertEqual(reply.error?.code, "INVALID_ARGUMENT")
+        XCTAssertEqual(reply.error?.details?["mutationStatus"], .string("notStarted"))
+        XCTAssertEqual(recorder.globalKeys, [])
+    }
+
+    func testKeyResolveFailureReportsNotStarted() async throws {
+        // A resolver that finds no app throws TARGET_NOT_FOUND before
+        // dispatchTargetMutation runs — the failure is caught by execute's
+        // outer catch, which must still report notStarted: no input was
+        // ever posted.
+        let recorder = Recorder()
+        let service = NativeService(
+            desktopLock: DesktopLock(rootURL: temporaryStateRoot()),
+            targetResolver: TargetResolver(provider: TargetResolverProvider(
+                listApplications: { [] },
+                windowsForPID: { _, _ in [] },
+                listDisplays: { [] }
+            )),
+            input: NativeInput(driver: RecordingDriver(recorder)),
+            activator: FakeActivator()
+        )
+        let reply = await service.key(chord: "cmd+s", to: windowPid, context: context())
+        XCTAssertFalse(reply.ok)
+        XCTAssertEqual(reply.error?.code, "TARGET_NOT_FOUND")
+        XCTAssertEqual(reply.error?.details?["mutationStatus"], .string("notStarted"))
+        XCTAssertEqual(recorder.tapKeys, [])   // nothing was dispatched
+        XCTAssertEqual(recorder.pidKeys, [])
+    }
+
+    func testKeyMidPostFailureReportsPotentiallyApplied() async throws {
+        // Activation succeeds (preflight), but the post itself throws — the
+        // chord was dispatched and may have run, so mutationStatus is
+        // potentiallyApplied, not notStarted.
+        let activator = FakeActivator()
+        let (service, recorder) = targetedService(activator: activator)
+        recorder.failOnFocusedKey = true
+        let reply = await service.key(chord: "cmd+s", to: windowPid, context: context())
+        XCTAssertFalse(reply.ok)
+        XCTAssertEqual(reply.error?.code, "NATIVE_FAILURE")
+        XCTAssertEqual(reply.error?.details?["mutationStatus"], .string("potentiallyApplied"))
+    }
+
+    func testTypeFocusedDeliveryPostsToHIDTap() throws {
+        let recorder = Recorder()
+        let input = NativeInput(driver: RecordingDriver(recorder))
+        try input.type("hello", to: 42, delivery: .focused, context: context())
+        XCTAssertEqual(recorder.tapText, ["hello"])
+        XCTAssertEqual(recorder.texts, [])
+    }
+
+    func testTargetedTypeActivatesThenPostsTextToTap() async throws {
+        let activator = FakeActivator()
+        let (service, recorder) = targetedService(activator: activator)
+        let reply = await service.type(text: "hello", to: windowPid, context: context())
+        XCTAssertTrue(reply.ok, "expected success, got \(String(describing: reply.error))")
+        XCTAssertEqual(activator.calls, [windowPid])
+        XCTAssertEqual(recorder.tapText, ["hello"])
+        XCTAssertEqual(recorder.texts, [])
+    }
+
+    func testToProcessTypeSkipsActivationAndPostsToQueue() async throws {
+        let activator = FakeActivator()
+        let (service, recorder) = targetedService(activator: activator)
+        let reply = await service.type(text: "hello", to: windowPid, toProcess: true, context: context())
+        XCTAssertTrue(reply.ok, "expected success, got \(String(describing: reply.error))")
+        XCTAssertEqual(activator.calls, [])
+        XCTAssertEqual(recorder.texts, ["hello"])
+        XCTAssertEqual(recorder.tapText, [])
+    }
+}
+
+private extension NativeService {
+    /// Test convenience: build the wire request a `key` command would carry and
+    /// run it through `execute`. `to: nil` is the targetless (global) path.
+    func key(chord: String, to pid: Int?, toProcess: Bool = false, context: CommandContext) async -> WireReply {
+        var object: [String: Any] = [
+            "schemaVersion": 1,
+            "command": "key",
+            "key": chord,
+            "options": ["timeoutMs": 1_000, "cursor": "off"],
+        ]
+        if let pid { object["target"] = ["pid": pid] }
+        if toProcess { object["toProcess"] = true }
+        return await execute(WireRequest(command: .key, object: object), context: context)
+    }
+
+    /// Test convenience: build the wire request a `type` command would carry
+    /// and run it through `execute`.
+    func type(text: String, to pid: Int?, toProcess: Bool = false, context: CommandContext) async -> WireReply {
+        var object: [String: Any] = [
+            "schemaVersion": 1,
+            "command": "type",
+            "text": text,
+            "allowClipboardReplace": false,
+            "options": ["timeoutMs": 1_000, "cursor": "off"],
+        ]
+        if let pid { object["target"] = ["pid": pid] }
+        if toProcess { object["toProcess"] = true }
+        return await execute(WireRequest(command: .type, object: object), context: context)
     }
 }

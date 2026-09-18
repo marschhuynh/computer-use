@@ -528,26 +528,49 @@ public enum AXTree {
         ) else {
             throw observationFailure()
         }
-        var matches: [AXUIElement] = []
+        // Re-find the window to walk by its CGWindowID. Comparing titles here
+        // compared the target's *CG* title against each window's *AX* title,
+        // which for a Chrome tab playing audio can never match.
+        let resolver = WindowIDResolver.live
+        var candidates: [(id: Int?, metadata: AXWindowMetadata)] = []
         for window in windows {
             try context.check()
             try prepareLiveAXMessaging(window, context: context)
-            guard case let .value(role) = try reader.string(window, kAXRoleAttribute),
-                  case let .value(title) = try reader.string(window, kAXTitleAttribute),
-                  case let .value(bounds) = try reader.bounds(window) else {
+            guard case let .value(role) = try reader.string(window, kAXRoleAttribute) else {
                 throw observationFailure()
             }
-            if role == "AXWindow" && windowTitlesMatch(title, target.title) && bounds == target.bounds {
-                matches.append(window)
-            }
+            let title: String?
+            if case let .value(value) = try reader.string(window, kAXTitleAttribute) { title = value } else { title = nil }
+            let bounds: WindowBounds?
+            if case let .value(value) = try reader.bounds(window) { bounds = value } else { bounds = nil }
+            candidates.append((
+                id: resolver.windowID(for: window),
+                metadata: AXWindowMetadata(role: role, title: title, bounds: bounds, minimized: nil)
+            ))
         }
-        guard matches.count == 1 else {
-            throw NativeFailure("STALE_SNAPSHOT", "Selected window identity is no longer unique")
+        let selected: Int
+        if resolver.isAvailable {
+            selected = try selectTargetWindow(
+                candidates: candidates,
+                targetWindowID: target.identity.windowId
+            )
+        } else {
+            // Fallback: the legacy title+bounds correlation.
+            let matches = candidates.indices.filter { index in
+                let metadata = candidates[index].metadata
+                return metadata.role == "AXWindow"
+                    && windowTitlesMatch(metadata.title, target.title)
+                    && metadata.bounds == target.bounds
+            }
+            guard matches.count == 1 else {
+                throw NativeFailure("STALE_SNAPSHOT", "Selected window identity is no longer unique")
+            }
+            selected = matches[0]
         }
         let result = try readSnapshot(
             target: target,
             options: options,
-            root: matches[0],
+            root: windows[selected],
             reader: reader,
             checkpoint: { try context.check() },
             prepare: { try prepareLiveAXMessaging($0, context: context) }
@@ -689,21 +712,60 @@ func liveAXAttribute(
     return (status, value)
 }
 
+/// Whether an attribute identifies the element, and so must be readable for
+/// the observation to be trusted.
+///
+/// `AXRole` is the only scalar the snapshot cannot do without: it is read via
+/// `required()` and every ref/evidence decision keys off it, so an unreadable
+/// role stays a hard failure. Every other scalar we read (`AXSubrole`,
+/// `AXIdentifier`, `AXTitle`, `AXDescription`, `AXValue`, and the booleans)
+/// is descriptive — absent is a legitimate state already represented by nil.
+func axAttributeIsIdentifying(_ attribute: String) -> Bool {
+    attribute == kAXRoleAttribute
+}
+
+/// Classifies a scalar attribute read, degrading a bare `.failure` on a
+/// non-identifying attribute to "absent".
+///
+/// Notes and Calendar answer `kAXErrorFailure` for attributes that are simply
+/// absent (verified live: `AXSubrole` on `AXGroup`/`AXButton`) where AppKit
+/// answers `.noValue`. Treating that as a read failure aborted the whole
+/// snapshot over one descriptive attribute on one decorative element.
+///
+/// `.apiDisabled`, `.invalidUIElement` and `.cannotComplete` are NOT
+/// degraded: they mean "no permission", "dead element" and "unresponsive AX
+/// server" — conditions that make the rest of the traversal untrustworthy.
+func axScalarReadResult<Value>(
+    attribute: String,
+    status: AXError,
+    value: CFTypeRef?,
+    expectedTypeID: CFTypeID,
+    decode: (CFTypeRef) -> Value?
+) -> AXReadResult<Value> {
+    if status == .failure, !axAttributeIsIdentifying(attribute) { return .unavailable }
+    // Degenerate element: a scalar attribute returning the wrong CF type
+    // (e.g. an AXUIElement for a string) is "no readable value," not a
+    // reason to abort the snapshot.
+    if status == .success, let value, CFGetTypeID(value) != expectedTypeID {
+        return .unavailable
+    }
+    return axReadResult(
+        status: status,
+        value: value,
+        expectedTypeID: expectedTypeID,
+        decode: decode
+    )
+}
+
 private func liveAXString(
     _ element: AXUIElement,
     _ attribute: String
 ) throws -> AXReadResult<String> {
     let read = liveAXAttribute(element, attribute)
-    // Degenerate element: a scalar attribute returning a non-string (e.g. an
-    // AXUIElement) is "no readable value," not a reason to abort the snapshot.
-    if read.status == .success,
-       let value = read.value,
-       CFGetTypeID(value) != CFStringGetTypeID() {
-        return .unavailable
-    }
     return try classifyLiveAXResult(
         status: read.status,
-        result: axReadResult(
+        result: axScalarReadResult(
+            attribute: attribute,
             status: read.status,
             value: read.value,
             expectedTypeID: CFStringGetTypeID(),
@@ -717,14 +779,10 @@ private func liveAXBool(
     _ attribute: String
 ) throws -> AXReadResult<Bool> {
     let read = liveAXAttribute(element, attribute)
-    if read.status == .success,
-       let value = read.value,
-       CFGetTypeID(value) != CFBooleanGetTypeID() {
-        return .unavailable
-    }
     return try classifyLiveAXResult(
         status: read.status,
-        result: axReadResult(
+        result: axScalarReadResult(
+            attribute: attribute,
             status: read.status,
             value: read.value,
             expectedTypeID: CFBooleanGetTypeID(),
@@ -765,29 +823,48 @@ private func liveAXChildren(
     )
 }
 
+/// Classifies an `AXUIElementCopyActionNames` outcome.
+///
+/// `AXActions` is an optional, non-identifying attribute: it never
+/// contributes to window identity or evidence trust, only to which refs
+/// advertise an action. Several system apps (Notes, Calendar — verified live
+/// on `AXSplitter`/`AXStaticText`/`AXGroup`) answer `kAXErrorFailure` for
+/// elements that simply have no actions, where AppKit apps answer `.noValue`.
+/// Treating that as a read failure aborted the entire snapshot over a
+/// decorative element, so a bare `.failure` degrades to "no readable action
+/// list" instead.
+///
+/// `.apiDisabled` and `.invalidUIElement` are deliberately NOT degraded:
+/// those mean "no accessibility permission" and "this element is dead" —
+/// real conditions the caller must see rather than read as an empty list.
+/// `.cannotComplete` stays a failure too, since an unresponsive AX server
+/// makes the rest of the traversal untrustworthy.
+func axActionNamesReadResult(status: AXError, names: CFArray?) -> AXReadResult<[String]> {
+    if status == .failure { return .unavailable }
+    if status == .success, let names, CFGetTypeID(names) != CFArrayGetTypeID() {
+        return .unavailable
+    }
+    return axReadResult(
+        status: status,
+        value: names,
+        expectedTypeID: CFArrayGetTypeID(),
+        decode: { value in
+            let array = value as! CFArray
+            return decodeAXArray(
+                array as [AnyObject],
+                expectedElementTypeID: CFStringGetTypeID(),
+                decode: { $0 as? String }
+            )
+        }
+    )
+}
+
 private func liveAXActions(_ element: AXUIElement) throws -> AXReadResult<[String]> {
     var names: CFArray?
     let status = AXUIElementCopyActionNames(element, &names)
-    if status == .success,
-       let names,
-       CFGetTypeID(names) != CFArrayGetTypeID() {
-        return .unavailable
-    }
     return try classifyLiveAXResult(
         status: status,
-        result: axReadResult(
-            status: status,
-            value: names,
-            expectedTypeID: CFArrayGetTypeID(),
-            decode: { value in
-                let array = value as! CFArray
-                return decodeAXArray(
-                    array as [AnyObject],
-                    expectedElementTypeID: CFStringGetTypeID(),
-                    decode: { $0 as? String }
-                )
-            }
-        )
+        result: axActionNamesReadResult(status: status, names: names)
     )
 }
 

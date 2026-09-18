@@ -51,6 +51,13 @@ describe('run', () => {
     expect(deps.stderr.join('')).not.toContain('sensitive input');
   });
 
+  it('threads toProcess through resolveText to the backend', async () => {
+    const execute = vi.fn(async (request: Request) => success(request.command));
+    const deps = dependencies({ execute });
+    await expect(run(['type', '--app', 'TextEdit', '--text', 'y', '--to-process', '--json'], deps)).resolves.toBe(0);
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ command: 'type', toProcess: true }), expect.any(AbortSignal));
+  });
+
   it('returns one structured JSON error for unknown commands', async () => {
     const deps = dependencies({ execute: async () => success('apps') });
     await expect(run(['unknown', '--json'], deps)).resolves.toBe(2);

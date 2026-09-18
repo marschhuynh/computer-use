@@ -1,6 +1,48 @@
 import ApplicationServices
 import CoreGraphics
 import Foundation
+#if canImport(AppKit)
+import AppKit
+#endif
+
+/// Brings a resolved target's app frontmost before input is delivered to the
+/// HID tap. Injected so "frontmost" is controllable in tests.
+public protocol AppActivator {
+    func activate(pid: Int, context: CommandContext) async throws
+}
+
+public struct LiveActivator: AppActivator {
+    public init() {}
+    /// Raise `pid` frontmost and wait until it actually is. The app may take a
+    /// moment to activate; poll `NSWorkspace.shared.frontmostApplication` at a
+    /// short interval bounded by the command deadline. Fails FOCUS_FAILED if the
+    /// app cannot be brought forward.
+    public func activate(pid: Int, context: CommandContext) async throws {
+        #if canImport(AppKit)
+        do {
+            let nsapp = await MainActor.run { NSRunningApplication(processIdentifier: pid_t(pid)) }
+            guard let nsapp else { throw NativeFailure("TARGET_NOT_FOUND", "Process was not found") }
+
+            await MainActor.run {
+                nsapp.activate(options: [.activateAllWindows])
+            }
+
+            while true {
+                try context.check()
+                let frontPid = await MainActor.run {
+                    NSWorkspace.shared.frontmostApplication?.processIdentifier
+                }
+                if frontPid == pid_t(pid) { return }
+                try await context.sleep(nanoseconds: 20_000_000)   // 20ms poll
+            }
+        } catch let failure as NativeFailure where failure.code == "TIMEOUT" {
+            throw NativeFailure("FOCUS_FAILED", "App could not be brought to the front")
+        }
+        #else
+        throw NativeFailure("UNSUPPORTED_PLATFORM", "App activation requires macOS")
+        #endif
+    }
+}
 
 /// Read-only environment probes for `doctor`. Injected so the diagnostic runs
 /// without touching real permissions or a lock in tests.
@@ -35,6 +77,7 @@ public final class NativeService {
     private let environment: DoctorEnvironment
     private let captureService: CaptureService
     private let input: NativeInput
+    private let activator: AppActivator
     private let store: StateStore
     private let makeRenderer: () -> CursorRenderer
     private var cursorEnabled = true
@@ -47,6 +90,7 @@ public final class NativeService {
         store: StateStore = StateStore(),
         captureService: CaptureService? = nil,
         input: NativeInput = NativeInput(driver: LiveInputDriver()),
+        activator: AppActivator = LiveActivator(),
         renderer: @escaping () -> CursorRenderer = {
             #if canImport(AppKit)
             return CursorOverlay()
@@ -61,6 +105,7 @@ public final class NativeService {
         self.environment = environment
         self.store = store
         self.input = input
+        self.activator = activator
         self.makeRenderer = renderer
         #if canImport(ScreenCaptureKit)
         self.captureService = captureService ?? CaptureService(capturer: { target, native, context in
@@ -246,45 +291,85 @@ public final class NativeService {
                         y: resolved.bounds.y + resolved.bounds.height / 2
                     )
                     try self.input.scroll(direction: direction, amount: amount, at: nil, point: center, context: context)
-                    return mutationResult(method: "cg-event", verification: "verified")
+                    return mutationResult(method: "cg-event", verification: "dispatched")
                 }
             case .key:
-                let selector = TargetSelector.decode(request.object["target"])
                 guard let key = request.object["key"] as? String else {
                     return .failure(command: request.command, code: "PROTOCOL_ERROR", message: "Invalid key request")
                 }
+                // Chord validity is a caller error, not a dispatch failure:
+                // reject before resolve/lock/activation so a bad chord fails
+                // INVALID_ARGUMENT pre-dispatch (notStarted) and never steals
+                // focus. Covers the targetless path too — this runs before
+                // dispatchGlobalMutation is even invoked.
+                guard KeyChord.isValid(key) else {
+                    throw NativeFailure("INVALID_ARGUMENT", "Unrecognized key/modifier combination")
+                }
+                let selector = TargetSelector.decode(request.object["target"])
                 // No target: the chord goes to the HID event tap, landing on
                 // whatever holds keyboard focus. Protocol validation guarantees
                 // any present target dict is well-formed, so nil means absent.
                 guard let selector else {
                     return try await dispatchGlobalMutation(command: .key, context: context) { context in
                         try self.input.globalKey(key, context: context)
-                        return mutationResult(method: "cg-event", verification: "verified")
+                        return mutationResult(method: "cg-event", verification: "dispatched")
                     }
                 }
+                let toProcess = request.object["toProcess"] as? Bool ?? false
                 let resolved = try await targetResolver.resolve(selector, context: context)
                 return try await dispatchTargetMutation(
-                    command: .key, target: resolved, context: context
+                    command: .key, target: resolved, context: context,
+                    preflight: { context in
+                        // --app/--pid means "activate this app, then send to it":
+                        // raise it frontmost so the tap-posted chord lands on the
+                        // named app, not whatever happens to hold focus. This is
+                        // dispatch prep — a FOCUS_FAILED reports notStarted.
+                        if !toProcess {
+                            try await self.activator.activate(pid: resolved.identity.pid, context: context)
+                        }
+                    }
                 ) { context in
-                    try self.input.key(key, to: resolved.identity.pid, context: context)
-                    return mutationResult(method: "cg-event", verification: "verified")
+                    try self.input.key(key, to: resolved.identity.pid,
+                                       delivery: toProcess ? .process : .focused, context: context)
+                    return mutationResult(method: "cg-event", verification: "dispatched")
                 }
             case .type:
-                guard let selector = TargetSelector.decode(request.object["target"]),
-                      let text = request.object["text"] as? String,
+                let selector = TargetSelector.decode(request.object["target"])
+                guard let text = request.object["text"] as? String,
                       let allowClipboardReplace = boolean(request.object["allowClipboardReplace"]) else {
                     return .failure(command: request.command, code: "PROTOCOL_ERROR", message: "Invalid type request")
                 }
+                // No target: the text goes to the HID event tap, landing on
+                // whatever holds keyboard focus. Protocol validation
+                // guarantees any present target dict is well-formed, so nil
+                // means absent.
+                guard let selector else {
+                    return try await dispatchGlobalMutation(command: .type, context: context) { context in
+                        try self.input.globalText(text, context: context)
+                        var result = mutationResult(method: "cg-event", verification: "dispatched")
+                        result["clipboardReplaced"] = .bool(false)
+                        return result
+                    }
+                }
+                let toProcess = request.object["toProcess"] as? Bool ?? false
                 let resolved = try await targetResolver.resolve(selector, context: context)
                 return try await dispatchTargetMutation(
-                    command: .type, target: resolved, context: context
+                    command: .type, target: resolved, context: context,
+                    preflight: { context in
+                        // Activate-then-focus delivery, same as `key`: --app/--pid
+                        // names the app that must hold focus before text is typed.
+                        if !toProcess {
+                            try await self.activator.activate(pid: resolved.identity.pid, context: context)
+                        }
+                    }
                 ) { context in
                     // Unicode-event path leaves the clipboard untouched.
                     // allowClipboardReplace is accepted but never triggers a
                     // hidden paste fallback (spec: no silent clipboard use).
                     _ = allowClipboardReplace
-                    try self.input.type(text, to: resolved.identity.pid, context: context)
-                    var result = mutationResult(method: "cg-event", verification: "verified")
+                    try self.input.type(text, to: resolved.identity.pid,
+                                        delivery: toProcess ? .process : .focused, context: context)
+                    var result = mutationResult(method: "cg-event", verification: "dispatched")
                     result["clipboardReplaced"] = .bool(false)
                     return result
                 }
@@ -321,17 +406,26 @@ public final class NativeService {
                 }
             }
         } catch let failure as NativeFailure {
+            // A failure that escapes a dispatch pipeline (e.g. resolve's
+            // TARGET_NOT_FOUND, thrown before dispatchTargetMutation runs)
+            // means input was never posted: mutating commands report
+            // notStarted. A status the failure already carries is kept.
             return .failure(
                 command: request.command,
                 code: failure.code,
                 message: failure.message,
-                details: failure.details
+                details: request.command.mutatesDesktop
+                    ? attachingStatus(failure.details, false)
+                    : failure.details
             )
         } catch {
             return .failure(
                 command: request.command,
                 code: "NATIVE_FAILURE",
-                message: "Native command failed"
+                message: "Native command failed",
+                details: request.command.mutatesDesktop
+                    ? attachingStatus(nil, false)
+                    : nil
             )
         }
     }
@@ -474,7 +568,7 @@ private extension NativeService {
                     entered = true
                     try await input(context)
                 }
-                var payload = mutationResult(method: "cg-event", verification: "verified")
+                var payload = mutationResult(method: "cg-event", verification: "dispatched")
                 payload["visualization"] = .string(viz.rawValue)
                 return (payload, viz)
             }
@@ -493,10 +587,14 @@ private extension NativeService {
 
     /// Target-scoped mutation (key/type/directional scroll): lock + identity
     /// validation + dispatch, with held-input cleanup on cancellation.
+    /// `preflight` is dispatch prep (e.g. raising the target app frontmost) —
+    /// it runs before dispatch is marked entered, so its failure reports
+    /// `notStarted`: no input was ever posted.
     func dispatchTargetMutation(
         command: WireCommand,
         target: ResolvedTarget,
         context: CommandContext,
+        preflight: @escaping (CommandContext) async throws -> Void = { _ in },
         dispatch: @escaping (CommandContext) async throws -> [String: JSONValue]
     ) async throws -> WireReply {
         var entered = false
@@ -508,6 +606,7 @@ private extension NativeService {
                 guard fresh == target else {
                     throw NativeFailure("STALE_SNAPSHOT", "Window evidence changed")
                 }
+                try await preflight(context)
                 entered = true
                 return try await dispatch(context)
             }
@@ -547,6 +646,17 @@ private extension NativeService {
         } catch {
             return .failure(command: command, code: "NATIVE_FAILURE", message: "Native command failed",
                             details: attachingStatus(nil, entered))
+        }
+    }
+}
+
+private extension WireCommand {
+    /// Commands whose failure may carry a `mutationStatus` — input may reach
+    /// the desktop. Read-only commands never report one.
+    var mutatesDesktop: Bool {
+        switch self {
+        case .press, .setValue, .type, .key, .scroll, .click, .move, .drag: return true
+        case .doctor, .apps, .windows, .snapshot, .screenshot: return false
         }
     }
 }

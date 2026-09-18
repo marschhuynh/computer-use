@@ -20,7 +20,7 @@ describe('CLI output', () => {
 
   it.each([
     ['NATIVE_FAILURE', 1], ['INVALID_ARGUMENT', 2], ['MISSING_HELPER', 3],
-    ['PERMISSION_DENIED', 4], ['STALE_SNAPSHOT', 5], ['TIMEOUT', 6], ['INTERRUPTED', 130],
+    ['PERMISSION_DENIED', 4], ['STALE_SNAPSHOT', 5], ['FOCUS_FAILED', 5], ['TIMEOUT', 6], ['INTERRUPTED', 130],
   ])('maps %s to exit %s', (code, expected) => {
     const reply: Reply = { schemaVersion: 1, ok: false, error: { code, message: 'failed' } };
     expect(exitCode(reply)).toBe(expected);

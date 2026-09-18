@@ -12,8 +12,16 @@ public protocol NativeInputDriver {
     /// Post a key/modifier chord globally via the HID event tap — it lands on
     /// whatever holds keyboard focus, like real hardware input.
     func postGlobalKey(_ chord: String, context: CommandContext) throws
+    /// Post a key/modifier chord to whatever currently holds keyboard focus,
+    /// via the HID event tap. Used by targeted key/type so input reaches
+    /// panel- and helper-hosted UI that does not share the app's event queue.
+    func postFocusedKey(_ chord: String, context: CommandContext) throws
     /// Post Unicode text to a pid's focused element.
     func postText(_ text: String, to pid: Int, context: CommandContext) throws
+    /// Post Unicode text to whatever currently holds keyboard focus, via the
+    /// HID event tap — the text counterpart of `postFocusedKey`, so targeted
+    /// `type` reaches panel- and helper-hosted UI.
+    func postFocusedText(_ text: String, context: CommandContext) throws
     /// Scroll — either a direction in the resolved window, or scroll-to-ref.
     /// `at element` selects scroll-to-ref (AXScrollToVisible); `at point` is the
     /// screen location the directional scroll is delivered to.
@@ -48,11 +56,22 @@ public final class NativeInput {
         try driver.performAXAction("AXSetValue:\(text)", on: element, context: context)
     }
 
-    public func key(_ chord: String, to pid: Int, context: CommandContext) throws {
+    public enum KeyDelivery {
+        /// Post to the app's own event queue (reaches background apps, not panels).
+        case process
+        /// Post to the HID tap so the event lands on whatever holds focus (reaches
+        /// panels and helper-hosted UI; the target must be focused).
+        case focused
+    }
+
+    public func key(_ chord: String, to pid: Int, delivery: KeyDelivery, context: CommandContext) throws {
         guard KeyChord.isValid(chord) else {
             throw NativeFailure("INVALID_ARGUMENT", "Unrecognized key/modifier combination")
         }
-        try driver.postKey(chord, to: pid, context: context)
+        switch delivery {
+        case .focused: try driver.postFocusedKey(chord, context: context)
+        case .process: try driver.postKey(chord, to: pid, context: context)
+        }
     }
 
     public func globalKey(_ chord: String, context: CommandContext) throws {
@@ -62,8 +81,20 @@ public final class NativeInput {
         try driver.postGlobalKey(chord, context: context)
     }
 
-    public func type(_ text: String, to pid: Int, context: CommandContext) throws {
-        try driver.postText(text, to: pid, context: context)
+    /// Targetless `type`: text goes to the HID tap and lands on whatever
+    /// holds keyboard focus — the text counterpart of `globalKey`.
+    public func globalText(_ text: String, context: CommandContext) throws {
+        try driver.postFocusedText(text, context: context)
+    }
+
+    /// `delivery` is required (no default): `.focused` without the caller
+    /// having activated the pid types into whatever holds focus, so the mode
+    /// must always be chosen explicitly.
+    public func type(_ text: String, to pid: Int, delivery: KeyDelivery, context: CommandContext) throws {
+        switch delivery {
+        case .focused: try driver.postFocusedText(text, context: context)
+        case .process: try driver.postText(text, to: pid, context: context)
+        }
     }
 
     public func scroll(direction: String, amount: Int, at element: LiveAXElement?, point: CGPoint?, context: CommandContext) throws {
@@ -155,8 +186,6 @@ public final class LiveInputDriver: NativeInputDriver {
 
     public func postKey(_ chord: String, to pid: Int, context: CommandContext) throws {
         try context.check()
-        // AXUIElementPostKeyboardEvent posts to the app without changing focus.
-        let app = AXUIElementCreateApplication(pid_t(pid))
         // Parse chord into a virtual key + modifier mask; post key down + up.
         guard let (key, modifiers) = KeyChord.toCGEvent(chord) else {
             throw NativeFailure("INVALID_ARGUMENT", "Unrecognized key/modifier combination")
@@ -169,12 +198,19 @@ public final class LiveInputDriver: NativeInputDriver {
         up.flags = modifiers
         down.postToPid(pid_t(pid))
         up.postToPid(pid_t(pid))
-        _ = app
+    }
+
+    public func postFocusedKey(_ chord: String, context: CommandContext) throws {
+        try postKeyToTap(chord, context: context)
     }
 
     public func postGlobalKey(_ chord: String, context: CommandContext) throws {
+        try postKeyToTap(chord, context: context)
+    }
+
+    private func postKeyToTap(_ chord: String, context: CommandContext) throws {
         try context.check()
-        // No target: the chord goes to the HID event tap so it reaches whatever
+        // The chord goes to the HID event tap so it reaches whatever
         // currently holds keyboard focus, like real hardware input.
         guard let (key, modifiers) = KeyChord.toCGEvent(chord) else {
             throw NativeFailure("INVALID_ARGUMENT", "Unrecognized key/modifier combination")
@@ -207,6 +243,25 @@ public final class LiveInputDriver: NativeInputDriver {
             event.postToPid(pid_t(pid))
             guard let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { continue }
             up.postToPid(pid_t(pid))
+            usleep(4_000)
+        }
+    }
+
+    /// Post Unicode text to the HID event tap so it lands on whatever holds
+    /// keyboard focus — including panels and helper-hosted UI that does not
+    /// share the target's event queue. Same per-scalar pacing as `postText`.
+    public func postFocusedText(_ text: String, context: CommandContext) throws {
+        try context.check()
+        for scalar in text.unicodeScalars {
+            try context.check()
+            var utf16 = Array(String(scalar).utf16)
+            guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else {
+                throw NativeFailure("NATIVE_FAILURE", "Unable to construct text event")
+            }
+            event.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
+            event.post(tap: .cghidEventTap)
+            guard let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { continue }
+            up.post(tap: .cghidEventTap)
             usleep(4_000)
         }
     }
