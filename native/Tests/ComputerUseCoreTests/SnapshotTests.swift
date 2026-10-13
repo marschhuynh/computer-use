@@ -215,6 +215,7 @@ final class SnapshotTests: XCTestCase {
                 _ = context
                 return AXTreeObservation(snapshot: live, liveElements: [2: LiveAXElement()])
             },
+            prepareSnapshot: { _, _ in },
             validateTarget: { identity, context in
                 _ = identity
                 _ = context
@@ -271,6 +272,7 @@ final class SnapshotTests: XCTestCase {
                     _ = context
                     return AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
                 },
+                prepareSnapshot: { _, _ in },
                 validateTarget: { identity, context in
                     _ = identity
                     _ = context
@@ -331,6 +333,7 @@ final class SnapshotTests: XCTestCase {
                 _ = context
                 return AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
             },
+            prepareSnapshot: { _, _ in },
             validateTarget: { identity, context in
                 _ = identity
                 _ = context
@@ -386,6 +389,7 @@ final class SnapshotTests: XCTestCase {
                     _ = context
                     return AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
                 },
+                prepareSnapshot: { _, _ in },
                 validateTarget: { identity, context in
                     _ = identity
                     _ = context
@@ -434,6 +438,7 @@ final class SnapshotTests: XCTestCase {
                 _ = context
                 return AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
             },
+            prepareSnapshot: { _, _ in },
             validateTarget: { identity, context in
                 _ = identity
                 _ = context
@@ -494,6 +499,7 @@ final class SnapshotTests: XCTestCase {
                 _ = context
                 return AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
             },
+            prepareSnapshot: { _, _ in },
             validateTarget: { identity, context in
                 _ = identity
                 _ = context
@@ -556,6 +562,7 @@ final class SnapshotTests: XCTestCase {
                     _ = context
                     return AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()])
                 },
+                prepareSnapshot: { _, _ in },
                 validateTarget: { identity, context in
                     _ = identity
                     _ = context
@@ -593,6 +600,49 @@ final class SnapshotTests: XCTestCase {
         }
     }
 
+    func testShippingPreparationDefaultRemainsExplicitlyNoOp() throws {
+        // Inspect the release gate without executing a default that a future
+        // candidate might wire to live AX against a fixture PID.
+        let native = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(contentsOf: native.appendingPathComponent("Sources/ComputerUseCore/SnapshotService.swift"))
+        XCTAssertTrue(source.contains("prepareSnapshot: @escaping PrepareSnapshot = { _, _ in }"))
+        XCTAssertFalse(source.contains("AXSnapshotPreparation."))
+    }
+
+    func testZeroRefSnapshotPreparesOnceWithoutAutomaticScreenshot() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let snapshot = try presentationSnapshot(zeroRefTextInput())
+        let store = StateStore(rootURL: root)
+        var preparations = 0
+        let service = SnapshotService(
+            lock: DesktopLock(rootURL: root), store: store,
+            resolve: { _, _ in snapshot.target },
+            observe: { _, _, _ in AXTreeObservation(snapshot: snapshot, liveElements: [:]) },
+            prepareSnapshot: { _, _ in preparations += 1 },
+            validateTarget: { _, _ in snapshot.target }
+        )
+        let native = NativeService(snapshotService: service,
+            captureService: CaptureService(capturer: { _, _, _ in
+                XCTFail("zero refs must not trigger an automatic screenshot")
+                throw NativeFailure("NATIVE_FAILURE", "unexpected capture")
+            }, store: store))
+        let request = try XCTUnwrap(WireRequest.decode([
+            "schemaVersion": 1, "command": "snapshot", "target": ["pid": 42, "windowId": 7],
+            "tree": ["maxDepth": 8, "maxElements": 500, "hintMode": "leafCompact"],
+            "options": ["timeoutMs": 1_000, "cursor": "off"]
+        ]))
+        let command = snapshotCommandContext(wallNow: Date(timeIntervalSince1970: 1_789_000_000))
+        let reply = await native.execute(request, context: command)
+        XCTAssertTrue(reply.ok, "\(String(describing: reply.error))")
+        XCTAssertEqual(preparations, 1)
+        XCTAssertTrue(snapshot.evidence.refs.isEmpty)
+        guard case let .string(id)? = reply.data?["snapshotId"] else { return XCTFail("missing snapshot ID") }
+        XCTAssertEqual(try store.readSnapshot(id: id, context: command).evidence, snapshot.evidence)
+        XCTAssertNil(reply.data?["captureId"])
+    }
+
     func testSnapshotNativeDispatchUsesInjectedPureObservation() async throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -614,6 +664,7 @@ final class SnapshotTests: XCTestCase {
                 _ = context
                 return AXTreeObservation(snapshot: fixture, liveElements: [:])
             },
+            prepareSnapshot: { _, _ in },
             validateTarget: { _, _ in fixture.target }
         )
         let native = NativeService(snapshotService: service)
@@ -658,7 +709,9 @@ final class SnapshotTests: XCTestCase {
                     "Injected observation failure",
                     details: ["mutationStatus": .string("notStarted"), "safe": .string("kept")]
                 )
-            }
+            },
+            prepareSnapshot: { _, _ in },
+            validateTarget: { _, _ in fixture.target }
         )
         let request = try XCTUnwrap(WireRequest.decode([
             "schemaVersion": 1,

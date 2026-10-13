@@ -123,6 +123,7 @@ final class ForegroundExecutionTests: XCTestCase {
     func testKeyWithoutTargetPostsGlobally() async throws {
         let recorder = Recorder()
         let service = NativeService(
+            snapshotService: SnapshotService(prepareSnapshot: { _, _ in }),
             desktopLock: DesktopLock(rootURL: temporaryStateRoot()),
             input: NativeInput(driver: RecordingDriver(recorder))
         )
@@ -149,6 +150,7 @@ final class ForegroundExecutionTests: XCTestCase {
     func testGlobalTypePostsToHIDTap() async throws {
         let recorder = Recorder()
         let service = NativeService(
+            snapshotService: SnapshotService(prepareSnapshot: { _, _ in }),
             desktopLock: DesktopLock(rootURL: temporaryStateRoot()),
             input: NativeInput(driver: RecordingDriver(recorder))
         )
@@ -303,6 +305,7 @@ final class ForegroundExecutionTests: XCTestCase {
             cg: CGWindowMetadata(id: 7, title: "Draft", bounds: bounds, onScreen: true, minimized: false)
         )
         let service = NativeService(
+            snapshotService: SnapshotService(prepareSnapshot: { _, _ in }),
             desktopLock: DesktopLock(rootURL: temporaryStateRoot()),
             targetResolver: TargetResolver(provider: TargetResolverProvider(
                 listApplications: {
@@ -337,6 +340,7 @@ final class ForegroundExecutionTests: XCTestCase {
         XCTAssertEqual(targeted.data?["verification"], .string("dispatched"))
 
         let bare = NativeService(
+            snapshotService: SnapshotService(prepareSnapshot: { _, _ in }),
             desktopLock: DesktopLock(rootURL: temporaryStateRoot()),
             input: NativeInput(driver: RecordingDriver(Recorder()))
         )
@@ -391,6 +395,7 @@ final class ForegroundExecutionTests: XCTestCase {
         // notStarted rather than potentiallyApplied.
         let recorder = Recorder()
         let service = NativeService(
+            snapshotService: SnapshotService(prepareSnapshot: { _, _ in }),
             desktopLock: DesktopLock(rootURL: temporaryStateRoot()),
             input: NativeInput(driver: RecordingDriver(recorder))
         )
@@ -408,6 +413,7 @@ final class ForegroundExecutionTests: XCTestCase {
         // ever posted.
         let recorder = Recorder()
         let service = NativeService(
+            snapshotService: SnapshotService(prepareSnapshot: { _, _ in }),
             desktopLock: DesktopLock(rootURL: temporaryStateRoot()),
             targetResolver: TargetResolver(provider: TargetResolverProvider(
                 listApplications: { [] },

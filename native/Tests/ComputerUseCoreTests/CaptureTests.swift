@@ -292,6 +292,7 @@ final class CaptureTests: XCTestCase {
         capturer: @escaping (ResolvedTarget) -> CapturedImage
     ) -> NativeService {
         NativeService(
+            snapshotService: SnapshotService(prepareSnapshot: { _, _ in XCTFail("plain screenshots must not prepare AX") }),
             targetResolver: TargetResolver(provider: displayStubProvider()),
             store: StateStore(rootURL: temporaryStateRoot()),
             captureService: CaptureService(
@@ -314,10 +315,15 @@ final class CaptureTests: XCTestCase {
         ])
         let options = TreeOptions(maxDepth: 8, maxElements: 500, hintMode: .leafCompact)
         let snapshot = AXTree.snapshot(target: resolved, options: options, root: root)
+        var preparationCount = 0
         let snapshotService = SnapshotService(
             lock: DesktopLock(rootURL: dir), store: store,
             resolve: { _, _ in resolved },
             observe: { _, _, _ in AXTreeObservation(snapshot: snapshot, liveElements: [:]) },
+            prepareSnapshot: { target, _ in
+                XCTAssertEqual(target, resolved)
+                preparationCount += 1
+            },
             validateTarget: { _, _ in resolved }
         )
         let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 600,
@@ -337,6 +343,7 @@ final class CaptureTests: XCTestCase {
             $0["output"] = dir.appendingPathComponent("annotated.png").path
         }, context: context())
         XCTAssertTrue(reply.ok, "\(String(describing: reply.error))")
+        XCTAssertEqual(preparationCount, 1)
         let data = try XCTUnwrap(reply.data)
         XCTAssertEqual(data["coverage"], .object([
             "scope": .string("selectedWindow"), "absenceIsConclusive": .bool(false),
@@ -369,6 +376,7 @@ final class CaptureTests: XCTestCase {
             $0["output"] = dir.appendingPathComponent("unannotated.png").path
         }, context: context())
         XCTAssertTrue(unannotated.ok)
+        XCTAssertEqual(preparationCount, 1, "plain screenshot must not prepare again")
         XCTAssertNil(unannotated.data?["coverage"])
         XCTAssertNil(unannotated.data?["tree"])
         XCTAssertNil(unannotated.data?["snapshotId"])
@@ -474,6 +482,7 @@ final class CaptureTests: XCTestCase {
         lock: DesktopLock
     ) -> NativeService {
         NativeService(
+            snapshotService: SnapshotService(prepareSnapshot: { _, _ in }),
             desktopLock: lock,
             targetResolver: TargetResolver(provider: TargetResolverProvider(
                 listApplications: { [] },

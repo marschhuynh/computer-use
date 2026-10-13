@@ -22,6 +22,7 @@ public struct SnapshotResult {
 public final class SnapshotService {
     public typealias Resolve = (TargetSelector, CommandContext) async throws -> ResolvedTarget
     public typealias Observe = (ResolvedTarget, TreeOptions, CommandContext) async throws -> AXTreeObservation
+    public typealias PrepareSnapshot = (ResolvedTarget, CommandContext) async throws -> Void
     public typealias ValidateTarget = (TargetIdentity, CommandContext) async throws -> ResolvedTarget
     public typealias PrepareForeground = (ResolvedTarget, LiveAXElement, CommandContext) async throws -> Void
     public typealias PrepareElement = (LiveAXElement, CommandContext) async throws -> Void
@@ -32,6 +33,7 @@ public final class SnapshotService {
     private let store: StateStore
     private let resolve: Resolve
     private let observe: Observe
+    private let prepareSnapshot: PrepareSnapshot
     private let validateTarget: ValidateTarget
     private let sameLiveElement: AXElementIdentity
     private let prepareForeground: PrepareForeground
@@ -46,6 +48,8 @@ public final class SnapshotService {
         observe: @escaping Observe = { target, options, context in
             try AXTree.capture(target: target, options: options, context: context)
         },
+        // Live AX preparation remains gated; shipping snapshots do not opt in.
+        prepareSnapshot: @escaping PrepareSnapshot = { _, _ in },
         validateTarget: @escaping ValidateTarget = { identity, context in
             try await TargetResolver().validate(identity, context: context)
         },
@@ -57,6 +61,7 @@ public final class SnapshotService {
         self.store = store
         self.resolve = resolve
         self.observe = observe
+        self.prepareSnapshot = prepareSnapshot
         self.validateTarget = validateTarget
         self.sameLiveElement = sameLiveElement ?? liveAXElementsAreIdentical
         self.prepareForeground = prepareForeground
@@ -74,8 +79,21 @@ public final class SnapshotService {
         return try await lock.withLock(context: context) {
             try context.check()
             try store.sweep(context: context)
+            try context.check()
             let target = try await resolve(selector, context)
             try context.check()
+            let beforePreparation = try await validateTarget(target.identity, context)
+            try context.check()
+            guard beforePreparation == target else {
+                throw NativeFailure("STALE_SNAPSHOT", "Target changed before snapshot preparation")
+            }
+            try await prepareSnapshot(target, context)
+            try context.check()
+            let afterPreparation = try await validateTarget(target.identity, context)
+            try context.check()
+            guard afterPreparation == target else {
+                throw NativeFailure("STALE_SNAPSHOT", "Target changed during snapshot preparation")
+            }
             let observation = try await observe(target, options, context)
             try context.check()
             let refreshed = try await validateTarget(

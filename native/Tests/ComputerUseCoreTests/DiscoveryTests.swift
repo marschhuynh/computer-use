@@ -12,6 +12,7 @@ final class DiscoveryTests: XCTestCase {
             ProcessMetadata(name: "NoBundle", pid: 44, launchDate: nil, bundleId: nil),
         ]
         let service = NativeService(
+            snapshotService: SnapshotService(prepareSnapshot: { _, _ in }),
             targetResolver: TargetResolver(provider: TargetResolverProvider(
                 listApplications: { apps },
                 windowsForPID: { _, _ in [] },
@@ -74,6 +75,7 @@ final class DiscoveryTests: XCTestCase {
             ),
         ]
         let service = NativeService(
+            snapshotService: SnapshotService(prepareSnapshot: { _, _ in }),
             targetResolver: TargetResolver(provider: TargetResolverProvider(
                 listApplications: { [ProcessMetadata(name: "Editor", pid: 42, launchDate: nil, bundleId: nil)] },
                 windowsForPID: { _, _ in windows },
@@ -110,6 +112,7 @@ final class DiscoveryTests: XCTestCase {
             )
         }
         let service = NativeService(
+            snapshotService: SnapshotService(prepareSnapshot: { _, _ in }),
             targetResolver: TargetResolver(provider: TargetResolverProvider(
                 listApplications: { [ProcessMetadata(name: "Editor", pid: 42, launchDate: nil, bundleId: nil)] },
                 windowsForPID: { _, _ in windows },
@@ -123,6 +126,7 @@ final class DiscoveryTests: XCTestCase {
 
     func testWindowsFailsWhenAppSelectionNotUnique() async throws {
         let service = NativeService(
+            snapshotService: SnapshotService(prepareSnapshot: { _, _ in }),
             targetResolver: TargetResolver(provider: TargetResolverProvider(
                 listApplications: {
                     [
@@ -141,6 +145,7 @@ final class DiscoveryTests: XCTestCase {
 
     func testWindowsFailsWhenAppNotFound() async throws {
         let service = NativeService(
+            snapshotService: SnapshotService(prepareSnapshot: { _, _ in }),
             targetResolver: TargetResolver(provider: TargetResolverProvider(
                 listApplications: { [] },
                 windowsForPID: { _, _ in [] },
@@ -155,7 +160,7 @@ final class DiscoveryTests: XCTestCase {
     // MARK: - doctor
 
     func testDoctorReadyIsComputedFromChecks() async throws {
-        let service = NativeService(environment: DoctorEnvironment(
+        let service = NativeService(snapshotService: SnapshotService(prepareSnapshot: { _, _ in }), environment: DoctorEnvironment(
             accessibilityTrusted: true,
             screenRecordingTrusted: true
         ))
@@ -168,7 +173,7 @@ final class DiscoveryTests: XCTestCase {
     }
 
     func testDoctorNotReadyWhenACheckIsNotOk() async throws {
-        let service = NativeService(environment: DoctorEnvironment(
+        let service = NativeService(snapshotService: SnapshotService(prepareSnapshot: { _, _ in }), environment: DoctorEnvironment(
             accessibilityTrusted: false,
             screenRecordingTrusted: true
         ))

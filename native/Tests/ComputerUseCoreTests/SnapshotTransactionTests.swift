@@ -6,18 +6,188 @@ import XCTest
 final class SnapshotTransactionTests: XCTestCase {
     private let wall = Date(timeIntervalSince1970: 1_788_861_900)
 
+    func testPreparationIsBracketedByIdentityChecksBeforeObservation() async throws {
+        let root = transactionRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let snapshot = try transactionFixture("save-cancel")
+        let command = context()
+        var phases: [String] = []
+        var lockHeld = false
+        let lock = DesktopLock(rootURL: root, flock: { descriptor, operation in
+            let value = flock(descriptor, operation)
+            if value == 0 { lockHeld = operation != LOCK_UN }
+            return SystemCallResult(value: value, error: value < 0 ? errno : 0)
+        })
+        let service = SnapshotService(
+            lock: lock, store: StateStore(rootURL: root),
+            resolve: { _, _ in phases.append("resolve"); return snapshot.target },
+            observe: { _, _, _ in
+                phases.append("observe")
+                return AXTreeObservation(snapshot: snapshot, liveElements: [:])
+            },
+            prepareSnapshot: { target, context in
+                XCTAssertTrue(lockHeld)
+                XCTAssertEqual(target, snapshot.target)
+                XCTAssertTrue(context === command)
+                phases.append("prepare")
+            },
+            validateTarget: { identity, context in
+                XCTAssertEqual(identity, snapshot.target.identity)
+                XCTAssertTrue(context === command)
+                phases.append("validate")
+                return snapshot.target
+            }
+        )
+        _ = try await service.snapshot(selector: .pid(42, windowId: 7),
+            options: snapshot.treeOptions, context: command)
+        XCTAssertEqual(phases, ["resolve", "validate", "prepare", "validate", "observe", "validate"])
+        XCTAssertFalse(lockHeld)
+    }
+
+    func testPreparationRejectsChangedProcessOrWindowBeforeAndAfterHook() async throws {
+        let snapshot = try transactionFixture("save-cancel")
+        let changedWindowID = ResolvedTarget(
+            identity: TargetIdentity(pid: snapshot.target.identity.pid,
+                launchDate: snapshot.target.identity.launchDate,
+                bundleId: snapshot.target.identity.bundleId,
+                windowId: snapshot.target.identity.windowId + 1),
+            title: snapshot.target.title, bounds: snapshot.target.bounds
+        )
+        let changedBounds = ResolvedTarget(identity: snapshot.target.identity,
+            title: snapshot.target.title,
+            bounds: WindowBounds(x: 1, y: 2, width: 300, height: 400))
+        for changed in [changedLaunchTarget(snapshot.target), changedWindowID,
+                        changedWindowTarget(snapshot.target), changedBounds] {
+            for changedAt in [1, 2] {
+                let root = transactionRoot()
+                defer { try? FileManager.default.removeItem(at: root) }
+                var validations = 0
+                var phases: [String] = []
+                let service = SnapshotService(
+                    lock: DesktopLock(rootURL: root), store: StateStore(rootURL: root),
+                    resolve: { _, _ in snapshot.target },
+                    observe: { _, _, _ in
+                        phases.append("observe")
+                        return AXTreeObservation(snapshot: snapshot, liveElements: [:])
+                    },
+                    prepareSnapshot: { _, _ in phases.append("prepare") },
+                    validateTarget: { identity, _ in
+                        XCTAssertEqual(identity, snapshot.target.identity)
+                        validations += 1
+                        phases.append("validate")
+                        return validations == changedAt ? changed : snapshot.target
+                    }
+                )
+                await assertTransactionFailure("STALE_SNAPSHOT") {
+                    try await service.snapshot(selector: .pid(42, windowId: 7),
+                        options: snapshot.treeOptions, context: self.context())
+                }
+                XCTAssertEqual(phases, changedAt == 1 ? ["validate"] : ["validate", "prepare", "validate"])
+                let snapshots = root.appendingPathComponent("snapshots")
+                XCTAssertEqual((try? FileManager.default.contentsOfDirectory(atPath: snapshots.path)) ?? [], [])
+            }
+        }
+    }
+
+    func testCancellationOrDeadlineAtEachSnapshotPhaseStopsBeforeNextPhase() async throws {
+        let snapshot = try transactionFixture("save-cancel")
+        let orderedPhases = ["resolve", "validate-before", "prepare", "validate-after", "observe", "validate-final"]
+        for code in ["INTERRUPTED", "TIMEOUT"] {
+            for stoppedAt in orderedPhases {
+                let root = transactionRoot()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let ticks = LockedUInt64(0)
+                let command = context(timeoutMilliseconds: 1, monotonicNow: { ticks.value })
+                var phases: [String] = []
+                var validations = 0
+                func phase(_ name: String) {
+                    phases.append(name)
+                    if name == stoppedAt {
+                        if code == "INTERRUPTED" { command.cancel() }
+                        else { ticks.value = command.deadline }
+                    }
+                }
+                let service = SnapshotService(
+                    lock: DesktopLock(rootURL: root), store: StateStore(rootURL: root),
+                    resolve: { _, _ in phase("resolve"); return snapshot.target },
+                    observe: { _, _, _ in
+                        phase("observe")
+                        return AXTreeObservation(snapshot: snapshot, liveElements: [:])
+                    },
+                    prepareSnapshot: { _, _ in phase("prepare") },
+                    validateTarget: { _, _ in
+                        let name = ["validate-before", "validate-after", "validate-final"][validations]
+                        validations += 1
+                        phase(name)
+                        return snapshot.target
+                    }
+                )
+                await assertTransactionFailure(code, message: stoppedAt) {
+                    try await service.snapshot(selector: .pid(42, windowId: 7),
+                        options: snapshot.treeOptions, context: command)
+                }
+                let stopIndex = try XCTUnwrap(orderedPhases.firstIndex(of: stoppedAt))
+                XCTAssertEqual(phases, Array(orderedPhases.prefix(stopIndex + 1)), "\(code) at \(stoppedAt)")
+                let snapshots = root.appendingPathComponent("snapshots")
+                XCTAssertEqual((try? FileManager.default.contentsOfDirectory(atPath: snapshots.path)) ?? [], [])
+            }
+        }
+    }
+
+    func testMappedPreparationFailuresDoNotObserveOrPublish() async throws {
+        let snapshot = try transactionFixture("save-cancel")
+        for code in ["NATIVE_FAILURE", "PERMISSION_DENIED", "TIMEOUT", "INTERRUPTED"] {
+            let root = transactionRoot()
+            defer { try? FileManager.default.removeItem(at: root) }
+            var phases: [String] = []
+            let expected = NativeFailure(code, "injected preparation failure", details: ["safe": .string("kept")])
+            let service = SnapshotService(
+                lock: DesktopLock(rootURL: root), store: StateStore(rootURL: root),
+                resolve: { _, _ in snapshot.target },
+                observe: { _, _, _ in
+                    phases.append("observe")
+                    return AXTreeObservation(snapshot: snapshot, liveElements: [:])
+                },
+                prepareSnapshot: { _, _ in
+                    phases.append("prepare")
+                    throw expected
+                },
+                validateTarget: { _, _ in phases.append("validate"); return snapshot.target }
+            )
+            let failure = await captureTransactionFailure {
+                try await service.snapshot(selector: .pid(42, windowId: 7),
+                    options: snapshot.treeOptions, context: self.context())
+            }
+            XCTAssertEqual(failure?.code, expected.code)
+            XCTAssertEqual(failure?.message, expected.message)
+            XCTAssertEqual(failure?.details, expected.details)
+            XCTAssertEqual(phases, ["validate", "prepare"])
+            let snapshots = root.appendingPathComponent("snapshots")
+            XCTAssertEqual((try? FileManager.default.contentsOfDirectory(atPath: snapshots.path)) ?? [], [])
+        }
+    }
+
     func testSnapshotRefreshesIdentityAfterObservationBeforePublishing() async throws {
         let root = transactionRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let snapshot = try transactionFixture("save-cancel")
         let changed = changedLaunchTarget(snapshot.target)
+        var observations = 0
+        var validations = 0
         let store = StateStore(rootURL: root)
         let service = SnapshotService(
             lock: DesktopLock(rootURL: root),
             store: store,
             resolve: { _, _ in snapshot.target },
-            observe: { _, _, _ in AXTreeObservation(snapshot: snapshot, liveElements: [:]) },
-            validateTarget: { _, _ in changed },
+            observe: { _, _, _ in
+                observations += 1
+                return AXTreeObservation(snapshot: snapshot, liveElements: [:])
+            },
+            prepareSnapshot: { _, _ in },
+            validateTarget: { _, _ in
+                validations += 1
+                return validations <= 2 ? snapshot.target : changed
+            },
             prepareElement: { _, _ in }
         )
         await assertTransactionFailure("STALE_SNAPSHOT") {
@@ -27,6 +197,8 @@ final class SnapshotTransactionTests: XCTestCase {
                 context: self.context()
             )
         }
+        XCTAssertEqual(observations, 1)
+        XCTAssertEqual(validations, 3)
         let snapshots = root.appendingPathComponent("snapshots")
         XCTAssertEqual((try? FileManager.default.contentsOfDirectory(atPath: snapshots.path)) ?? [], [])
     }
@@ -55,6 +227,7 @@ final class SnapshotTransactionTests: XCTestCase {
                     liveElements: [2: observes == 1 ? first : second]
                 )
             },
+            prepareSnapshot: { _, _ in XCTFail("action must not prepare AX") },
             validateTarget: { _, _ in
                 validates += 1
                 phases.append("validate-\(validates)")
@@ -218,6 +391,7 @@ final class SnapshotTransactionTests: XCTestCase {
                     liveElements: [2: LiveAXElement()]
                 )
             },
+            prepareSnapshot: { _, _ in },
             validateTarget: { _, _ in snapshot.target },
             sameLiveElement: { _, _ in true },
             prepareForeground: { _, _, _ in ticks.value = context.deadline },
@@ -254,6 +428,7 @@ final class SnapshotTransactionTests: XCTestCase {
             lock: DesktopLock(rootURL: root),
             store: store,
             observe: { _, _, _ in AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()]) },
+            prepareSnapshot: { _, _ in },
             validateTarget: { _, _ in
                 validations += 1
                 return validations >= 3 ? changedLaunchTarget(snapshot.target) : snapshot.target
@@ -299,6 +474,7 @@ final class SnapshotTransactionTests: XCTestCase {
                     let value = mode == "tree" && observations == 2 ? after : before
                     return AXTreeObservation(snapshot: value, liveElements: [2: LiveAXElement()])
                 },
+                prepareSnapshot: { _, _ in },
                 validateTarget: { _, _ in
                     validations += 1
                     guard validations >= 4 else { return before.target }
@@ -336,6 +512,7 @@ final class SnapshotTransactionTests: XCTestCase {
             lock: DesktopLock(rootURL: root),
             store: store,
             observe: { _, _, _ in AXTreeObservation(snapshot: snapshot, liveElements: [2: LiveAXElement()]) },
+            prepareSnapshot: { _, _ in },
             validateTarget: { _, _ in snapshot.target },
             sameLiveElement: { _, _ in false },
             prepareElement: { _, _ in }
@@ -425,6 +602,7 @@ final class SnapshotTransactionTests: XCTestCase {
             store: store,
             resolve: { _, _ in snapshot.target },
             observe: { _, _, _ in AXTreeObservation(snapshot: snapshot, liveElements: [:]) },
+            prepareSnapshot: { _, _ in },
             validateTarget: { _, _ in snapshot.target },
             prepareElement: { _, _ in }
         )
@@ -487,6 +665,7 @@ final class SnapshotTransactionTests: XCTestCase {
                 observations += 1
                 return AXTreeObservation(snapshot: snapshots[index], liveElements: [2: LiveAXElement()])
             },
+            prepareSnapshot: { _, _ in },
             validateTarget: { _, _ in target },
             sameLiveElement: { _, _ in true },
             prepareForeground: { _, _, _ in foreground() },
