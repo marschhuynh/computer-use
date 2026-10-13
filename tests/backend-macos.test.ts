@@ -9,7 +9,6 @@ import { DEFAULT_TIMEOUT_MS, type Request } from '../src/core/protocol.js';
 
 const mockHost = new URL('../fixtures/cli/mock-host.mjs', import.meta.url);
 const snapshotReplyModes = [
-  'snapshot-reply-valid',
   'snapshot-reply-invalid-id',
   'snapshot-reply-invalid-target',
   'snapshot-reply-invalid-tree',
@@ -28,7 +27,7 @@ const modes = [
   'reflected-error-message', 'reflected-error-details', 'reflected-root-error-details',
   'stable-error-code', 'unknown-error-code', 'slow-version', 'mutation-status',
   'target-not-found', 'focus-failed',
-  ...snapshotReplyModes,
+  'snapshot-reply-valid', ...snapshotReplyModes,
 ];
 let fixtureDirectory: string;
 
@@ -73,6 +72,76 @@ function snapshotRequest(): Request {
     target: { app: 'Editor', windowId: 7 },
     tree: { maxDepth: 8, maxElements: 500, hintMode: 'full' },
   };
+}
+
+let replyFixtureSequence = 0;
+async function executeSnapshotReply(reply: unknown, request = snapshotRequest()) {
+  const helper = fixture(`snapshot-reply-case-${replyFixtureSequence++}`);
+  await copyFile(mockHost, helper);
+  await chmod(helper, 0o755);
+  await writeFile(`${helper}.json`, `${JSON.stringify(reply)}\n`, { mode: 0o600 });
+  return new MacOSBackend({ helper }).execute(request, new AbortController().signal);
+}
+
+async function readSnapshotReply(compact = false) {
+  return JSON.parse(await readFile(new URL(
+    compact ? '../contracts/fixtures/snapshot-compact-reply.json' : '../contracts/fixtures/snapshot-reply.json',
+    import.meta.url,
+  ), 'utf8'));
+}
+
+function screenshotRequest(annotated = true): Request {
+  return {
+    schemaVersion: 1, command: 'screenshot', options: { timeoutMs: DEFAULT_TIMEOUT_MS, cursor: 'on' },
+    target: { app: 'Editor', windowId: 7 }, output: '/tmp/capture.png',
+    overwrite: false, native: false, annotated,
+    tree: { maxDepth: 8, maxElements: 500, hintMode: 'full' },
+  };
+}
+
+async function annotatedReply() {
+  const reply = await readSnapshotReply();
+  reply.command = 'screenshot';
+  Object.assign(reply.data, {
+    captureId: '123e4567-e89b-42d3-a456-426614174001', path: '/tmp/capture.png', width: 600, height: 400,
+    createdAt: '2026-09-08T10:00:01.123Z', expiresAt: '2026-09-08T10:10:01.123Z',
+  });
+  return reply;
+}
+
+async function depthBoundaryReply() {
+  const reply = await readSnapshotReply(true);
+  reply.data.tree = { elements: [{ role: 'AXWindow', children: [{ role: 'AXStaticText', title: 'Loading' }] }] };
+  reply.data.truncated = true;
+  reply.data.coverage = {
+    scope: 'selectedWindow', absenceIsConclusive: false,
+    observedNodes: 3, emittedNodes: 2, refCount: 0,
+    limits: { maxDepth: 2, maxElements: 500 },
+    boundaries: [{ path: [0, 0], reason: 'maxDepth', observedChildren: 0, totalChildren: 1 }],
+    noRefReason: 'traversalLimited',
+  };
+  return reply;
+}
+
+async function elementBoundaryReply() {
+  const reply = await depthBoundaryReply();
+  reply.data.coverage.observedNodes = 2;
+  reply.data.coverage.limits = { maxDepth: 8, maxElements: 2 };
+  reply.data.coverage.boundaries = [
+    { path: [0], reason: 'maxElements', observedChildren: 0, totalChildren: 1 },
+    { path: [], reason: 'maxElements', observedChildren: 1, totalChildren: 2 },
+  ];
+  return reply;
+}
+
+// Test only: mutate untrusted wire fields, including removal, before JSON serialization.
+function setWireField(value: unknown, path: string, replacement: unknown) {
+  const keys = path.split('.');
+  const field = keys.pop()!;
+  let parent = value as Record<string, unknown>;
+  for (const key of keys) parent = parent[key] as Record<string, unknown>;
+  if (replacement === undefined) delete parent[field];
+  else parent[field] = replacement;
 }
 
 beforeAll(async () => {
@@ -123,7 +192,36 @@ describe('MacOSBackend', { timeout: 25_000 }, () => {
     await expect(backend.execute(snapshotRequest(), new AbortController().signal)).resolves.toEqual(expected);
   });
 
-  it.each(snapshotReplyModes.filter(mode => mode !== 'snapshot-reply-valid'))(
+  it('rejects a malformed known coverage count in an annotated screenshot', async () => {
+    const reply = await annotatedReply();
+    reply.data.coverage.refCount = 0;
+    await expect(executeSnapshotReply(reply, screenshotRequest())).resolves.toMatchObject({
+      ok: false, error: { code: 'PROTOCOL_ERROR' },
+    });
+  });
+
+  it('preserves original boundary paths after a compact wrapper is collapsed', async () => {
+    const expected = await depthBoundaryReply();
+    const request = { ...snapshotRequest(), tree: { maxDepth: 2, maxElements: 500, hintMode: 'leafCompact' as const } };
+    await expect(executeSnapshotReply(expected, request)).resolves.toEqual(expected);
+  });
+
+  it('rejects a known coverage count that disagrees with the projected tree', async () => {
+    const helper = fixture('snapshot-reply-coverage-count-mismatch');
+    await copyFile(mockHost, helper);
+    await chmod(helper, 0o755);
+    const reply = JSON.parse(await readFile(
+      new URL('../contracts/fixtures/snapshot-reply.json', import.meta.url), 'utf8',
+    ));
+    reply.data.coverage.emittedNodes = 2; // The full fixture has three tree nodes.
+    await writeFile(`${helper}.json`, `${JSON.stringify(reply)}\n`, { mode: 0o600 });
+    const backend = new MacOSBackend({ helper });
+    await expect(backend.execute(snapshotRequest(), new AbortController().signal)).resolves.toMatchObject({
+      ok: false, error: { code: 'PROTOCOL_ERROR' },
+    });
+  });
+
+  it.each(snapshotReplyModes)(
     'rejects malformed snapshot data from %s',
     async mode => {
       const backend = new MacOSBackend({ helper: fixture(mode) });
@@ -135,6 +233,324 @@ describe('MacOSBackend', { timeout: 25_000 }, () => {
       });
     },
   );
+
+  it('accepts the exact compact Swift fixture with all original fields and refs', async () => {
+    const expected = await readSnapshotReply(true);
+    const request = { ...snapshotRequest(), tree: { maxDepth: 8, maxElements: 500, hintMode: 'leafCompact' as const } };
+    await expect(executeSnapshotReply(expected, request)).resolves.toEqual(expected);
+  });
+
+  it.each(['full', 'leafCompact'] as const)('accepts a legacy %s reply without inventing coverage', async hintMode => {
+    const expected = await readSnapshotReply(hintMode === 'leafCompact');
+    delete expected.data.coverage;
+    const request = { ...snapshotRequest(), tree: { maxDepth: 8, maxElements: 500, hintMode } };
+    await expect(executeSnapshotReply(expected, request)).resolves.toEqual(expected);
+  });
+
+  it('retains legacy empty-root behavior only when coverage is absent', async () => {
+    const expected = await readSnapshotReply();
+    delete expected.data.coverage;
+    expected.data.tree.elements = [];
+    await expect(executeSnapshotReply(expected)).resolves.toEqual(expected);
+    expected.data.coverage = {
+      scope: 'selectedWindow', absenceIsConclusive: false, observedNodes: 1, emittedNodes: 0, refCount: 0,
+      limits: { maxDepth: 8, maxElements: 500 }, boundaries: [], noRefReason: 'noEligibleRefs',
+    };
+    await expect(executeSnapshotReply(expected)).resolves.toMatchObject({ ok: false, error: { code: 'PROTOCOL_ERROR' } });
+  });
+
+  it.each(['full', 'leafOnly', 'leafCompact'] as const)('accepts truthful zero-ref root-cap coverage in %s', async hintMode => {
+    const expected = await elementBoundaryReply();
+    const request = { ...snapshotRequest(), tree: { maxDepth: 8, maxElements: 2, hintMode } };
+    await expect(executeSnapshotReply(expected, request)).resolves.toEqual(expected);
+  });
+
+  it('accepts a zero-ref tree with no boundaries and noEligibleRefs', async () => {
+    const expected = await depthBoundaryReply();
+    expected.data.coverage.observedNodes = 2;
+    expected.data.coverage.boundaries = [];
+    expected.data.coverage.noRefReason = 'noEligibleRefs';
+    expected.data.truncated = false;
+    const request = { ...snapshotRequest(), tree: { maxDepth: 2, maxElements: 500, hintMode: 'leafOnly' as const } };
+    await expect(executeSnapshotReply(expected, request)).resolves.toEqual(expected);
+  });
+
+  it.each(['full', 'leafOnly'] as const)('rejects compact count savings when %s was requested', async hintMode => {
+    const reply = await readSnapshotReply(true);
+    const request = { ...snapshotRequest(), tree: { maxDepth: 8, maxElements: 500, hintMode } };
+    await expect(executeSnapshotReply(reply, request)).resolves.toMatchObject({ ok: false, error: { code: 'PROTOCOL_ERROR' } });
+  });
+
+  const missingOrNullCoverageFields = [
+    'scope', 'absenceIsConclusive', 'observedNodes', 'emittedNodes', 'refCount',
+    'limits', 'limits.maxDepth', 'limits.maxElements', 'boundaries',
+  ].flatMap(field => [
+    [`missing ${field}`, `data.coverage.${field}`, undefined],
+    [`null ${field}`, `data.coverage.${field}`, null],
+  ] as const);
+  const invalidNumericCoverageFields = ['observedNodes', 'emittedNodes', 'refCount', 'limits.maxDepth', 'limits.maxElements']
+    .flatMap(field => [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, '3'].map(value =>
+      [`invalid ${field}=${value}`, `data.coverage.${field}`, value] as const));
+  it.each([
+    ...missingOrNullCoverageFields, ...invalidNumericCoverageFields,
+    ['null coverage', 'data.coverage', null],
+    ['array coverage', 'data.coverage', []],
+    ['wrong scope', 'data.coverage.scope', 'wholeDesktop'],
+    ['conclusive absence', 'data.coverage.absenceIsConclusive', true],
+    ['nonboolean absence', 'data.coverage.absenceIsConclusive', 0],
+    ['zero observed', 'data.coverage.observedNodes', 0],
+    ['zero emitted', 'data.coverage.emittedNodes', 0],
+    ['zero depth', 'data.coverage.limits.maxDepth', 0],
+    ['zero cap', 'data.coverage.limits.maxElements', 0],
+    ['depth request mismatch', 'data.coverage.limits.maxDepth', 7],
+    ['cap request mismatch', 'data.coverage.limits.maxElements', 499],
+    ['emitted exceeds observed', 'data.coverage.observedNodes', 2],
+    ['observed exceeds cap', 'data.coverage.observedNodes', 501],
+    ['ref count mismatch', 'data.coverage.refCount', 2],
+    ['refs exceed emitted', 'data.coverage.refCount', 4],
+    ['non-array boundaries', 'data.coverage.boundaries', {}],
+    ['truncated without boundaries', 'data.truncated', true],
+    ['nonboolean truncated', 'data.truncated', 1],
+    ['noRefReason with refs', 'data.coverage.noRefReason', 'noEligibleRefs'],
+    ['null noRefReason with refs', 'data.coverage.noRefReason', null],
+    ['unknown noRefReason with refs', 'data.coverage.noRefReason', 'unknown'],
+  ] as const)('rejects malformed coverage: %s', async (_label, path, replacement) => {
+    const reply = await readSnapshotReply();
+    setWireField(reply, path, replacement);
+    await expect(executeSnapshotReply(reply)).resolves.toMatchObject({ ok: false, error: { code: 'PROTOCOL_ERROR' } });
+  });
+
+  it.each([undefined, null, 'noEligibleRefs', 'unknown'])('rejects zero-ref limited coverage with noRefReason=%s', async reason => {
+    const reply = await depthBoundaryReply();
+    reply.data.coverage.noRefReason = reason;
+    const request = { ...snapshotRequest(), tree: { maxDepth: 2, maxElements: 500, hintMode: 'leafCompact' as const } };
+    await expect(executeSnapshotReply(reply, request)).resolves.toMatchObject({ ok: false, error: { code: 'PROTOCOL_ERROR' } });
+  });
+
+  it.each([undefined, null, 'traversalLimited', 'unknown'])('rejects zero-ref unlimited coverage with noRefReason=%s', async reason => {
+    const reply = await depthBoundaryReply();
+    reply.data.truncated = false;
+    reply.data.coverage.boundaries = [];
+    reply.data.coverage.noRefReason = reason;
+    const request = { ...snapshotRequest(), tree: { maxDepth: 2, maxElements: 500, hintMode: 'leafCompact' as const } };
+    await expect(executeSnapshotReply(reply, request)).resolves.toMatchObject({ ok: false, error: { code: 'PROTOCOL_ERROR' } });
+  });
+
+  const invalidBoundaryFields = ['path', 'reason', 'observedChildren', 'totalChildren'].flatMap(field => [
+    [`missing ${field}`, `data.coverage.boundaries.0.${field}`, undefined],
+    [`null ${field}`, `data.coverage.boundaries.0.${field}`, null],
+  ] as const);
+  const invalidBoundaryCounts = ['observedChildren', 'totalChildren'].flatMap(field =>
+    [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, '1'].map(value =>
+      [`invalid ${field}=${value}`, `data.coverage.boundaries.0.${field}`, value] as const));
+  it.each([
+    ...invalidBoundaryFields, ...invalidBoundaryCounts,
+    ['null boundary', 'data.coverage.boundaries.0', null],
+    ['non-array path', 'data.coverage.boundaries.0.path', '0'],
+    ['negative index', 'data.coverage.boundaries.0.path', [-1]],
+    ['fractional index', 'data.coverage.boundaries.0.path', [0.5]],
+    ['unsafe index', 'data.coverage.boundaries.0.path', [Number.MAX_SAFE_INTEGER + 1]],
+    ['non-number index', 'data.coverage.boundaries.0.path', ['0']],
+    ['index equals observedNodes', 'data.coverage.boundaries.0.path', [3]],
+    ['path exceeds maxDepth', 'data.coverage.boundaries.0.path', [0, 0, 0]],
+    ['depth boundary above maxDepth', 'data.coverage.boundaries.0.path', [0]],
+    ['depth boundary observed a child', 'data.coverage.boundaries.0',
+      { path: [0, 0], reason: 'maxDepth', observedChildren: 1, totalChildren: 2 }],
+    ['no unobserved children', 'data.coverage.boundaries.0.totalChildren', 0],
+    ['unknown reason', 'data.coverage.boundaries.0.reason', 'timeout'],
+    ['element boundary at maxDepth', 'data.coverage.boundaries.0.reason', 'maxElements'],
+    ['boundary without truncated', 'data.truncated', false],
+  ] as const)('rejects malformed depth boundary: %s', async (_label, path, replacement) => {
+    const reply = await depthBoundaryReply();
+    setWireField(reply, path, replacement);
+    const request = { ...snapshotRequest(), tree: { maxDepth: 2, maxElements: 500, hintMode: 'leafCompact' as const } };
+    await expect(executeSnapshotReply(reply, request)).resolves.toMatchObject({ ok: false, error: { code: 'PROTOCOL_ERROR' } });
+  });
+
+  it.each([
+    ['duplicate paths', 'data.coverage.boundaries.0.path', []],
+    ['path length equals observedNodes', 'data.coverage.boundaries.0.path', [0, 0]],
+    ['observedChildren equals observedNodes', 'data.coverage.boundaries.0',
+      { path: [0], reason: 'maxElements', observedChildren: 2, totalChildren: 3 }],
+    ['observedChildren exceeds totalChildren', 'data.coverage.boundaries.0.observedChildren', 2],
+    ['boundary count exceeds observedNodes', 'data.coverage.boundaries', [
+      { path: [0], reason: 'maxElements', observedChildren: 0, totalChildren: 1 },
+      { path: [1], reason: 'maxElements', observedChildren: 0, totalChildren: 1 },
+      { path: [], reason: 'maxElements', observedChildren: 1, totalChildren: 2 },
+    ]],
+  ] as const)('rejects malformed element boundary: %s', async (_label, path, replacement) => {
+    const reply = await elementBoundaryReply();
+    setWireField(reply, path, replacement);
+    const request = { ...snapshotRequest(), tree: { maxDepth: 8, maxElements: 2, hintMode: 'full' as const } };
+    await expect(executeSnapshotReply(reply, request)).resolves.toMatchObject({ ok: false, error: { code: 'PROTOCOL_ERROR' } });
+  });
+
+  it('rejects an element boundary when the observed node budget was not exhausted', async () => {
+    const reply = await elementBoundaryReply();
+    reply.data.coverage.limits.maxElements = 500;
+    await expect(executeSnapshotReply(reply)).resolves.toMatchObject({ ok: false, error: { code: 'PROTOCOL_ERROR' } });
+  });
+
+  it('rejects an element boundary at maxDepth even when the element budget is exhausted', async () => {
+    const reply = await elementBoundaryReply();
+    reply.data.coverage.limits.maxDepth = 1;
+    const request = { ...snapshotRequest(), tree: { maxDepth: 1, maxElements: 2, hintMode: 'full' as const } };
+    await expect(executeSnapshotReply(reply, request)).resolves.toMatchObject({ ok: false, error: { code: 'PROTOCOL_ERROR' } });
+  });
+
+  it('rejects refs under a root boundary even when tree and ref counts agree', async () => {
+    const reply = await elementBoundaryReply();
+    reply.data.tree.elements[0].ref = 1;
+    reply.data.coverage.refCount = 1;
+    delete reply.data.coverage.noRefReason;
+    const request = { ...snapshotRequest(), tree: { maxDepth: 8, maxElements: 2, hintMode: 'full' as const } };
+    await expect(executeSnapshotReply(reply, request)).resolves.toMatchObject({ ok: false, error: { code: 'PROTOCOL_ERROR' } });
+  });
+
+  it('strips unknown fields at every snapshot, tree, and coverage object level', async () => {
+    const expected = await depthBoundaryReply();
+    const reply = structuredClone(expected);
+    for (const path of [
+      'future', 'data.future', 'data.target.future', 'data.target.bounds.future',
+      'data.tree.future', 'data.tree.elements.0.future', 'data.tree.elements.0.children.0.future',
+      'data.coverage.future', 'data.coverage.limits.future', 'data.coverage.boundaries.0.future',
+    ]) setWireField(reply, path, { secret: ['must not leak'] });
+    const request = { ...snapshotRequest(), tree: { maxDepth: 2, maxElements: 500, hintMode: 'leafCompact' as const } };
+    await expect(executeSnapshotReply(reply, request)).resolves.toEqual(expected);
+  });
+
+  it('preserves refs in a separate branch from a non-root traversal boundary', async () => {
+    const expected = await readSnapshotReply();
+    expected.data.tree = { elements: [{ role: 'AXWindow', children: [
+      { role: 'AXButton', ref: 1, actions: ['AXPress'] }, { role: 'AXGroup' },
+    ] }] };
+    expected.data.truncated = true;
+    expected.data.coverage.refCount = 1;
+    expected.data.coverage.limits.maxDepth = 1;
+    expected.data.coverage.boundaries = [{ path: [1], reason: 'maxDepth', observedChildren: 0, totalChildren: 100 }];
+    const request = { ...snapshotRequest(), tree: { maxDepth: 1, maxElements: 500, hintMode: 'full' as const } };
+    await expect(executeSnapshotReply(expected, request)).resolves.toEqual(expected);
+  });
+
+  it('allows a complete traversal that exactly used the element budget', async () => {
+    const expected = await readSnapshotReply();
+    expected.data.coverage.limits.maxElements = 3;
+    const request = { ...snapshotRequest(), tree: { maxDepth: 8, maxElements: 3, hintMode: 'full' as const } };
+    await expect(executeSnapshotReply(expected, request)).resolves.toEqual(expected);
+  });
+
+  it('rejects an emitted tree count mismatch even when all coverage counts agree', async () => {
+    const reply = await readSnapshotReply();
+    reply.data.coverage.emittedNodes = 4;
+    reply.data.coverage.observedNodes = 4;
+    await expect(executeSnapshotReply(reply)).resolves.toMatchObject({ ok: false, error: { code: 'PROTOCOL_ERROR' } });
+  });
+
+  it('rejects a compact observed count exceeding the request budget', async () => {
+    const reply = await readSnapshotReply(true);
+    reply.data.coverage.observedNodes = 501;
+    const request = { ...snapshotRequest(), tree: { maxDepth: 8, maxElements: 500, hintMode: 'leafCompact' as const } };
+    await expect(executeSnapshotReply(reply, request)).resolves.toMatchObject({ ok: false, error: { code: 'PROTOCOL_ERROR' } });
+  });
+
+  describe.each(['snapshot', 'legacy snapshot', 'annotated', 'legacy annotated'])('%s tree safety', kind => {
+    it.each([
+      ['missing role', 'data.tree.elements.0.role', undefined],
+      ['empty role', 'data.tree.elements.0.children.0.role', ''],
+      ['null role', 'data.tree.elements.0.role', null],
+      ['duplicate ref', 'data.tree.elements.0.children.0.ref', 1],
+      ['sparse refs', 'data.tree.elements.0.children.1.ref', 4],
+      ['zero ref', 'data.tree.elements.0.children.0.ref', 0],
+      ['unsafe ref', 'data.tree.elements.0.ref', Number.MAX_SAFE_INTEGER + 1],
+      ['fractional ref', 'data.tree.elements.0.ref', 1.5],
+      ['two roots', 'data.tree.elements', [{ role: 'AXWindow' }, { role: 'AXWindow' }]],
+      ['malformed children', 'data.tree.elements.0.children', {}],
+      ['malformed known boolean', 'data.tree.elements.0.focused', 1],
+      ['malformed known actions', 'data.tree.elements.0.actions', [1]],
+    ] as const)('rejects %s', async (_label, path, replacement) => {
+      const annotated = kind.includes('annotated');
+      const reply = annotated ? await annotatedReply() : await readSnapshotReply();
+      if (kind.startsWith('legacy')) delete reply.data.coverage;
+      setWireField(reply, path, replacement);
+      await expect(executeSnapshotReply(reply, annotated ? screenshotRequest() : snapshotRequest()))
+        .resolves.toMatchObject({ ok: false, error: { code: 'PROTOCOL_ERROR' } });
+    });
+  });
+
+  describe.each([false, true])('snapshot timestamps (legacy=%s)', legacy => {
+    it.each([
+      ['invalid calendar date', 'createdAt', '2026-02-30T10:00:00Z'],
+      ['non-wire timestamp', 'expiresAt', '2026-09-08 10:10:00'],
+      ['missing timestamp', 'createdAt', undefined],
+      ['null timestamp', 'expiresAt', null],
+      ['long lifetime', 'expiresAt', '2026-09-08T10:11:00.000Z'],
+      ['short lifetime', 'expiresAt', '2026-09-08T10:09:59.999Z'],
+      ['nanosecond lifetime mismatch', 'expiresAt', '2026-09-08T10:10:00.000000001Z'],
+    ] as const)('rejects %s', async (_label, field, replacement) => {
+      const reply = await readSnapshotReply();
+      if (legacy) delete reply.data.coverage;
+      setWireField(reply, `data.${field}`, replacement);
+      await expect(executeSnapshotReply(reply)).resolves.toMatchObject({ ok: false, error: { code: 'PROTOCOL_ERROR' } });
+    });
+    it('preserves valid exact nanosecond lifetime timestamps', async () => {
+      const expected = await readSnapshotReply();
+      if (legacy) delete expected.data.coverage;
+      expected.data.createdAt = '2026-09-08T10:00:00.123456789Z';
+      expected.data.expiresAt = '2026-09-08T10:10:00.123456789Z';
+      await expect(executeSnapshotReply(expected)).resolves.toEqual(expected);
+    });
+  });
+
+  it.each(['full', 'leafCompact'] as const)('preserves %s annotated coverage and the capture metadata envelope', async hintMode => {
+    const expected = await annotatedReply();
+    const snapshot = await readSnapshotReply(hintMode === 'leafCompact');
+    expected.data.tree = snapshot.data.tree;
+    expected.data.coverage = snapshot.data.coverage;
+    // Capture fields stay on their existing path, not the snapshot lifetime validator.
+    expected.data.expiresAt = '2026-09-08T10:10:00.000Z';
+    const request = { ...screenshotRequest(), tree: { maxDepth: 8, maxElements: 500, hintMode } };
+    await expect(executeSnapshotReply(expected, request)).resolves.toEqual(expected);
+  });
+
+  it('accepts legacy annotated replies without coverage or a fabricated root', async () => {
+    const expected = await annotatedReply();
+    delete expected.data.coverage;
+    expected.data.tree.elements = [];
+    await expect(executeSnapshotReply(expected, screenshotRequest())).resolves.toEqual(expected);
+  });
+
+  it('strips unknown annotated tree and coverage fields while retaining known data', async () => {
+    const expected = await annotatedReply();
+    const boundary = await depthBoundaryReply();
+    Object.assign(expected.data, { tree: boundary.data.tree, coverage: boundary.data.coverage, truncated: true });
+    const reply = structuredClone(expected);
+    for (const path of [
+      'data.future', 'data.tree.future', 'data.tree.elements.0.future',
+      'data.tree.elements.0.children.0.future', 'data.coverage.future',
+      'data.coverage.limits.future', 'data.coverage.boundaries.0.future',
+    ]) setWireField(reply, path, { secret: 'must not leak' });
+    const request = { ...screenshotRequest(), tree: { maxDepth: 2, maxElements: 500, hintMode: 'leafCompact' as const } };
+    await expect(executeSnapshotReply(reply, request)).resolves.toEqual(expected);
+  });
+
+  it.each([
+    ['null coverage', 'data.coverage', null],
+    ['empty tree with coverage', 'data.tree.elements', []],
+    ['boundary/truncated mismatch', 'data.truncated', true],
+    ['request limits mismatch', 'data.coverage.limits.maxElements', 499],
+  ] as const)('rejects annotated %s', async (_label, path, replacement) => {
+    const reply = await annotatedReply();
+    setWireField(reply, path, replacement);
+    await expect(executeSnapshotReply(reply, screenshotRequest())).resolves.toMatchObject({ ok: false, error: { code: 'PROTOCOL_ERROR' } });
+  });
+
+  it.each([false, true])('does not expose unrequested screenshot annotation data (malformed=%s)', async malformed => {
+    const reply = await annotatedReply();
+    const expected = structuredClone(reply);
+    for (const field of ['tree', 'snapshotId', 'truncated', 'coverage']) delete expected.data[field];
+    if (malformed) Object.assign(reply.data, { tree: null, coverage: null, truncated: null });
+    await expect(executeSnapshotReply(reply, screenshotRequest(false))).resolves.toEqual(expected);
+  });
 
   it('keeps request stdin open until the host completes', async () => {
     const backend = new MacOSBackend({ helper: fixture('requires-open-stdin') });

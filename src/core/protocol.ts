@@ -7,6 +7,22 @@ export type Target =
 export type Point = { x: number; y: number };
 export type Options = { timeoutMs: number; cursor: 'on' | 'off' };
 export type TreeOptions = { maxDepth: number; maxElements: number; hintMode: 'full' | 'leafOnly' | 'leafCompact' };
+export type SnapshotBoundary = {
+  path: number[];
+  reason: 'maxDepth' | 'maxElements';
+  observedChildren: number;
+  totalChildren: number;
+};
+export type SnapshotCoverage = {
+  scope: 'selectedWindow';
+  absenceIsConclusive: false;
+  observedNodes: number;
+  emittedNodes: number;
+  refCount: number;
+  limits: { maxDepth: number; maxElements: number };
+  boundaries: SnapshotBoundary[];
+  noRefReason?: 'traversalLimited' | 'noEligibleRefs';
+};
 export type Direction = 'up' | 'down' | 'left' | 'right';
 export type Command =
   | { command: 'doctor' | 'apps' }

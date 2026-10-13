@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { describe, expect, it, vi } from 'vitest';
 import { run, type RunDependencies } from '../src/cli/run.js';
 import type { Backend, Reply, Request } from '../src/core/protocol.js';
@@ -37,6 +38,33 @@ describe('run', () => {
     const code = await run(['snapshot', '--pid', '42', '--window', '7', '--json'], dependencies(backend));
     expect(code).toBe(0);
     expect(requests[0]).toMatchObject({ command: 'snapshot', target: { pid: 42, windowId: 7 } });
+  });
+
+  it.each(['full', 'leafCompact'])('prints one %s snapshot JSON object with coverage and no follow-up command', async hintMode => {
+    const reply = JSON.parse(await readFile(new URL(
+      hintMode === 'full' ? '../contracts/fixtures/snapshot-reply.json' : '../contracts/fixtures/snapshot-compact-reply.json',
+      import.meta.url,
+    ), 'utf8'));
+    const execute = vi.fn(async () => reply);
+    const deps = dependencies({ execute });
+    await expect(run(['snapshot', '--app', 'Editor', '--hint-mode', hintMode, '--json'], deps)).resolves.toBe(0);
+    expect(deps.stdout).toHaveLength(1);
+    expect(JSON.parse(deps.stdout[0])).toEqual(reply);
+    expect(JSON.parse(deps.stdout[0]).data.coverage).toEqual(reply.data.coverage);
+    expect(deps.stdout[0]).toBe(`${JSON.stringify(reply)}\n`);
+    expect(deps.stderr).toEqual([]);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ command: 'snapshot' }), expect.any(AbortSignal));
+  });
+
+  it('keeps non-JSON snapshot output a short success line when coverage is present', async () => {
+    const reply = JSON.parse(await readFile(new URL('../contracts/fixtures/snapshot-reply.json', import.meta.url), 'utf8'));
+    const execute = vi.fn(async () => reply);
+    const deps = dependencies({ execute });
+    await expect(run(['snapshot', '--app', 'Editor'], deps)).resolves.toBe(0);
+    expect(deps.stdout).toEqual(['snapshot completed successfully\n']);
+    expect(deps.stderr).toEqual([]);
+    expect(execute).toHaveBeenCalledTimes(1);
   });
 
   it('loads text-file stdin only before dispatching and never echoes text', async () => {

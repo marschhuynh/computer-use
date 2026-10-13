@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import type { Backend, JsonValue, MutationStatus, Reply, Request } from '../core/protocol.js';
+import type { Backend, JsonValue, MutationStatus, Reply, Request, SnapshotCoverage, TreeOptions } from '../core/protocol.js';
 import { isRecordId } from '../core/validate.js';
 
 const PROTOCOL_VERSION = '1';
@@ -242,7 +242,7 @@ function projectData(request: Request, data: Record<string, unknown>, supplied: 
       })) };
     }
     case 'snapshot':
-      return projectSnapshotData(data);
+      return projectSnapshotData(data, request.tree);
     case 'screenshot': {
       if (typeof data.captureId !== 'string' || !isJsonRecord(data.target) || typeof data.path !== 'string'
         || !nonnegativeFiniteNumber(data.width) || !nonnegativeFiniteNumber(data.height)
@@ -252,10 +252,16 @@ function projectData(request: Request, data: Record<string, unknown>, supplied: 
         createdAt: data.createdAt, expiresAt: data.expiresAt,
       };
       if (request.annotated) {
-        if (typeof data.snapshotId !== 'string' || !isJsonRecord(data.tree) || typeof data.truncated !== 'boolean') return undefined;
+        if (typeof data.snapshotId !== 'string' || typeof data.truncated !== 'boolean') return undefined;
+        const tree = projectSnapshotTree(data.tree);
+        if (tree === undefined) return undefined;
+        const coverage = data.coverage === undefined ? undefined
+          : projectSnapshotCoverage(data.coverage, request.tree, tree, data.truncated);
+        if (data.coverage !== undefined && coverage === undefined) return undefined;
         projected.snapshotId = data.snapshotId;
-        projected.tree = data.tree;
+        projected.tree = tree.tree;
         projected.truncated = data.truncated;
+        if (coverage !== undefined) projected.coverage = coverage;
       }
       return projected;
     }
@@ -283,7 +289,7 @@ function projectData(request: Request, data: Record<string, unknown>, supplied: 
   }
 }
 
-function projectSnapshotData(data: Record<string, unknown>): Record<string, JsonValue> | undefined {
+function projectSnapshotData(data: Record<string, unknown>, options: TreeOptions): Record<string, JsonValue> | undefined {
   if (typeof data.createdAt !== 'string' || typeof data.expiresAt !== 'string') return undefined;
   const target = projectSnapshotTarget(data.target);
   const tree = projectSnapshotTree(data.tree);
@@ -293,14 +299,75 @@ function projectSnapshotData(data: Record<string, unknown>): Record<string, Json
     || typeof data.truncated !== 'boolean' || createdAt === undefined || expiresAt === undefined
     || expiresAt.seconds !== createdAt.seconds + 10 * 60
     || expiresAt.nanoseconds !== createdAt.nanoseconds) return undefined;
+  const coverage = data.coverage === undefined ? undefined
+    : projectSnapshotCoverage(data.coverage, options, tree, data.truncated);
+  if (data.coverage !== undefined && coverage === undefined) return undefined;
   return {
     snapshotId: data.snapshotId,
     target,
-    tree,
+    tree: tree.tree,
+    ...(coverage === undefined ? {} : { coverage }),
     truncated: data.truncated,
     createdAt: data.createdAt,
     expiresAt: data.expiresAt,
   };
+}
+
+function projectSnapshotCoverage(
+  value: unknown, options: TreeOptions, tree: ProjectedSnapshotTree, truncated: boolean,
+): Record<string, JsonValue> | undefined {
+  if (!isRecord(value) || value.scope !== 'selectedWindow' || value.absenceIsConclusive !== false
+    || !positiveSafeInteger(value.observedNodes) || !positiveSafeInteger(value.emittedNodes)
+    || !nonnegativeSafeInteger(value.refCount) || value.emittedNodes > value.observedNodes
+    || value.refCount > value.emittedNodes || tree.nodeCount !== value.emittedNodes
+    || tree.refCount !== value.refCount || tree.rootCount !== 1) return undefined;
+  const limits = value.limits;
+  if (!isRecord(limits) || !positiveSafeInteger(limits.maxDepth) || !positiveSafeInteger(limits.maxElements)
+    || limits.maxDepth !== options.maxDepth || limits.maxElements !== options.maxElements
+    || value.observedNodes > limits.maxElements
+    || (options.hintMode !== 'leafCompact' && value.emittedNodes !== value.observedNodes)) return undefined;
+  if (!Array.isArray(value.boundaries) || value.boundaries.length > value.observedNodes
+    || truncated !== (value.boundaries.length > 0)) return undefined;
+  const noRefReason = value.boundaries.length > 0 ? 'traversalLimited' : 'noEligibleRefs';
+  if (value.refCount === 0 ? value.noRefReason !== noRefReason : value.noRefReason !== undefined) return undefined;
+
+  // Paths describe original evidence, not child indexes in the compact tree.
+  // Only independently checkable wire invariants belong here; native validation
+  // remains authoritative for complete evidence topology and boundary order.
+  const observedNodes = value.observedNodes;
+  const paths = new Set<string>();
+  const boundaries: SnapshotCoverage['boundaries'] = [];
+  for (const boundary of value.boundaries) {
+    if (!isRecord(boundary) || !Array.isArray(boundary.path)
+      || boundary.path.length > limits.maxDepth || boundary.path.length >= value.observedNodes
+      || !boundary.path.every(index => nonnegativeSafeInteger(index) && index < observedNodes)
+      || !nonnegativeSafeInteger(boundary.observedChildren) || !nonnegativeSafeInteger(boundary.totalChildren)
+      || boundary.observedChildren >= boundary.totalChildren || boundary.observedChildren >= value.observedNodes
+      || (boundary.path.length === 0 && value.refCount !== 0)) return undefined;
+    const pathKey = JSON.stringify(boundary.path);
+    if (paths.has(pathKey)) return undefined;
+    paths.add(pathKey);
+    switch (boundary.reason) {
+      case 'maxDepth':
+        if (boundary.path.length !== limits.maxDepth || boundary.observedChildren !== 0) return undefined;
+        break;
+      case 'maxElements':
+        if (boundary.path.length >= limits.maxDepth || value.observedNodes !== limits.maxElements) return undefined;
+        break;
+      default: return undefined;
+    }
+    boundaries.push({
+      path: [...boundary.path], reason: boundary.reason,
+      observedChildren: boundary.observedChildren, totalChildren: boundary.totalChildren,
+    });
+  }
+  const coverage: SnapshotCoverage = {
+    scope: 'selectedWindow', absenceIsConclusive: false,
+    observedNodes: value.observedNodes, emittedNodes: value.emittedNodes, refCount: value.refCount,
+    limits: { maxDepth: limits.maxDepth, maxElements: limits.maxElements }, boundaries,
+    ...(value.refCount === 0 ? { noRefReason } : {}),
+  };
+  return coverage;
 }
 
 function projectSnapshotTarget(value: unknown): Record<string, JsonValue> | undefined {
@@ -319,27 +386,33 @@ function projectSnapshotTarget(value: unknown): Record<string, JsonValue> | unde
   };
 }
 
-function projectSnapshotTree(value: unknown): Record<string, JsonValue> | undefined {
+type ProjectedSnapshotTree = {
+  tree: Record<string, JsonValue>; nodeCount: number; refCount: number; rootCount: number;
+};
+type SnapshotTreeCounts = { refs: Set<number>; nodeCount: number };
+
+function projectSnapshotTree(value: unknown): ProjectedSnapshotTree | undefined {
   if (!isRecord(value) || !Array.isArray(value.elements) || value.elements.length > 1) return undefined;
-  const refs = new Set<number>();
+  const counts: SnapshotTreeCounts = { refs: new Set(), nodeCount: 0 };
   const elements: JsonValue[] = [];
   for (const element of value.elements) {
-    const projected = projectSnapshotNode(element, refs);
+    const projected = projectSnapshotNode(element, counts);
     if (projected === undefined) return undefined;
     elements.push(projected);
   }
-  for (let ref = 1; ref <= refs.size; ref += 1) {
-    if (!refs.has(ref)) return undefined;
+  for (let ref = 1; ref <= counts.refs.size; ref += 1) {
+    if (!counts.refs.has(ref)) return undefined;
   }
-  return { elements };
+  return { tree: { elements }, nodeCount: counts.nodeCount, refCount: counts.refs.size, rootCount: elements.length };
 }
 
-function projectSnapshotNode(value: unknown, refs: Set<number>): Record<string, JsonValue> | undefined {
+function projectSnapshotNode(value: unknown, counts: SnapshotTreeCounts): Record<string, JsonValue> | undefined {
   if (!isRecord(value) || typeof value.role !== 'string' || value.role.length === 0) return undefined;
+  counts.nodeCount += 1;
   const projected: Record<string, JsonValue> = { role: value.role };
   if (value.ref !== undefined) {
-    if (!positiveSafeInteger(value.ref) || refs.has(value.ref)) return undefined;
-    refs.add(value.ref);
+    if (!positiveSafeInteger(value.ref) || counts.refs.has(value.ref)) return undefined;
+    counts.refs.add(value.ref);
     projected.ref = value.ref;
   }
   for (const field of ['subrole', 'identifier', 'title', 'label', 'value'] as const) {
@@ -369,7 +442,7 @@ function projectSnapshotNode(value: unknown, refs: Set<number>): Record<string, 
     if (!Array.isArray(value.children)) return undefined;
     const children: JsonValue[] = [];
     for (const child of value.children) {
-      const projectedChild = projectSnapshotNode(child, refs);
+      const projectedChild = projectSnapshotNode(child, counts);
       if (projectedChild === undefined) return undefined;
       children.push(projectedChild);
     }
@@ -522,6 +595,9 @@ function validBounds(value: unknown): value is Bounds {
 
 function positiveSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+function nonnegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 function finiteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
