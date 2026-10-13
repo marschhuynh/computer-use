@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import ComputerUseCore
 
@@ -300,6 +301,80 @@ final class CaptureTests: XCTestCase {
         )
     }
 
+    func testAnnotatedScreenshotPropagatesCoverageWithoutChangingEvidenceGeometry() async throws {
+        let dir = temporaryStateRoot()
+        let store = StateStore(rootURL: dir)
+        let resolved = target()
+        let buttonBounds = WindowBounds(x: 200, y: 200, width: 70, height: 30)
+        let wrapperBounds = WindowBounds(x: 150, y: 150, width: 200, height: 100)
+        let root = AXTreeInputNode(role: "AXWindow", bounds: resolved.bounds, children: [
+            AXTreeInputNode(role: "AXGroup", bounds: wrapperBounds, children: [
+                AXTreeInputNode(role: "AXButton", title: "Save", actions: ["AXPress"], bounds: buttonBounds)
+            ])
+        ])
+        let options = TreeOptions(maxDepth: 8, maxElements: 500, hintMode: .leafCompact)
+        let snapshot = AXTree.snapshot(target: resolved, options: options, root: root)
+        let snapshotService = SnapshotService(
+            lock: DesktopLock(rootURL: dir), store: store,
+            resolve: { _, _ in resolved },
+            observe: { _, _, _ in AXTreeObservation(snapshot: snapshot, liveElements: [:]) },
+            validateTarget: { _, _ in resolved }
+        )
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 600,
+            pixelsHigh: 400, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+            isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        let service = NativeService(
+            snapshotService: snapshotService, desktopLock: DesktopLock(rootURL: dir),
+            targetResolver: TargetResolver(provider: displayStubProvider()), store: store,
+            captureService: CaptureService(capturer: { target, _, _ in
+                XCTAssertEqual(target, resolved)
+                return CapturedImage(pixelSize: CGSize(width: 600, height: 400), backingScale: 1, pngData: png)
+            }, store: store)
+        )
+        let reply = await service.execute(screenshotRequest {
+            $0["target"] = ["pid": 42]; $0["annotated"] = true
+            $0["output"] = dir.appendingPathComponent("annotated.png").path
+        }, context: context())
+        XCTAssertTrue(reply.ok, "\(String(describing: reply.error))")
+        let data = try XCTUnwrap(reply.data)
+        XCTAssertEqual(data["coverage"], .object([
+            "scope": .string("selectedWindow"), "absenceIsConclusive": .bool(false),
+            "observedNodes": .number(3), "emittedNodes": .number(2), "refCount": .number(1),
+            "limits": .object(["maxDepth": .number(8), "maxElements": .number(500)]), "boundaries": .array([])
+        ]))
+        XCTAssertEqual(data["tree"], .object(["elements": .array([
+            .object(["role": .string("AXWindow"), "children": .array([
+                .object(["role": .string("AXButton"), "ref": .number(1), "title": .string("Save"),
+                    "actions": .array([.string("AXPress")]), "bounds": .object([
+                        "x": .number(200), "y": .number(200), "width": .number(70), "height": .number(30)])])
+            ])])
+        ])]))
+        guard case let .string(id) = data["snapshotId"] else { return XCTFail("missing snapshot ID") }
+        let record = try store.readSnapshot(id: id, context: context())
+        XCTAssertEqual(record.evidence, snapshot.evidence)
+        XCTAssertEqual(record.target.bounds, resolved.bounds)
+        XCTAssertEqual(record.evidence.nodes[1].bounds, wrapperBounds)
+        XCTAssertEqual(record.evidence.refs[0].node.bounds, buttonBounds)
+        XCTAssertNotEqual(try Data(contentsOf: dir.appendingPathComponent("annotated.png")), png,
+            "Evidence-derived ref bounds must still produce an annotation")
+        let captureID: String
+        guard case let .string(id) = data["captureId"] else { return XCTFail("missing capture ID") }
+        captureID = id
+        let capture = try store.readCapture(id: captureID, context: context())
+        XCTAssertEqual(capture.geometry.windowBounds, resolved.bounds)
+        XCTAssertEqual(capture.geometry.imageSize, CGSize(width: 600, height: 400))
+        let unannotated = await service.execute(screenshotRequest {
+            $0["target"] = ["pid": 42]
+            $0["output"] = dir.appendingPathComponent("unannotated.png").path
+        }, context: context())
+        XCTAssertTrue(unannotated.ok)
+        XCTAssertNil(unannotated.data?["coverage"])
+        XCTAssertNil(unannotated.data?["tree"])
+        XCTAssertNil(unannotated.data?["snapshotId"])
+        XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("unannotated.png")), png)
+    }
+
     func testBareScreenshotResolvesPrimaryDisplay() async throws {
         var captured: ResolvedTarget?
         let service = screenshotService { target in
@@ -312,6 +387,8 @@ final class CaptureTests: XCTestCase {
         }
         let reply = await service.execute(screenshotRequest(), context: context())
         XCTAssertTrue(reply.ok, "expected success, got \(String(describing: reply.error))")
+        XCTAssertNil(reply.data?["coverage"])
+        XCTAssertNil(reply.data?["tree"])
         let target = try XCTUnwrap(captured)
         XCTAssertTrue(target.isDisplay)
         XCTAssertEqual(target.identity.windowId, 77)

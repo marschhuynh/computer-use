@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "snapshot",
+  "data": {
+    "snapshotId": "123e4567-e89b-42d3-a456-426614174000",
+    "target": {
+      "pid": 42,
+      "launchDate": "2026-09-08T10:00:00Z",
+      "bundleId": "com.example.Editor",
+      "windowId": 7,
+      "title": "Document",
+      "bounds": {
+        "x": 100,
+        "y": 100,
+        "width": 600,
+        "height": 400
+      }
+    },
+    "tree": {
+      "elements": [
+        {
+          "role": "AXWindow",
+          "children": [
+            {
+              "role": "AXButton",
+              "ref": 1,
+              "title": " Save ",
+              "label": "Commit",
+              "value": "draft",
+              "actions": [
+                "AXPress"
+              ],
+              "enabled": true,
+              "focused": false,
+              "selected": false
+            }
+          ]
+        }
+      ]
+    },
+    "coverage": {
+      "scope": "selectedWindow",
+      "absenceIsConclusive": false,
+      "observedNodes": 3,
+      "emittedNodes": 2,
+      "refCount": 1,
+      "limits": {
+        "maxDepth": 8,
+        "maxElements": 500
+      },
+      "boundaries": []
+    },
+    "truncated": false,
+    "createdAt": "2026-09-08T10:00:00.000Z",
+    "expiresAt": "2026-09-08T10:10:00.000Z"
+  }
+}

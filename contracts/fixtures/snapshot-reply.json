@@ -38,6 +38,15 @@
         }
       ]
     },
+    "coverage": {
+      "scope": "selectedWindow",
+      "absenceIsConclusive": false,
+      "observedNodes": 3,
+      "emittedNodes": 3,
+      "refCount": 3,
+      "limits": {"maxDepth": 8, "maxElements": 500},
+      "boundaries": []
+    },
     "truncated": false,
     "createdAt": "2026-09-08T10:00:00.000Z",
     "expiresAt": "2026-09-08T10:10:00.000Z"

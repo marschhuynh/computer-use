@@ -236,8 +236,10 @@ public final class NativeService {
                 if let snap {
                     if case var .object(dict) = data {
                         dict["snapshotId"] = .string(snap.record.id)
-                        dict["tree"] = snap.wireData["tree"] ?? .null
-                        dict["truncated"] = snap.wireData["truncated"] ?? .bool(false)
+                        let snapshotData = snap.wireData
+                        dict["tree"] = snapshotData["tree"] ?? .null
+                        dict["truncated"] = snapshotData["truncated"] ?? .bool(false)
+                        dict["coverage"] = snapshotData["coverage"] ?? .null
                         data = .object(dict)
                     }
                 }

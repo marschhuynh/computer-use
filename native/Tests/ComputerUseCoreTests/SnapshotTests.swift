@@ -133,6 +133,14 @@ final class SnapshotTests: XCTestCase {
                 )
             ], mode.rawValue)
             XCTAssertEqual(snapshot.evidence.refs, [], mode.rawValue)
+            guard case let .object(coverage) = presentationWire(snapshot)["coverage"] else {
+                XCTFail("missing coverage"); continue
+            }
+            XCTAssertEqual(coverage["refCount"], .number(0))
+            XCTAssertEqual(coverage["emittedNodes"], .number(2))
+            XCTAssertEqual(coverage["noRefReason"], .string("traversalLimited"))
+            XCTAssertEqual(SnapshotPresentation(snapshot: snapshot).emittedNodes, 2)
+            XCTAssertNotEqual(presentationWire(snapshot)["tree"], .object(["elements": .array([])]))
             XCTAssertNoThrow(try AXEvidencePolicy.validate(snapshot.evidence, options: options), mode.rawValue)
         }
     }
@@ -962,6 +970,118 @@ final class SnapshotTests: XCTestCase {
             print("PRESENTATION_TREE \(name) \(String(decoding: tree, as: UTF8.self))")
             print("PRESENTATION_REPLY \(name) \(String(decoding: reply, as: UTF8.self))")
         }
+    }
+
+    func testCoverageReportsOriginalRootElementCapAndZeroRefs() throws {
+        let snapshot = try presentationSnapshot(truncationPolicyInput(), maxElements: 2)
+        XCTAssertEqual(presentationWire(snapshot)["coverage"], .object([
+            "scope": .string("selectedWindow"), "absenceIsConclusive": .bool(false),
+            "observedNodes": .number(2), "emittedNodes": .number(2), "refCount": .number(0),
+            "limits": .object(["maxDepth": .number(8), "maxElements": .number(2)]),
+            "boundaries": .array([
+                .object(["path": .array([.number(0)]), "reason": .string("maxElements"),
+                    "observedChildren": .number(0), "totalChildren": .number(1)]),
+                .object(["path": .array([]), "reason": .string("maxElements"),
+                    "observedChildren": .number(1), "totalChildren": .number(2)])
+            ]), "noRefReason": .string("traversalLimited")
+        ]))
+        XCTAssertTrue(snapshot.evidence.refs.isEmpty)
+    }
+
+    func testCoveragePreservesDepthAndMixedBoundaryOrderAndCounts() throws {
+        let depth = try presentationSnapshot(truncationPolicyInput(), maxDepth: 1, maxElements: 20)
+        let mixed = try presentationSnapshot(truncationPolicyInput(), maxDepth: 1, maxElements: 2)
+        let depthBoundary: JSONValue = .object([
+            "path": .array([.number(0)]), "reason": .string("maxDepth"),
+            "observedChildren": .number(0), "totalChildren": .number(1)
+        ])
+        for (snapshot, expectedBoundaries, observed, refs) in [
+            (depth, [depthBoundary], 3, 1),
+            (mixed, [depthBoundary, .object([
+                "path": .array([]), "reason": .string("maxElements"),
+                "observedChildren": .number(1), "totalChildren": .number(2)
+            ])], 2, 0)
+        ] {
+            let before = snapshot.evidence
+            guard case let .object(coverage) = presentationWire(snapshot)["coverage"] else {
+                return XCTFail("missing coverage")
+            }
+            XCTAssertEqual(coverage["boundaries"], .array(expectedBoundaries))
+            XCTAssertEqual(coverage["observedNodes"], .number(Double(observed)))
+            XCTAssertEqual(coverage["emittedNodes"], .number(Double(observed)))
+            XCTAssertEqual(coverage["refCount"], .number(Double(refs)))
+            XCTAssertEqual(coverage["limits"], .object([
+                "maxDepth": .number(1), "maxElements": .number(Double(snapshot.treeOptions.maxElements))
+            ]))
+            XCTAssertEqual(coverage["noRefReason"], refs == 0 ? .string("traversalLimited") : nil)
+            XCTAssertEqual(presentationWire(snapshot)["truncated"], .bool(true))
+            XCTAssertEqual(snapshot.evidence, before)
+        }
+    }
+
+    func testCoverageKeepsOriginalNestedPathAfterAncestorCollapse() throws {
+        let root = AXTreeInputNode(role: "AXWindow", children: [
+            AXTreeInputNode(role: "AXGroup", children: [
+                AXTreeInputNode(role: "AXScrollArea", children: [
+                    AXTreeInputNode(role: "AXButton", actions: ["AXPress"])
+                ])
+            ])
+        ])
+        let snapshot = try presentationSnapshot(root, maxDepth: 2)
+        XCTAssertEqual(snapshot.evidence.truncation.map(\.path), [[0, 0]])
+        XCTAssertEqual(SnapshotPresentation(snapshot: snapshot).emittedNodes, 2)
+        XCTAssertEqual(presentationWire(snapshot)["tree"], .object(["elements": .array([
+            .object(["role": .string("AXWindow"), "children": .array([
+                .object(["role": .string("AXScrollArea")])
+            ])])
+        ])]))
+        guard case let .object(coverage) = presentationWire(snapshot)["coverage"] else {
+            return XCTFail("missing coverage")
+        }
+        XCTAssertEqual(coverage["observedNodes"], .number(3))
+        XCTAssertEqual(coverage["emittedNodes"], .number(2))
+        XCTAssertEqual(coverage["boundaries"], .array([.object([
+            "path": .array([.number(0), .number(0)]), "reason": .string("maxDepth"),
+            "observedChildren": .number(0), "totalChildren": .number(1)
+        ])]))
+        XCTAssertEqual(coverage["noRefReason"], .string("traversalLimited"))
+    }
+
+    func testCoverageCompleteCountsAndNoRefReasonAcrossHintModes() throws {
+        for mode in [HintMode.full, .leafOnly, .leafCompact] {
+            for root in [neutralWrapperInput(), zeroRefTextInput()] {
+                let snapshot = try presentationSnapshot(root, mode: mode)
+                let before = snapshot.evidence
+                guard case let .object(coverage) = presentationWire(snapshot)["coverage"] else {
+                    return XCTFail("missing coverage")
+                }
+                let observed = snapshot.evidence.nodes.count
+                XCTAssertEqual(coverage["scope"], .string("selectedWindow"))
+                XCTAssertEqual(coverage["absenceIsConclusive"], .bool(false))
+                XCTAssertEqual(coverage["observedNodes"], .number(Double(observed)))
+                let emitted = mode == .leafCompact ? 2 : observed
+                XCTAssertEqual(coverage["emittedNodes"], .number(Double(emitted)))
+                let refs = mode == .full ? observed : (observed == 3 ? 1 : 0)
+                XCTAssertEqual(coverage["refCount"], .number(Double(refs)))
+                XCTAssertEqual(coverage["boundaries"], .array([]))
+                XCTAssertEqual(coverage["noRefReason"], refs == 0 ? .string("noEligibleRefs") : nil)
+                XCTAssertEqual(presentationWire(snapshot)["truncated"], .bool(false))
+                XCTAssertEqual(snapshot.evidence, before)
+            }
+        }
+    }
+
+    func testCompactSnapshotWireDataMatchesSharedActualProducerFixture() throws {
+        let snapshot = try presentationSnapshot(neutralWrapperInput())
+        let reply = WireReply.success(command: .snapshot, data: presentationWire(snapshot))
+        let actual = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(reply)) as? NSDictionary
+        )
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let expected = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf:
+            root.appendingPathComponent("contracts/fixtures/snapshot-compact-reply.json"))) as? NSDictionary)
+        XCTAssertEqual(actual, expected)
     }
 
     func testSnapshotWireDataMatchesSharedActualProducerFixture() throws {

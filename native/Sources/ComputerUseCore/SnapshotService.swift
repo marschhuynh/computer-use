@@ -6,10 +6,12 @@ public struct SnapshotResult {
     public let snapshot: AXTreeSnapshot
 
     var wireData: [String: JSONValue] {
-        [
+        let presentation = SnapshotPresentation(snapshot: snapshot)
+        return [
             "snapshotId": .string(record.id),
             "target": snapshot.target.jsonValue,
-            "tree": SnapshotPresentation(snapshot: snapshot).tree,
+            "tree": presentation.tree,
+            "coverage": SnapshotCoverage.json(snapshot: snapshot, emittedNodes: presentation.emittedNodes),
             "truncated": .bool(snapshot.truncated),
             "createdAt": .string(record.createdAt),
             "expiresAt": .string(record.expiresAt)
