@@ -160,8 +160,12 @@ one child, observed with `--max-elements 2` yields this coverage:
 ```
 
 This is a successful bounded observation with a real nonempty root, not an
-empty window. Failed target resolution or AX reads still return errors;
-`TIMEOUT` and `INTERRUPTED` never become successful partial snapshots.
+empty window. Failed target resolution and hard AX observation failures
+(such as permission, liveness, or unresponsive-server errors) still return
+errors; `TIMEOUT` and `INTERRUPTED` never become successful partial snapshots.
+Existing compatibility behavior treats a bare `AXError.failure` on an optional
+scalar or action-list read as unavailable: a successful snapshot may omit that
+scalar or report no actions. Success does not guarantee every AX read succeeded.
 See [recovery guidance](agent-guide.md#snapshot-coverage-and-recovery) for
 limit-specific retries and explicit screenshots. Use the **new snapshot's
 refs** after every retry or mode change.

@@ -143,8 +143,12 @@ When the desired UI or ref is missing:
    evidence-ref bounds. A screenshot does not recover unvisited AX nodes or
    create a semantic ref for a visual target.
 
-`TIMEOUT`, `INTERRUPTED`, failed AX reads, and unresolved targets are errors,
+`TIMEOUT`, `INTERRUPTED`, hard AX observation failures (such as permission,
+liveness, or unresponsive-server errors), and unresolved targets are errors,
 not successful partial observations. Do not interpret an error as absence.
+Existing compatibility behavior treats a bare `AXError.failure` on an optional
+scalar or action-list read as unavailable: a successful snapshot may omit that
+scalar or report no actions. Success does not guarantee every AX read succeeded.
 The snapshot preparation hook remains no-op by default; no automatic browser
 AX activation/readiness is promised. Snapshot collection nevertheless has
 two extra identity validations around that hook; live metadata/AX work,
