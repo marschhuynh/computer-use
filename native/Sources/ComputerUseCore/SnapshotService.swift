@@ -9,7 +9,7 @@ public struct SnapshotResult {
         [
             "snapshotId": .string(record.id),
             "target": snapshot.target.jsonValue,
-            "tree": snapshot.treeJSON,
+            "tree": SnapshotPresentation(snapshot: snapshot).tree,
             "truncated": .bool(snapshot.truncated),
             "createdAt": .string(record.createdAt),
             "expiresAt": .string(record.expiresAt)
@@ -287,44 +287,5 @@ private extension ResolvedTarget {
 private extension WindowBounds {
     var jsonValue: JSONValue {
         .object(["x": .number(x), "y": .number(y), "width": .number(width), "height": .number(height)])
-    }
-}
-
-private extension AXTreeSnapshot {
-    var treeJSON: JSONValue {
-        let refs = Dictionary(uniqueKeysWithValues: evidence.refs.map { ($0.path, $0.ref) })
-        let includedPaths: Set<[Int]>
-        if treeOptions.hintMode == .leafCompact {
-            var paths = Set<[Int]>()
-            for ref in evidence.refs {
-                for count in 0...ref.path.count { paths.insert(Array(ref.path.prefix(count))) }
-            }
-            includedPaths = paths
-        } else {
-            includedPaths = Set(evidence.nodes.map(\.path))
-        }
-
-        func render(_ node: AXNodeEvidence) -> JSONValue {
-            var value: [String: JSONValue] = ["role": .string(node.role)]
-            if let ref = refs[node.path] { value["ref"] = .number(Double(ref)) }
-            if let subrole = node.subrole { value["subrole"] = .string(subrole) }
-            if let identifier = node.identifier { value["identifier"] = .string(identifier) }
-            if let title = node.title { value["title"] = .string(title) }
-            if let label = node.label { value["label"] = .string(label) }
-            if let text = node.value { value["value"] = .string(text) }
-            if !node.actions.isEmpty { value["actions"] = .array(node.actions.map(JSONValue.string)) }
-            if let enabled = node.enabled { value["enabled"] = .bool(enabled) }
-            if let focused = node.focused { value["focused"] = .bool(focused) }
-            if let selected = node.selected { value["selected"] = .bool(selected) }
-            if let bounds = node.bounds { value["bounds"] = bounds.jsonValue }
-            let children = evidence.nodes.filter {
-                $0.path.count == node.path.count + 1 && Array($0.path.dropLast()) == node.path && includedPaths.contains($0.path)
-            }.map(render)
-            if !children.isEmpty { value["children"] = .array(children) }
-            return .object(value)
-        }
-
-        let roots = evidence.nodes.filter { $0.path.isEmpty && includedPaths.contains($0.path) }.map(render)
-        return .object(["elements": .array(roots)])
     }
 }

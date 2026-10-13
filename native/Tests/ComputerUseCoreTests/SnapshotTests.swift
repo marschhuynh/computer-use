@@ -672,6 +672,298 @@ final class SnapshotTests: XCTestCase {
         ])
     }
 
+    func testCompactCollapsesNeutralWrapperButPreservesControlStateAndEvidence() throws {
+        let compact = try presentationSnapshot(neutralWrapperInput())
+        let verbose = try presentationSnapshot(neutralWrapperInput(), mode: .leafOnly)
+        let before = compact.evidence
+        XCTAssertEqual(presentationWire(compact)["tree"], .object(["elements": .array([
+            .object(["role": .string("AXWindow"), "children": .array([
+                .object(["role": .string("AXButton"), "ref": .number(1),
+                    "title": .string(" Save "), "label": .string("Commit"), "value": .string("draft"),
+                    "actions": .array([.string("AXPress")]), "enabled": .bool(true),
+                    "focused": .bool(false), "selected": .bool(false)])
+            ])])
+        ])]))
+        XCTAssertEqual(SnapshotPresentation(snapshot: compact).emittedNodes, 2)
+        XCTAssertEqual(compact.evidence, before)
+        XCTAssertEqual(compact.evidence, verbose.evidence)
+        XCTAssertEqual(compact.evidence.refs.map(\.path), [[0, 0]])
+    }
+
+    func testCompactZeroRefSnapshotKeepsRealRootAndText() throws {
+        let snapshot = try presentationSnapshot(zeroRefTextInput())
+        XCTAssertTrue(snapshot.evidence.refs.isEmpty)
+        XCTAssertEqual(presentationWire(snapshot)["tree"], .object(["elements": .array([
+            .object(["role": .string("AXWindow"), "children": .array([
+                .object(["role": .string("AXStaticText"), "value": .string("Read only")])
+            ])])
+        ])]))
+        XCTAssertEqual(SnapshotPresentation(snapshot: snapshot).emittedNodes, 2)
+    }
+
+    func testCompactKeepsDescriptiveWrappers() throws {
+        let button = AXTreeInputNode(role: "AXButton", actions: ["AXPress"])
+        let cases: [(AXTreeInputNode, String)] = [
+            (.init(role: "AXGroup", title: " Named ", children: [button]), #""title":" Named ""#),
+            (.init(role: "AXGroup", label: " Label ", children: [button]), #""label":" Label ""#),
+            (.init(role: "AXGroup", value: " Value ", children: [button]), #""value":" Value ""#),
+            (.init(role: "AXGroup", subrole: " AXSection ", children: [button]), #""subrole":" AXSection ""#),
+            (.init(role: "AXGroup", identifier: " section-id ", children: [button]), #""identifier":" section-id ""#)
+        ]
+        for (wrapper, field) in cases {
+            try assertCompactPresentation(.init(role: "AXWindow", children: [wrapper]), expected: """
+                {"elements":[{"role":"AXWindow","children":[
+                    {"role":"AXGroup",\(field),"children":[{"role":"AXButton","ref":1,"actions":["AXPress"]}]}
+                ]}]}
+                """, emittedNodes: 3, refPaths: [[0, 0]])
+        }
+    }
+
+    func testCompactKeepsMeaningfulStatesEvenWithoutRefs() throws {
+        let button = AXTreeInputNode(role: "AXButton", actions: ["AXPress"])
+        let root = AXTreeInputNode(role: "AXWindow", children: [
+            .init(role: "AXGroup", enabled: false, children: [button]),
+            .init(role: "AXGroup", focused: true, children: [button]),
+            .init(role: "AXScrollArea", selected: true, children: [button]),
+            .init(role: "AXButton", enabled: true, focused: false, selected: false),
+            .init(role: "AXGroup", enabled: true, focused: false, selected: false,
+                children: [.init(role: "AXGroup")]),
+            .init(role: "AXGroup", enabled: false),
+            .init(role: "AXGroup", focused: true),
+            .init(role: "AXScrollArea", selected: true)
+        ])
+        try assertCompactPresentation(root, expected: """
+            {"elements":[{"role":"AXWindow","children":[
+                {"role":"AXGroup","enabled":false,"children":[{"role":"AXButton","ref":1,"actions":["AXPress"]}]},
+                {"role":"AXGroup","focused":true,"children":[{"role":"AXButton","ref":2,"actions":["AXPress"]}]},
+                {"role":"AXScrollArea","selected":true,"children":[{"role":"AXButton","ref":3,"actions":["AXPress"]}]},
+                {"role":"AXButton","enabled":true,"focused":false,"selected":false},
+                {"role":"AXGroup","enabled":true,"focused":false,"selected":false},
+                {"role":"AXGroup","enabled":false},
+                {"role":"AXGroup","focused":true},
+                {"role":"AXScrollArea","selected":true}
+            ]}]}
+            """, emittedNodes: 12, refPaths: [[0, 0], [1, 0], [2, 0]])
+    }
+
+    func testCompactPreservesMultiChildAndUnknownAncestorsInDFSOrder() throws {
+        let button = AXTreeInputNode(role: "AXButton", actions: ["AXPress"])
+        let root = AXTreeInputNode(role: "AXWindow", children: [
+            .init(role: "AXGroup", children: [button, .init(role: "AXGroup")]),
+            .init(role: "AXUnknownContainer", children: [button]),
+            .init(role: "AXScrollArea", children: [.init(role: "AXGroup", children: [button])]),
+            .init(role: "AXGroup", children: [button, button])
+        ])
+        try assertCompactPresentation(root, expected: """
+            {"elements":[{"role":"AXWindow","children":[
+                {"role":"AXGroup","children":[{"role":"AXButton","ref":1,"actions":["AXPress"]}]},
+                {"role":"AXUnknownContainer","children":[{"role":"AXButton","ref":2,"actions":["AXPress"]}]},
+                {"role":"AXButton","ref":3,"actions":["AXPress"]},
+                {"role":"AXGroup","children":[
+                    {"role":"AXButton","ref":4,"actions":["AXPress"]},
+                    {"role":"AXButton","ref":5,"actions":["AXPress"]}
+                ]}
+            ]}]}
+            """, emittedNodes: 9, refPaths: [[0, 0], [1, 0], [2, 0, 0], [3, 0], [3, 1]])
+    }
+
+    func testCompactUsesWhitespaceOnlyForRetentionWithoutChangingText() throws {
+        let root = AXTreeInputNode(role: "AXWindow", children: [
+            .init(role: "AXStaticText", title: " \n\t", value: " "),
+            .init(role: "AXGroup", title: " \n", children: [
+                .init(role: "AXStaticText", title: " ", label: " Label ", value: " Read only \n")
+            ])
+        ])
+        try assertCompactPresentation(root, expected: #"""
+            {"elements":[{"role":"AXWindow","children":[
+                {"role":"AXStaticText","title":" ","label":" Label ","value":" Read only \n"}
+            ]}]}
+            """#, emittedNodes: 2, refPaths: [])
+        try assertCompactPresentation(.init(role: "AXGroup", enabled: true, focused: false, selected: false,
+            children: [.init(role: "AXButton", actions: ["AXPress"])]), expected: """
+            {"elements":[{"role":"AXGroup","enabled":true,"focused":false,"selected":false,"children":[
+                {"role":"AXButton","ref":1,"actions":["AXPress"]}
+            ]}]}
+            """, emittedNodes: 2, refPaths: [[0]])
+        try assertCompactPresentation(.init(role: "AXScrollArea"), expected:
+            #"{"elements":[{"role":"AXScrollArea"}]}"#, emittedNodes: 1, refPaths: [])
+    }
+
+    func testCompactKeepsAnonymousBoundaryAndOriginalEvidencePathsWithoutRefs() throws {
+        let root = AXTreeInputNode(role: "AXWindow", children: [
+            .init(role: "AXGroup", children: [.init(role: "AXScrollArea", children: [
+                .init(role: "AXButton", actions: ["AXPress"])
+            ])])
+        ])
+        try assertCompactPresentation(root, expected:
+            #"{"elements":[{"role":"AXWindow","children":[{"role":"AXScrollArea"}]}]}"#,
+            emittedNodes: 2, refPaths: [], maxDepth: 2)
+        let snapshot = try presentationSnapshot(root, maxDepth: 2)
+        XCTAssertEqual(snapshot.evidence.truncation, [
+            AXTraversalBoundary(path: [0, 0], reason: .maxDepth, observedChildren: 0, totalChildren: 1)
+        ])
+    }
+
+    func testCompactKeepsActionNodesEvenWhenBoundaryExcludesTheirRefs() throws {
+        let root = AXTreeInputNode(role: "AXWindow", children: [
+            .init(role: "AXGroup", children: [.init(role: "AXButton", actions: ["AXPress"])]),
+            .init(role: "AXGroup")
+        ])
+        try assertCompactPresentation(root, expected: """
+            {"elements":[{"role":"AXWindow","children":[{"role":"AXButton","actions":["AXPress"]}]}]}
+            """, emittedNodes: 2, refPaths: [], maxElements: 3)
+    }
+
+    func testCompactOmitsOnlyNonRefBoundsAndKeepsFalseControlStates() throws {
+        let bounds = WindowBounds(x: 10, y: 20, width: 30, height: 40)
+        let root = AXTreeInputNode(role: "AXWindow", bounds: bounds, children: [
+            .init(role: "AXGroup", subrole: "AXSection", identifier: "editor", title: " Toolbar ",
+                label: "Tools", value: "Draft", enabled: true, focused: false, selected: false,
+                actions: ["AXRaise"], bounds: bounds, children: [
+                    .init(role: "AXButton", enabled: false, focused: false, selected: false,
+                        actions: ["AXPress"], bounds: bounds)
+                ])
+        ])
+        try assertCompactPresentation(root, expected: """
+            {"elements":[{"role":"AXWindow","children":[
+                {"role":"AXGroup","subrole":"AXSection","identifier":"editor","title":" Toolbar ",
+                 "label":"Tools","value":"Draft","enabled":true,"focused":false,"selected":false,
+                 "actions":["AXRaise"],"children":[
+                    {"role":"AXButton","ref":1,"enabled":false,"focused":false,"selected":false,
+                     "actions":["AXPress"],"bounds":{"x":10,"y":20,"width":30,"height":40}}
+                ]}
+            ]}]}
+            """, emittedNodes: 3, refPaths: [[0, 0]])
+        let verbose = try presentationSnapshot(root, mode: .leafOnly)
+        let expectedVerbose = #"""
+            {"elements":[{"role":"AXWindow","bounds":{"x":10,"y":20,"width":30,"height":40},"children":[
+                {"role":"AXGroup","subrole":"AXSection","identifier":"editor","title":" Toolbar ",
+                 "label":"Tools","value":"Draft","enabled":true,"focused":false,"selected":false,
+                 "actions":["AXRaise"],"bounds":{"x":10,"y":20,"width":30,"height":40},"children":[
+                    {"role":"AXButton","ref":1,"enabled":false,"focused":false,"selected":false,
+                     "actions":["AXPress"],"bounds":{"x":10,"y":20,"width":30,"height":40}}
+                ]}
+            ]}]}
+            """#
+        XCTAssertEqual(presentationWire(verbose)["tree"],
+            try JSONDecoder().decode(JSONValue.self, from: Data(expectedVerbose.utf8)))
+        XCTAssertEqual(SnapshotPresentation(snapshot: verbose).emittedNodes, verbose.evidence.nodes.count)
+        XCTAssertEqual(presentationWire(try presentationSnapshot(root))["target"], presentationWire(verbose)["target"])
+        XCTAssertEqual(verbose.evidence.nodes.map(\.bounds), [bounds, bounds, bounds])
+    }
+
+    func testCompactKeepsRefBearingGroupAndItsGeometry() throws {
+        let root = AXTreeInputNode(role: "AXWindow", children: [
+            .init(role: "AXGroup", enabled: true, focused: false, selected: false,
+                actions: ["AXPress"], bounds: .init(x: 10, y: 20, width: 30, height: 40), children: [
+                    .init(role: "AXStaticText", value: "Details")
+                ])
+        ])
+        try assertCompactPresentation(root, expected: """
+            {"elements":[{"role":"AXWindow","children":[
+                {"role":"AXGroup","ref":1,"enabled":true,"focused":false,"selected":false,
+                 "actions":["AXPress"],"bounds":{"x":10,"y":20,"width":30,"height":40},"children":[
+                    {"role":"AXStaticText","value":"Details"}
+                ]}
+            ]}]}
+            """, emittedNodes: 3, refPaths: [[0]])
+    }
+
+    func testCompactDoesNotCollapseBoundaryWithOneObservedAndRetainedChild() throws {
+        let root = AXTreeInputNode(role: "AXWindow", children: [
+            .init(role: "AXGroup", enabled: true, focused: false, selected: false, children: [
+                .init(role: "AXButton", actions: ["AXPress"]),
+                .init(role: "AXButton", actions: ["AXPress"])
+            ])
+        ])
+        try assertCompactPresentation(root, expected: """
+            {"elements":[{"role":"AXWindow","children":[
+                {"role":"AXGroup","enabled":true,"focused":false,"selected":false,"children":[
+                    {"role":"AXButton","actions":["AXPress"]}
+                ]}
+            ]}]}
+            """, emittedNodes: 3, refPaths: [], maxElements: 3)
+        XCTAssertEqual(try presentationSnapshot(root, maxElements: 3).evidence.truncation, [
+            AXTraversalBoundary(path: [0], reason: .maxElements, observedChildren: 1, totalChildren: 2)
+        ])
+    }
+
+    func testCollapsedWrapperStateAndBoundsStillInvalidateActions() throws {
+        let bounds = WindowBounds(x: 10, y: 20, width: 30, height: 40)
+        func input(enabled: Bool? = true, focused: Bool? = false, selected: Bool? = false,
+                   bounds: WindowBounds) -> AXTreeInputNode {
+            .init(role: "AXWindow", children: [
+                .init(role: "AXGroup", enabled: enabled, focused: focused, selected: selected,
+                    bounds: bounds, children: [.init(role: "AXButton", actions: ["AXPress"])])
+            ])
+        }
+        let recorded = try presentationSnapshot(input(bounds: bounds))
+        let record = SnapshotRecord(id: "123e4567-e89b-42d3-a456-426614174000",
+            createdAt: "2026-09-08T10:00:00.000Z", expiresAt: "2026-09-08T10:10:00.000Z",
+            target: recorded.target, treeOptions: recorded.treeOptions, evidence: recorded.evidence)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let persistedBefore = try encoder.encode(record)
+        let wire = SnapshotResult(record: record, snapshot: recorded).wireData
+        XCTAssertEqual(try encoder.encode(record), persistedBefore)
+        XCTAssertEqual(SnapshotPresentation(snapshot: recorded).emittedNodes, 2)
+        XCTAssertNoThrow(try SnapshotService.validateEvidence(recorded, live: recorded, ref: 1))
+        for changed in [
+            input(enabled: nil, bounds: bounds),
+            input(focused: nil, bounds: bounds),
+            input(selected: nil, bounds: bounds),
+            input(bounds: .init(x: 11, y: 20, width: 30, height: 40))
+        ] {
+            let live = try presentationSnapshot(changed)
+            XCTAssertEqual(presentationWire(live)["tree"], wire["tree"])
+            XCTAssertNotEqual(recorded.evidence.nodes, live.evidence.nodes)
+            XCTAssertEqual(recorded.evidence.refs, live.evidence.refs)
+            XCTAssertThrowsError(try SnapshotService.validateEvidence(recorded, live: live, ref: 1)) {
+                XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT")
+            }
+        }
+    }
+
+    func testLeafOnlyPresentationPreservesEveryObservedNodeAndField() throws {
+        let snapshot = try presentationSnapshot(neutralWrapperInput(), mode: .leafOnly)
+        XCTAssertEqual(presentationWire(snapshot)["tree"], .object(["elements": .array([
+            .object(["role": .string("AXWindow"), "children": .array([
+                .object(["role": .string("AXGroup"), "enabled": .bool(true),
+                    "focused": .bool(false), "selected": .bool(false), "children": .array([
+                        .object(["role": .string("AXButton"), "ref": .number(1),
+                            "title": .string(" Save "), "label": .string("Commit"), "value": .string("draft"),
+                            "actions": .array([.string("AXPress")]), "enabled": .bool(true),
+                            "focused": .bool(false), "selected": .bool(false)])
+                    ])])
+            ])])
+        ])]))
+    }
+
+    func testPresentationByteMeasurements() throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        for (name, root) in [("neutral-wrapper", neutralWrapperInput()), ("zero-ref-text", zeroRefTextInput())] {
+            let snapshot = try presentationSnapshot(root)
+            let data = presentationWire(snapshot)
+            let tree = try encoder.encode(XCTUnwrap(data["tree"]))
+            let reply = try encoder.encode(WireReply.success(command: .snapshot, data: data))
+            let verbose = try presentationSnapshot(root, mode: .leafOnly)
+            XCTAssertEqual(snapshot.evidence, verbose.evidence)
+            if name == "neutral-wrapper" {
+                let verboseData = presentationWire(verbose)
+                XCTAssertLessThan(tree.count, try encoder.encode(XCTUnwrap(verboseData["tree"])).count)
+                XCTAssertLessThan(reply.count, try encoder.encode(WireReply.success(command: .snapshot, data: verboseData)).count)
+            }
+            for mode in [HintMode.full, .leafOnly] {
+                let noncompact = try presentationSnapshot(root, mode: mode)
+                XCTAssertEqual(SnapshotPresentation(snapshot: noncompact).emittedNodes, noncompact.evidence.nodes.count)
+            }
+            print("PRESENTATION_METRIC \(name) treeBytes=\(tree.count) replyBytes=\(reply.count) refs=\(snapshot.evidence.refs.count)")
+            print("PRESENTATION_TREE \(name) \(String(decoding: tree, as: UTF8.self))")
+            print("PRESENTATION_REPLY \(name) \(String(decoding: reply, as: UTF8.self))")
+        }
+    }
+
     func testSnapshotWireDataMatchesSharedActualProducerFixture() throws {
         let snapshot = try treeFixture("save-cancel")
         let record = SnapshotRecord(
@@ -699,6 +991,66 @@ final class SnapshotTests: XCTestCase {
 
         XCTAssertEqual(actual, expected)
     }
+}
+
+private func assertCompactPresentation(
+    _ root: AXTreeInputNode,
+    expected: String,
+    emittedNodes: Int,
+    refPaths: [[Int]],
+    maxDepth: Int = 8,
+    maxElements: Int = 500,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) throws {
+    let compact = try presentationSnapshot(root, maxDepth: maxDepth, maxElements: maxElements)
+    let verbose = try presentationSnapshot(root, mode: .leafOnly, maxDepth: maxDepth, maxElements: maxElements)
+    let before = compact.evidence
+    let presentation = SnapshotPresentation(snapshot: compact)
+    let expectedTree = try JSONDecoder().decode(JSONValue.self, from: Data(expected.utf8))
+    XCTAssertEqual(presentation.tree, expectedTree, file: file, line: line)
+    XCTAssertEqual(presentation.emittedNodes, emittedNodes, file: file, line: line)
+    XCTAssertEqual(presentationWire(compact)["tree"], expectedTree, file: file, line: line)
+    XCTAssertEqual(compact.evidence, before, file: file, line: line)
+    XCTAssertEqual(compact.evidence, verbose.evidence, file: file, line: line)
+    XCTAssertEqual(compact.evidence.refs.map(\.path), refPaths, file: file, line: line)
+    XCTAssertNoThrow(try AXEvidencePolicy.validate(compact.evidence, options: compact.treeOptions), file: file, line: line)
+}
+
+private func presentationWire(_ snapshot: AXTreeSnapshot) -> [String: JSONValue] {
+    let record = SnapshotRecord(
+        id: "123e4567-e89b-42d3-a456-426614174000",
+        createdAt: "2026-09-08T10:00:00.000Z",
+        expiresAt: "2026-09-08T10:10:00.000Z",
+        target: snapshot.target, treeOptions: snapshot.treeOptions,
+        evidence: snapshot.evidence
+    )
+    return SnapshotResult(record: record, snapshot: snapshot).wireData
+}
+
+private func presentationSnapshot(
+    _ root: AXTreeInputNode,
+    mode: HintMode = .leafCompact,
+    maxDepth: Int = 8,
+    maxElements: Int = 500
+) throws -> AXTreeSnapshot {
+    AXTree.snapshot(target: try treeFixture("save-cancel").target,
+        options: .init(maxDepth: maxDepth, maxElements: maxElements, hintMode: mode), root: root)
+}
+
+private func neutralWrapperInput() -> AXTreeInputNode {
+    AXTreeInputNode(role: "AXWindow", children: [
+        AXTreeInputNode(role: "AXGroup", enabled: true, focused: false, selected: false, children: [
+            AXTreeInputNode(role: "AXButton", title: " Save ", label: "Commit", value: "draft",
+                enabled: true, focused: false, selected: false, actions: ["AXPress"])
+        ])
+    ])
+}
+
+private func zeroRefTextInput() -> AXTreeInputNode {
+    AXTreeInputNode(role: "AXWindow", children: [
+        AXTreeInputNode(role: "AXStaticText", value: "Read only")
+    ])
 }
 
 private func snapshotCommandContext(
