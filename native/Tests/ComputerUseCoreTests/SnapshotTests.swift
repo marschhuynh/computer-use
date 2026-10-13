@@ -1001,27 +1001,40 @@ final class SnapshotTests: XCTestCase {
     }
 
     func testPresentationByteMeasurements() throws {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        for (name, root) in [("neutral-wrapper", neutralWrapperInput()), ("zero-ref-text", zeroRefTextInput())] {
-            let snapshot = try presentationSnapshot(root)
-            let data = presentationWire(snapshot)
-            let tree = try encoder.encode(XCTUnwrap(data["tree"]))
-            let reply = try encoder.encode(WireReply.success(command: .snapshot, data: data))
+        // Keep the first two inputs identical to Task 1's measured pre-change baseline.
+        // The long/rich inputs compare current modes only, not the original default.
+        for (name, root, inputNodes, refPaths) in [
+            ("neutral-wrapper", neutralWrapperInput(), 3, [[0, 0]]),
+            ("zero-ref-text", zeroRefTextInput(), 2, []),
+            ("long-neutral-wrappers", longNeutralWrapperInput(), 8, [Array(repeating: 0, count: 7)]),
+            ("static-text-rich", staticTextRichInput(), 5, [])
+        ] {
+            let compact = try presentationSnapshot(root)
             let verbose = try presentationSnapshot(root, mode: .leafOnly)
-            XCTAssertEqual(snapshot.evidence, verbose.evidence)
-            if name == "neutral-wrapper" {
-                let verboseData = presentationWire(verbose)
-                XCTAssertLessThan(tree.count, try encoder.encode(XCTUnwrap(verboseData["tree"])).count)
-                XCTAssertLessThan(reply.count, try encoder.encode(WireReply.success(command: .snapshot, data: verboseData)).count)
+            let before = compact.evidence
+            XCTAssertEqual(compact.treeOptions, .init(maxDepth: 8, maxElements: 500, hintMode: .leafCompact))
+            XCTAssertEqual(verbose.treeOptions, .init(maxDepth: 8, maxElements: 500, hintMode: .leafOnly))
+            XCTAssertEqual(compact.evidence, verbose.evidence, name)
+            XCTAssertEqual(compact.evidence.nodes.count, inputNodes, name)
+            XCTAssertFalse(compact.truncated, name)
+            XCTAssertEqual(compact.evidence.refs.map(\.path), refPaths, name)
+            XCTAssertEqual(compact.evidence.refs.map(\.ref), refPaths.isEmpty ? [] : [1], name)
+            let compactBytes = try measurePresentation(compact, name: name, inputNodes: inputNodes)
+            let verboseBytes = try measurePresentation(verbose, name: name, inputNodes: inputNodes)
+            if !refPaths.isEmpty {
+                XCTAssertEqual(SnapshotPresentation(snapshot: compact).emittedNodes, 2, name)
+                XCTAssertLessThan(compactBytes.tree, verboseBytes.tree, name)
+                XCTAssertLessThan(compactBytes.reply, verboseBytes.reply, name)
+            } else {
+                // Retaining observed text is intentional, even when a ref-only view was smaller.
+                XCTAssertEqual(SnapshotPresentation(snapshot: compact).emittedNodes, inputNodes, name)
+                XCTAssertEqual(presentationWire(compact)["tree"], presentationWire(verbose)["tree"], name)
             }
+            XCTAssertEqual(compact.evidence, before, name)
             for mode in [HintMode.full, .leafOnly] {
                 let noncompact = try presentationSnapshot(root, mode: mode)
-                XCTAssertEqual(SnapshotPresentation(snapshot: noncompact).emittedNodes, noncompact.evidence.nodes.count)
+                XCTAssertEqual(SnapshotPresentation(snapshot: noncompact).emittedNodes, inputNodes, name)
             }
-            print("PRESENTATION_METRIC \(name) treeBytes=\(tree.count) replyBytes=\(reply.count) refs=\(snapshot.evidence.refs.count)")
-            print("PRESENTATION_TREE \(name) \(String(decoding: tree, as: UTF8.self))")
-            print("PRESENTATION_REPLY \(name) \(String(decoding: reply, as: UTF8.self))")
         }
     }
 
@@ -1224,6 +1237,39 @@ private func zeroRefTextInput() -> AXTreeInputNode {
     AXTreeInputNode(role: "AXWindow", children: [
         AXTreeInputNode(role: "AXStaticText", value: "Read only")
     ])
+}
+
+private func longNeutralWrapperInput() -> AXTreeInputNode {
+    let bounds = WindowBounds(x: 110, y: 120, width: 80, height: 30)
+    var child = AXTreeInputNode(role: "AXButton", title: "Save", enabled: true,
+        focused: false, selected: false, actions: ["AXPress"], bounds: bounds)
+    for index in 0..<6 {
+        child = AXTreeInputNode(role: index.isMultiple(of: 2) ? "AXGroup" : "AXScrollArea",
+            enabled: true, focused: false, selected: false, bounds: bounds, children: [child])
+    }
+    return AXTreeInputNode(role: "AXWindow", bounds: bounds, children: [child])
+}
+
+private func staticTextRichInput() -> AXTreeInputNode {
+    AXTreeInputNode(role: "AXWindow", children: [
+        "Status: ready", "Read only — café ☕", "No action is available here.", "End of summary."
+    ].map { AXTreeInputNode(role: "AXStaticText", value: $0) })
+}
+
+private func measurePresentation(
+    _ snapshot: AXTreeSnapshot, name: String, inputNodes: Int
+) throws -> (tree: Int, reply: Int) {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    let data = presentationWire(snapshot)
+    let tree = try encoder.encode(XCTUnwrap(data["tree"]))
+    let reply = try encoder.encode(WireReply.success(command: .snapshot, data: data))
+    let label = "\(name) mode=\(snapshot.treeOptions.hintMode.rawValue)"
+    // Data.count is serialized UTF-8 bytes, not String.count or actual model tokens.
+    print("PRESENTATION_METRIC \(label) inputNodes=\(inputNodes) observedNodes=\(snapshot.evidence.nodes.count) emittedNodes=\(SnapshotPresentation(snapshot: snapshot).emittedNodes) refs=\(snapshot.evidence.refs.count) treeBytes=\(tree.count) replyBytes=\(reply.count) treeCeilBytesOver4=\((tree.count + 3) / 4) replyCeilBytesOver4=\((reply.count + 3) / 4)")
+    print("PRESENTATION_TREE \(label) \(String(decoding: tree, as: UTF8.self))")
+    print("PRESENTATION_REPLY \(label) \(String(decoding: reply, as: UTF8.self))")
+    return (tree.count, reply.count)
 }
 
 private func snapshotCommandContext(

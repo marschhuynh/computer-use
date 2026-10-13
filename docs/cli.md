@@ -82,6 +82,97 @@ nuvin-computer-use set-value --snapshot <uuid> --ref 7 --text "example"
 - `--window` optional only when exactly one eligible window exists.
 - Snapshot records persist to `~/Library/Application Support/nuvin-computer-use/snapshots/` (dir `0700`, files `0600`), expire after 10 min, and are swept by later invocations. **They contain visible text — treat as sensitive.**
 
+### Presentation and traversal
+
+Traversal defaults and action validation remain unchanged.
+Defaults are `--depth 8`, `--max-elements 500`, `--hint-mode leafCompact`,
+`--timeout 15000` (maximum `120000` ms), and a 10-minute snapshot lifetime.
+Depth and element limits bound **observation**; hint mode changes presentation
+and ref policy, not which nodes the traversal visits.
+
+- `leafCompact` keeps the real root, refs, traversal boundaries, meaningful
+  descriptive/state/action nodes, and their ancestor context. It collapses
+  only anonymous, non-root `AXGroup`/`AXScrollArea` wrappers with exactly one
+  observed direct child and one retained child, and no ref, boundary,
+  description, action, disabled state, or true focused/selected state.
+  Neutral `enabled:true`, `focused:false`, `selected:false` do not
+  prevent that narrow collapse. Retained fields keep their original values.
+- Compact non-ref context omits bounds; ref-bearing nodes keep available
+  bounds, and root geometry remains in `data.target.bounds`. All original
+  evidence, including hidden wrappers' states and geometry, remains available
+  to action validation. Projected child indexes are **not ref IDs**.
+- `leafOnly` is the verbose tree/geometry alternative with the **same leaf
+  ref policy** as `leafCompact`. Both select eligible actionable leaves and
+  editable areas under the existing boundary exclusions; text can be shown
+  without any ref. `full` retains the verbose tree but uses a different ref
+  policy, including non-actionable nodes. Neither mode grants permission to
+  act at or below a traversal boundary; a ref alone is not an action guarantee.
+
+A static-text-rich compact reply may be larger than the old ref-only view.
+Compaction neither reclaims traversal budget nor recovers unvisited nodes.
+Use `--json` to read the single structured reply; non-JSON output stays a
+short success line, without a second Markdown tree or automatic screenshot.
+
+### Snapshot coverage
+
+New helpers include `data.coverage` on snapshots and explicitly requested
+window `screenshot --annotated` replies. Coverage is optional only for legacy
+protocol-1 replies: missing coverage means **unknown diagnostics**, not zero
+counts or a complete traversal. Consumers must accept omission without
+inventing coverage; malformed known fields are rejected. Schema version
+remains `1`; package the updated native producer and TypeScript consumer
+together.
+
+| Field | Meaning |
+|---|---|
+| `scope` | Always `"selectedWindow"`; not a whole-app or whole-desktop inventory. |
+| `absenceIsConclusive` | Always `false`, even when there are no boundaries. Missing UI remains unknown. |
+| `observedNodes` | Number of nodes actually recorded in original AX evidence. |
+| `emittedNodes` | Number of JSON tree nodes after presentation; the difference from observed nodes is presentation-only. |
+| `refCount` | Number of derived refs, **not** a count of actionable controls (especially in `full`). |
+| `limits.maxDepth`, `limits.maxElements` | Actual requested traversal options, not a promise of full coverage. |
+| `boundaries` | Traversal cuts in original evidence order; empty when no depth/element cut was recorded. |
+| `boundaries[].path` | Original zero-based evidence child path; `[]` is the real root. Never resolve it against projected compact child indexes. |
+| `boundaries[].reason` | `"maxDepth"` or `"maxElements"`; no timeout/cancellation boundary reason. |
+| `boundaries[].observedChildren` | Observed **direct children** of that boundary node. |
+| `boundaries[].totalChildren` | Reported total **direct children**, not total omitted descendants. |
+| `noRefReason` | Omitted when refs exist. With zero refs: `"traversalLimited"` if boundaries exist, otherwise `"noEligibleRefs"`. Describes the observed condition, not a proved root cause. |
+
+`data.truncated` remains present and matches whether boundaries exist. A root
+element-cap boundary can legitimately exclude every ref in **all** hint
+modes. For example, a root with two children, whose first child itself has
+one child, observed with `--max-elements 2` yields this coverage:
+
+```json
+{
+  "scope": "selectedWindow",
+  "absenceIsConclusive": false,
+  "observedNodes": 2,
+  "emittedNodes": 2,
+  "refCount": 0,
+  "limits": {"maxDepth": 8, "maxElements": 2},
+  "boundaries": [
+    {"path": [0], "reason": "maxElements", "observedChildren": 0, "totalChildren": 1},
+    {"path": [], "reason": "maxElements", "observedChildren": 1, "totalChildren": 2}
+  ],
+  "noRefReason": "traversalLimited"
+}
+```
+
+This is a successful bounded observation with a real nonempty root, not an
+empty window. Failed target resolution or AX reads still return errors;
+`TIMEOUT` and `INTERRUPTED` never become successful partial snapshots.
+See [recovery guidance](agent-guide.md#snapshot-coverage-and-recovery) for
+limit-specific retries and explicit screenshots. Use the **new snapshot's
+refs** after every retry or mode change.
+
+Snapshot collection now performs two additional target identity validations
+around its preparation hook, **even with the no-op default**. Live metadata
+and AX reads, lock/deadline cost, and earlier transient identity errors from
+these checks have not been measured. The compiled, fake-tested AX activation
+experiment is inactive; the shipping hook remains no-op, not a claim of
+zero added snapshot work or browser readiness.
+
 ## Direct input
 
 ```sh
@@ -121,6 +212,14 @@ nuvin-computer-use click --capture <uuid> --x 420 --y 180 [--button left|right|m
 nuvin-computer-use move  --capture <uuid> --x 420 --y 180
 nuvin-computer-use drag  --capture <uuid> --from 420,180 --to 620,300
 ```
+
+Screenshots are a separate explicit command; `snapshot` never captures one
+automatically. `--annotated` requires a window target and requests one new
+snapshot, returning its `snapshotId`, tree, `truncated`, and coverage alongside
+the capture. It uses the same depth 8 / 500 nodes / `leafCompact` defaults
+unless overridden. Badges use original evidence-ref bounds, never compact
+context geometry; use that returned snapshot's refs for semantic actions.
+Plain window/display captures do not include an AX tree or coverage.
 
 `--x`/`--y`/`--from`/`--to` are **image pixels** in the saved PNG, translated
 back to screen coordinates via the capture record (Retina-aware). Display

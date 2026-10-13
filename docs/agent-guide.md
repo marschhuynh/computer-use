@@ -66,7 +66,8 @@ nuvin-computer-use windows --app Notes --json   # its windows + eligibility
 ```sh
 # Capture the AX tree; get a snapshotId + element refs.
 nuvin-computer-use snapshot --app Notes --window 12345 --json
-# → data.snapshotId, data.tree.elements[] each with role/ref/actions/bounds
+# → data.snapshotId, data.tree.elements (nested nodes), data.coverage
+# Nodes always have a role; ref/actions/bounds are not present on every node.
 
 # Act on a ref within the 10-minute snapshot lifetime.
 nuvin-computer-use press --snapshot <uuid> --ref 7 --json
@@ -78,7 +79,7 @@ nuvin-computer-use scroll --snapshot <uuid> --ref 20     # scroll element into v
 
 ```jsonc
 {"role":"AXButton","ref":1,"identifier":"...","title":"Save","label":"Save",
- "value":null,"actions":["AXPress"],"enabled":true,"focused":false,
+ "actions":["AXPress"],"enabled":true,"focused":false,
  "bounds":{"x":215,"y":784,"width":82,"height":26}}
 ```
 
@@ -86,14 +87,68 @@ nuvin-computer-use scroll --snapshot <uuid> --ref 20     # scroll element into v
 - `actions` — what the element supports (`AXPress`, `AXConfirm`, `AXShowMenu`,
   `AXScrollToVisible`, …). Only act on a ref whose `actions` include what you
   need; `press` requires `AXPress`.
-- `bounds` — screen-space rect (points). Use the center for spatial fallback.
-- `hint-mode`: `leafCompact` (default) refs only actionable leaves; `full`
-  refs every node; `leafOnly` refs actionable leaves incl. editable areas.
+- `value` — an optional string, omitted when unavailable (not `null`). Static
+  text can carry a value without a ref; read it as context, not an action target.
+- `bounds` — optional screen-space rect in points. Compact non-ref context
+  omits it. Do not pass screen points to `click`; request a screenshot and
+  choose coordinates in that capture's image pixels for spatial fallback.
+- `hint-mode`: `leafCompact` (default) and `leafOnly` share the existing leaf
+  ref policy for eligible actionable leaves and editable areas. `leafOnly`
+  keeps verbose hierarchy/geometry. `full` uses a different policy that can
+  ref non-actionable nodes; it does not ref every node when traversal is
+  limited. All modes retain boundary safety exclusions. A ref is not proof
+  that the desired action is supported or that the UI will change.
 
 **Ref stability:** refs are valid only for that `snapshotId` and only while the
 window is unchanged. Any mutation (`press`, typing) may change the tree —
 **re-snapshot before your next ref action.** A stale snapshot returns
 `STALE_SNAPSHOT` (exit 5) → re-snapshot and re-derive the ref.
+
+#### Snapshot coverage and recovery
+
+Traversal defaults and action validation remain unchanged.
+The defaults are depth `8`, `500` nodes, `leafCompact`, timeout `15000` ms
+(maximum `120000` ms), and a 10-minute snapshot lifetime. The compact tree
+is a presentation of observed evidence, not a map from child indexes to refs.
+Anonymous single-child layout wrappers may be collapsed, and non-ref context
+geometry omitted. Never synthesize a ref from a projected child index.
+
+When the desired UI or ref is missing:
+
+1. Read `data.coverage` ([field reference](cli.md#snapshot-coverage)). Its
+   scope is the selected window and `absenceIsConclusive` is always false.
+   Neither an empty boundary list nor zero refs proves UI is absent.
+   `refCount` is not an action count, especially in `full`. `noRefReason`
+   distinguishes `traversalLimited` from `noEligibleRefs` only when refs are
+   zero; it does not diagnose why an app failed to expose the desired content.
+   Legacy protocol-1 helpers can omit coverage; do not manufacture counts or
+   infer completeness from that omission.
+2. Check each relevant boundary's **reason** before retrying. `maxDepth`
+   may justify a deeper traversal, while `maxElements` may justify a larger,
+   bounded node budget. For example, only when warranted by those respective
+   boundaries, retry with `--depth 12` or `--max-elements 800`. Neither
+   guarantees finding the content; mixed boundaries may require reconsidering
+   both limits. Paths name **original evidence**, not projected tree indexes;
+   child counts describe direct children, never all omitted descendants.
+3. A different hint mode cannot recover unvisited nodes. Use `leafOnly` for
+   verbose hierarchy/geometry with the same leaf ref policy, not as an
+   automatic cure for missing UI. Static text may already be useful without
+   a ref. **Always use the new snapshotId and that snapshot's refs after a
+   retry or mode change**, even if an integer happens to match an old ref.
+4. If semantic evidence remains insufficient, request a **separate explicit
+   screenshot**, inspect the PNG, and use its capture ID/image pixels for a
+   spatial action when appropriate. `snapshot` never automatically captures
+   or perceives the screen. Window `screenshot --annotated` explicitly asks
+   for one new snapshot plus ref badges/coverage; badges use original
+   evidence-ref bounds. A screenshot does not recover unvisited AX nodes or
+   create a semantic ref for a visual target.
+
+`TIMEOUT`, `INTERRUPTED`, failed AX reads, and unresolved targets are errors,
+not successful partial observations. Do not interpret an error as absence.
+The snapshot preparation hook remains no-op by default; no automatic browser
+AX activation/readiness is promised. Snapshot collection nevertheless has
+two extra identity validations around that hook; live metadata/AX work,
+lock/deadline cost and earlier transient identity failures remain unmeasured.
 
 ### 3. Spatial path — screenshot → pixel → act
 
@@ -125,10 +180,12 @@ nuvin-computer-use drag  --capture <uuid> --from 420,180 --to 620,300 --json
 
 #### Canvas & custom-drawn UI
 
-Canvas, games, paint apps, and any pixel-rendered surface have **no AX tree** —
-`--annotated` and `press`/`set-value` can't reach them. The spatial path is the
-only way in, and it's sufficient: `screenshot` → read the PNG → `click`/`drag`
-pixels. Verified end-to-end (drew on jspaint.app's canvas).
+Canvas, games, paint apps, and other pixel-rendered surfaces may expose little
+or no useful AX detail for their content. Missing snapshot nodes are not proof
+of absence. When no suitable semantic ref is available, use the spatial path:
+`screenshot` → read the PNG → `click`/`drag` pixels. An annotation does not
+create a ref for arbitrary pixels. Earlier live verification drew on
+jspaint.app's canvas; that is not evidence of AX completeness or activation.
 
 - **Drawing = many `drag`s.** A `drag` is one straight left-button stroke.
   Compose shapes from short drags: an octagon ≈ 8 drags vertex-to-vertex; an
@@ -222,7 +279,8 @@ it or `press` it via a ref).
 ```
 reply = run("snapshot --app {app} --window {wid} --json")
 if !reply.ok: handle(reply.error.code); continue
-el = pick(reply.data.tree.elements, by: role/label/actions)
+el = pick(reply.data.tree.elements, by: role/label/actions, requires: ref + AXPress)
+if !el: inspect_coverage_then_choose_bounded_retry_or_explicit_screenshot(); continue
 act  = run(f"press --snapshot {reply.data.snapshotId} --ref {el.ref} --json")
 if act.error?.code in (STALE_SNAPSHOT, STALE_CAPTURE): re-snapshot; continue
 if act.error?.details.mutationStatus == "potentiallyApplied": re-observe first

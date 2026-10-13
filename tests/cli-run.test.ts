@@ -57,6 +57,43 @@ describe('run', () => {
     expect(execute).toHaveBeenCalledWith(expect.objectContaining({ command: 'snapshot' }), expect.any(AbortSignal));
   });
 
+  it.each(['snapshot', 'screenshot'] as const)('does not manufacture coverage for a legacy %s reply', async command => {
+    const reply = success(command);
+    const execute = vi.fn(async () => reply);
+    const deps = dependencies({ execute });
+    const argv = command === 'snapshot'
+      ? ['snapshot', '--app', 'Editor', '--json']
+      : ['screenshot', '--app', 'Editor', '--output', '/tmp/annotated.png', '--annotated', '--json'];
+    await expect(run(argv, deps)).resolves.toBe(0);
+    expect(deps.stdout).toEqual([`${JSON.stringify(reply)}\n`]);
+    expect(JSON.parse(deps.stdout[0]).data).not.toHaveProperty('coverage');
+    expect(deps.stderr).toEqual([]);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({
+      command, tree: { maxDepth: 8, maxElements: 500, hintMode: 'leafCompact' },
+    }), expect.any(AbortSignal));
+  });
+
+  it('prints explicitly annotated coverage once without a follow-up snapshot or screenshot', async () => {
+    const snapshot = JSON.parse(await readFile(new URL('../contracts/fixtures/snapshot-compact-reply.json', import.meta.url), 'utf8'));
+    const capture = success('screenshot');
+    if (!capture.ok) throw new Error('expected screenshot success fixture');
+    const reply = { ...capture, data: {
+      ...capture.data, snapshotId: snapshot.data.snapshotId, tree: snapshot.data.tree,
+      truncated: snapshot.data.truncated, coverage: snapshot.data.coverage,
+    } };
+    const execute = vi.fn(async () => reply);
+    const deps = dependencies({ execute });
+    await expect(run(['screenshot', '--app', 'Editor', '--output', '/tmp/annotated.png', '--annotated', '--json'], deps)).resolves.toBe(0);
+    expect(deps.stdout).toEqual([`${JSON.stringify(reply)}\n`]);
+    expect(deps.stderr).toEqual([]);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({
+      command: 'screenshot', annotated: true,
+      tree: { maxDepth: 8, maxElements: 500, hintMode: 'leafCompact' },
+    }), expect.any(AbortSignal));
+  });
+
   it('keeps non-JSON snapshot output a short success line when coverage is present', async () => {
     const reply = JSON.parse(await readFile(new URL('../contracts/fixtures/snapshot-reply.json', import.meta.url), 'utf8'));
     const execute = vi.fn(async () => reply);

@@ -110,6 +110,17 @@ describe('parse', () => {
     });
   });
 
+  it('uses the same documented tree and timeout defaults for explicit annotated screenshots', () => {
+    expect(parse(['screenshot', '--pid', '42', '--window', '7', '--output', '/tmp/annotated.png', '--annotated', '--json'])).toMatchObject({
+      kind: 'command', json: true,
+      request: {
+        command: 'screenshot', annotated: true,
+        options: { timeoutMs: 15_000, cursor: 'on' }, target: { pid: 42, windowId: 7 },
+        tree: { maxDepth: 8, maxElements: 500, hintMode: 'leafCompact' },
+      },
+    });
+  });
+
   it.each([
     [['snapshot', '--wat'], /Unknown option/],
     [['snapshot', '--app', 'Safari', '--pid', '42'], /exactly one/],

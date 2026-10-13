@@ -47,13 +47,19 @@ install, no Homebrew dependencies.
 
 ```sh
 nuvin-computer-use doctor --json          # permissions + helper check
-nuvin-computer-use snapshot --app Notes   # AX tree -> snapshotId
+nuvin-computer-use snapshot --app Notes --json  # AX tree + coverage -> snapshotId
 nuvin-computer-use press --snapshot <id> --ref 3
 nuvin-computer-use screenshot --app Notes --output notes.png --json
 nuvin-computer-use screenshot --output screen.png --json  # bare = main display; --display <n> picks one
 nuvin-computer-use click --capture <id> --x 200 --y 140
 nuvin-computer-use key --key cmd+space                    # bare = global chord
 ```
+
+Snapshots default to a compact AX view with coverage diagnostics, not proof
+that unreported UI is absent. See [snapshot coverage](docs/cli.md#snapshot-coverage)
+and [agent recovery guidance](docs/agent-guide.md#snapshot-coverage-and-recovery)
+before retrying limits or requesting a separate screenshot.
+Traversal defaults and action validation remain unchanged.
 
 ## Develop / test
 
