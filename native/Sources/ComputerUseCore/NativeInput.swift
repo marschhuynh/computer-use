@@ -190,12 +190,13 @@ public final class LiveInputDriver: NativeInputDriver {
         guard let (key, modifiers) = KeyChord.toCGEvent(chord) else {
             throw NativeFailure("INVALID_ARGUMENT", "Unrecognized key/modifier combination")
         }
-        guard let down = CGEvent(keyboardEventSource: nil, virtualKey: key, keyDown: true),
-              let up = CGEvent(keyboardEventSource: nil, virtualKey: key, keyDown: false) else {
+        let source = CGEventSource(stateID: .privateState)
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false) else {
             throw NativeFailure("NATIVE_FAILURE", "Unable to construct key event")
         }
         down.flags = modifiers
-        up.flags = modifiers
+        up.flags = []
         down.postToPid(pid_t(pid))
         up.postToPid(pid_t(pid))
     }
@@ -215,12 +216,13 @@ public final class LiveInputDriver: NativeInputDriver {
         guard let (key, modifiers) = KeyChord.toCGEvent(chord) else {
             throw NativeFailure("INVALID_ARGUMENT", "Unrecognized key/modifier combination")
         }
-        guard let down = CGEvent(keyboardEventSource: nil, virtualKey: key, keyDown: true),
-              let up = CGEvent(keyboardEventSource: nil, virtualKey: key, keyDown: false) else {
+        let source = CGEventSource(stateID: .privateState)
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false) else {
             throw NativeFailure("NATIVE_FAILURE", "Unable to construct key event")
         }
         down.flags = modifiers
-        up.flags = modifiers
+        up.flags = []
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
     }
@@ -233,15 +235,18 @@ public final class LiveInputDriver: NativeInputDriver {
         // to a pid can be reordered or dropped while the target's field is
         // still activating. ~4ms between events is enough for the receiver to
         // keep up and stays well within any command deadline for sane input.
+        let source = CGEventSource(stateID: .privateState)
         for scalar in text.unicodeScalars {
             try context.check()
             var utf16 = Array(String(scalar).utf16)
-            guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else {
+            guard let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true) else {
                 throw NativeFailure("NATIVE_FAILURE", "Unable to construct text event")
             }
+            event.flags = []
             event.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
             event.postToPid(pid_t(pid))
-            guard let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { continue }
+            guard let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else { continue }
+            up.flags = []
             up.postToPid(pid_t(pid))
             usleep(4_000)
         }
@@ -252,15 +257,18 @@ public final class LiveInputDriver: NativeInputDriver {
     /// share the target's event queue. Same per-scalar pacing as `postText`.
     public func postFocusedText(_ text: String, context: CommandContext) throws {
         try context.check()
+        let source = CGEventSource(stateID: .privateState)
         for scalar in text.unicodeScalars {
             try context.check()
             var utf16 = Array(String(scalar).utf16)
-            guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else {
+            guard let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true) else {
                 throw NativeFailure("NATIVE_FAILURE", "Unable to construct text event")
             }
+            event.flags = []
             event.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
             event.post(tap: .cghidEventTap)
-            guard let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { continue }
+            guard let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else { continue }
+            up.flags = []
             up.post(tap: .cghidEventTap)
             usleep(4_000)
         }

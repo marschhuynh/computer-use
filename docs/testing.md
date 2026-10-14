@@ -9,10 +9,11 @@ does *not* prove.
 |---|---|---|---|
 | `npm run typecheck` | TypeScript | static types across `src/` | nothing |
 | `npm test` | vitest, `tests/*.test.ts` | CLI flag parsing, JSON stdout purity, reply projection, exit-code mapping, backend timeout/cancel/malformed-reply handling — all fully mocked, no system calls | nothing |
-| `npm run native-tests` | Swift XCTest, `native/Tests/ComputerUseCoreTests` | discovery/target resolution, snapshot records, state store (locking, atomic write, expiry, sweep), capture geometry, cursor timeline — against AX **fixtures**, no live desktop | macOS + Swift toolchain |
+| `npm run native-tests` | Swift XCTest, `native/Tests/ComputerUseCoreTests` | discovery/bundle confinement, AppKit/kernel process identity, raw AX preparation/batch provenance, publication/action/ref safety, coverage diagnostics, state-store transactions, geometry and cursor timeline — against AX **fixtures**, no live desktop | macOS + Swift toolchain |
 | `npm run test:native-protocol` | `scripts/native-protocol-tests.mjs` | builds the host and exercises the JSON-lines request/reply protocol over real stdio | macOS |
-| `npm run test:build-hygiene` | `scripts/test-build-hygiene.mjs` | `dist/` has no stale artifacts; `cli.js` has shebang + exec bit | after `npm run build` |
-| `node scripts/package-smoke.mjs` | end-to-end packaging | `npm pack` → isolated `npm install --prefix` → installed bin runs `--version`, `--help`, `doctor`; resolves the **bundled** helper (protocol 1) with no `~/.nuvin` install | macOS, network for npm |
+| `npm run test:build-hygiene` | `scripts/test-build-hygiene.mjs` | builds TS; `dist/` has no stale artifacts, `cli.js` has shebang + exec bit, `src/cli.ts` is preserved | installed dependencies |
+| `npm run build` | composed build | TS cleanup/compilation and executable CLI, release Swift host build/copy | macOS + Swift toolchain |
+| `node scripts/package-smoke.mjs` (separate, not run for this integration) | end-to-end packaging | `npm pack` → isolated `npm install --prefix` → installed bin runs `--version`, `--help`, `doctor`; resolves the **bundled** helper (protocol 1) with no `~/.nuvin` install | macOS, network for npm |
 
 ## What unit tests do *not* prove
 
@@ -22,8 +23,10 @@ against fixtures; the protocol tests run the real host but with scripted
 requests. None of them prove that a `CGEvent` actually lands in a real app's
 window, that TCC granted the launcher, or that the overlay draws.
 
-Do not report live verification as done unless it was **explicitly authorized
-and run against a real app** (see Stage K live acceptance).
+For this integration, real-app acceptance is **user-owned / NOT RUN by
+workers/coordinator** under H4, including Chrome, keyboard and Shopee. It is
+**not an automated or local-integration gate**. Fixture assertions, source
+retention guards and builds do not establish live delivery or readiness.
 
 ## Compact accessibility snapshots: separate gates
 
@@ -33,34 +36,49 @@ Depth `8`, `500` nodes, `leafCompact`, timeout `15000` ms (maximum `120000`),
 
 | Gate | Local evidence | What remains outside it |
 |---|---|---|
-| **A — presentation and coverage** | `SnapshotTests`, `CaptureTests`, TS producer/consumer fixtures, CLI parsing and one-JSON-output tests; full non-live commands below | Live routing, real content completeness, latency, release approval. Independent review is a separate step. |
-| **B — inactive preparation safety** | `AXSnapshotPreparationTests`, `AXTrustTests`, `SnapshotTransactionTests`: fake writes, deadlines/cancellation, identity bracketing, no record publication on failure, no preparation during action validation | Real AX writes, browser readiness, IPC timing and native-app side effects. Gate A does not depend on live activation. |
-| **C — live comparison/default decision** | Requires separately authorized Arc/native-app comparison and explicit release decision | **NOT RUN / HOLD** for this change's non-live verification. No permission, readiness, or default-activation approval is inferred from A/B. |
+| **A — presentation and coverage** | `SnapshotTests`, `CaptureTests`, TS producer/consumer fixtures, parsing and JSON output; original paths, completed-subtree refs, strict omitted diagnostics and full persisted evidence | Real content completeness, input delivery, latency and release approval. |
+| **B — shipping preparation / raw failure safety** | `AXSnapshotPreparationTests`, `AXTrustTests`, `SnapshotTransactionTests`: injected raw timeout/copy/write/multiple/single operations used by live adapters; preparation hard failures stop observation and all hard failures prevent publication; actual action validation dispatches unchanged completed-subtree refs and rejects changed/unsafe evidence without snapshot preparation | Actual AX effects, permissions, browser readiness, synchronous IPC latency and native-app side effects. |
+| **C — composed candidate automation** | Seven ordered commands below, full discovered suite results and tested source identities in the candidate verification note | Independent review, integrated-main checks, user-owned real-app acceptance and release approval. |
+| **D — independently reviewed local main** | Coordinator-owned fresh review of the exact candidate, preservation checks and the same ordered full main automated gates after local integration | Pending at candidate handoff; candidate exit 0 is not main or review evidence. |
+| **User-owned real-app acceptance** | **NOT RUN by workers/coordinator**; the user performs this separately | Not an automated/local-integration prerequisite; no live acceptance or release approval claimed. |
 
-The bounded AX preparation module is implemented, compiled, and fake-tested,
-but **inactive in the shipping path**. `SnapshotService`'s preparation hook
-remains explicitly no-op. A future accepted `AXManualAccessibility` or
-fallback `AXEnhancedUserInterface` write would mean only **requested**, not
-“web AX ready” or “Arc fixed.” Wiring that live module into the default needs
-separate approval after the live gate, not merely green fixture tests.
+The shipping `SnapshotService` default invokes bounded preparation inside the
+desktop lock, with target identity checks before/after it and final checks
+after observation. Only actual optional write returns `attributeUnsupported`,
+`failure` or `illegalArgument` negotiate capability. Timeout setup must
+succeed; optional state reads use strict Boolean decoding with only
+`attributeUnsupported`/`noValue` absence. Setup throws, hard raw statuses,
+malformed success, cancellation and deadline expiry remain failures, not
+successful unsupported preparation. Only top-level batch `attributeUnsupported`
+permits individual fallback; per-entry scalar compatibility stays local.
 
-No-op does **not** mean unchanged snapshot cost: collection now performs two
-additional target identity validations around preparation inside the desktop
-lock. Live process/window metadata and AX reads consume deadline/lock budget
-and may reject transient identity/title/bounds changes earlier. Their cost,
-latency, and transient failure rate are unmeasured. Action validation itself
-is unchanged.
+An accepted manual/enhanced write means only **requested**, not “web AX ready”
+or “browser fixed.” Calls request at most a 250 ms timeout against remaining
+budget; synchronous IPC is not forcibly cancelled. A first manual enable may
+wait 250 ms only with more than 500 ms remaining and prior state not true.
+Live cost/latency/side effects remain unmeasured. Action validation keeps its
+whole-tree stale policy and does not invoke snapshot preparation.
 
-Reproduce the non-live gates from the repository root on macOS:
+Run each candidate gate separately from the candidate root on macOS, and
+retain full output/exit status/counts. After independent review and safe local
+integration, the coordinator repeats these on main; those are separate gates:
 
 ```sh
-swift test --package-path native --filter SnapshotTests
-npm test -- tests/cli-parse.test.ts tests/cli-run.test.ts
+npm run native-tests
 npm run typecheck
 npm test
-npm run native-tests
 npm run test:native-protocol
+npm run test:build-hygiene
+npm run build
+npm test
 ```
+
+Bounded post-build artifact checks are `node ./dist/cli.js --version`,
+`node ./dist/cli.js --help` and
+`./dist/native/computer-use-host --protocol-version` (expected protocol `1`).
+They do not run GUI/input commands or prove TCC readiness. Package smoke,
+installation, live desktop checks and release approval are not substituted
+for these candidate/main gates.
 
 Inspect the protocol runner before using it as a non-live check:
 `scripts/native-protocol-tests.mjs` builds a fresh host;
@@ -96,19 +114,14 @@ inject fake/no-op preparation and use temporary state roots. See the
 for the exact commands, byte baselines, and held gates. It is local evidence,
 not an independent review or release authorization.
 
-## Live acceptance (opt-in, macOS)
+## User-owned real-app acceptance — NOT RUN
 
-Live checks require a real desktop and explicit authorization — they move the
-physical pointer, change focus, and post real input. They are **not** part of
-`npm test`. To run them, see the Stage K plan
-(`docs/superpowers/plans/2026-09-16-stage-k-live-acceptance.md`), which
-specifies:
-
-- `snapshot` → `press`/`set-value` against a fixture app window
-- `key`, `type` (incl. Unicode), directional `scroll`
-- `screenshot` + `click`/`move`/`drag` on `--capture` coordinates
-- visible cursor feedback, documented physical-pointer/foreground behavior,
-  and no leftover overlay or held input after cancellation
+The user will validate real apps separately. No worker/coordinator live GUI,
+browser, foreground input, Chrome, keyboard or Shopee checks are authorized
+for this integration. No real-app command recipe is part of its automated
+plan. User-owned acceptance is not an automated or local-integration gate;
+actual input effect, broader browser readiness, service-hosted panel targeting
+and live/release acceptance remain unproved by the fixture/build checks.
 
 ## Notes for contributors
 

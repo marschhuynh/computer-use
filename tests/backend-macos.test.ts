@@ -206,6 +206,56 @@ describe('MacOSBackend', { timeout: 25_000 }, () => {
     await expect(executeSnapshotReply(expected, request)).resolves.toEqual(expected);
   });
 
+  it('accepts omittedBoundaries when positive integer and boundaries + omittedBoundaries <= observedNodes', async () => {
+    const expected = await depthBoundaryReply();
+    expected.data.coverage.omittedBoundaries = 2;
+    const request = { ...snapshotRequest(), tree: { maxDepth: 2, maxElements: 500, hintMode: 'leafCompact' as const } };
+    await expect(executeSnapshotReply(expected, request)).resolves.toEqual(expected);
+  });
+
+  it.each([false, true])('accepts 40 original depth cuts with summarized diagnostics (mixed cap: %s)', async mixed => {
+    const expected = await readSnapshotReply(true);
+    expected.data.tree = { elements: [{ role: 'AXWindow', children: Array.from({ length: 40 }, () => ({ role: 'AXGroup' })) }] };
+    expected.data.truncated = true;
+    expected.data.coverage = {
+      scope: 'selectedWindow', absenceIsConclusive: false,
+      observedNodes: 41, emittedNodes: 41, refCount: 0,
+      limits: { maxDepth: 1, maxElements: mixed ? 41 : 500 },
+      boundaries: [
+        ...Array.from({ length: mixed ? 31 : 32 }, (_, index) => ({
+          path: [index], reason: 'maxDepth', observedChildren: 0, totalChildren: 1,
+        })),
+        ...(mixed ? [{ path: [], reason: 'maxElements', observedChildren: 40, totalChildren: 41 }] : []),
+      ],
+      omittedBoundaries: mixed ? 9 : 8, noRefReason: 'traversalLimited',
+    };
+    const request = { ...snapshotRequest(), tree: {
+      maxDepth: 1, maxElements: mixed ? 41 : 500, hintMode: 'leafCompact' as const,
+    } };
+    await expect(executeSnapshotReply(expected, request)).resolves.toEqual(expected);
+  });
+
+  it.each([
+    ['zero omittedBoundaries', 0],
+    ['negative omittedBoundaries', -1],
+    ['fractional omittedBoundaries', 1.5],
+    ['unsafe omittedBoundaries', Number.MAX_SAFE_INTEGER + 1],
+    ['non-number omittedBoundaries', '2'],
+    ['null omittedBoundaries', null],
+    ['boundaries + omittedBoundaries exceeds observedNodes', 3],
+  ] as const)('rejects malformed omittedBoundaries: %s', async (_label, omittedBoundaries) => {
+    const reply = await depthBoundaryReply();
+    setWireField(reply, 'data.coverage.omittedBoundaries', omittedBoundaries);
+    const request = { ...snapshotRequest(), tree: { maxDepth: 2, maxElements: 500, hintMode: 'leafCompact' as const } };
+    await expect(executeSnapshotReply(reply, request)).resolves.toMatchObject({ ok: false, error: { code: 'PROTOCOL_ERROR' } });
+  });
+
+  it('rejects omittedBoundaries when boundaries is empty', async () => {
+    const reply = await readSnapshotReply();
+    setWireField(reply, 'data.coverage.omittedBoundaries', 1);
+    await expect(executeSnapshotReply(reply)).resolves.toMatchObject({ ok: false, error: { code: 'PROTOCOL_ERROR' } });
+  });
+
   it('rejects a known coverage count that disagrees with the projected tree', async () => {
     const helper = fixture('snapshot-reply-coverage-count-mismatch');
     await copyFile(mockHost, helper);
@@ -405,6 +455,22 @@ describe('MacOSBackend', { timeout: 25_000 }, () => {
     delete reply.data.coverage.noRefReason;
     const request = { ...snapshotRequest(), tree: { maxDepth: 8, maxElements: 2, hintMode: 'full' as const } };
     await expect(executeSnapshotReply(reply, request)).resolves.toMatchObject({ ok: false, error: { code: 'PROTOCOL_ERROR' } });
+  });
+
+  it('accepts refs on completed sibling subtrees when a later root child hits maxElements', async () => {
+    const expected = await elementBoundaryReply();
+    expected.data.tree = {
+      elements: [{ role: 'AXWindow', children: [{ role: 'AXButton', ref: 1, actions: ['AXPress'] }] }],
+    };
+    expected.data.coverage.observedNodes = 2;
+    expected.data.coverage.emittedNodes = 2;
+    expected.data.coverage.refCount = 1;
+    expected.data.coverage.boundaries = [
+      { path: [], reason: 'maxElements', observedChildren: 1, totalChildren: 2 },
+    ];
+    delete expected.data.coverage.noRefReason;
+    const request = { ...snapshotRequest(), tree: { maxDepth: 8, maxElements: 2, hintMode: 'leafCompact' as const } };
+    await expect(executeSnapshotReply(expected, request)).resolves.toEqual(expected);
   });
 
   it('strips unknown fields at every snapshot, tree, and coverage object level', async () => {

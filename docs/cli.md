@@ -67,8 +67,19 @@ nuvin-computer-use apps --json
 nuvin-computer-use windows --app Finder --json
 ```
 
-`windows` reports each window's `eligible` flag and the reason when
-ineligible (minimized, off-screen, etc.).
+`apps` lists inventory even when a trustworthy process start is unavailable.
+For `--app`, exact bundle-ID matches take precedence over name matches. If
+several processes share that exact bundle, only that set is considered: a
+unique regular app may disambiguate; otherwise selection is
+`AMBIGUOUS_TARGET`. A differently bundled name collision cannot win. Only
+when there are no exact bundle matches do exact names use the unique regular
+app preference. `--pid` selects exactly that process, including helpers.
+
+`windows` reports every matched window's `eligible` flag and reason. Minimized
+or off-screen windows are ineligible; AX subrole `AXUnknown` is reported as
+`eligible:false` / `reason:"nonStandardWindow"`. Listing does not require a
+unique eligible window or a process start identity; snapshot/action targeting
+does.
 
 ## Snapshot → element actions
 
@@ -105,8 +116,12 @@ and ref policy, not which nodes the traversal visits.
   ref policy** as `leafCompact`. Both select eligible actionable leaves and
   editable areas under the existing boundary exclusions; text can be shown
   without any ref. `full` retains the verbose tree but uses a different ref
-  policy, including non-actionable nodes. Neither mode grants permission to
-  act at or below a traversal boundary; a ref alone is not an action guarantee.
+  policy, including non-actionable nodes. A boundary node itself and
+  depth-excluded or incomplete subtrees cannot supply safe refs. A completed
+  descendant subtree can retain refs below a `maxElements` ancestor when a
+  later sibling was not visited. Every action still validates the full stored
+  evidence, target identity and fresh ref/element continuity before dispatch;
+  a displayed ref alone is not an action guarantee.
 
 A static-text-rich compact reply may be larger than the old ref-only view.
 Compaction neither reclaims traversal budget nor recovers unvisited nodes.
@@ -131,12 +146,21 @@ together.
 | `emittedNodes` | Number of JSON tree nodes after presentation; the difference from observed nodes is presentation-only. |
 | `refCount` | Number of derived refs, **not** a count of actionable controls (especially in `full`). |
 | `limits.maxDepth`, `limits.maxElements` | Actual requested traversal options, not a promise of full coverage. |
-| `boundaries` | Traversal cuts in original evidence order; empty when no depth/element cut was recorded. |
+| `boundaries` | Emitted traversal-cut diagnostics from original evidence paths, not a complete copy of persisted evidence when diagnostics are summarized. Empty when no cut was recorded. |
 | `boundaries[].path` | Original zero-based evidence child path; `[]` is the real root. Never resolve it against projected compact child indexes. |
 | `boundaries[].reason` | `"maxDepth"` or `"maxElements"`; no timeout/cancellation boundary reason. |
 | `boundaries[].observedChildren` | Observed **direct children** of that boundary node. |
 | `boundaries[].totalChildren` | Reported total **direct children**, not total omitted descendants. |
+| `omittedBoundaries` | Positive optional count of depth-cut diagnostics omitted from this reply; absent when none were omitted. Full persisted evidence is retained. |
 | `noRefReason` | Omitted when refs exist. With zero refs: `"traversalLimited"` if boundaries exist, otherwise `"noEligibleRefs"`. Describes the observed condition, not a proved root cause. |
+
+Coverage uses a 32-entry diagnostic budget, retaining **all `maxElements`
+cuts** and filling the remaining budget with depth cuts. Excess depth
+diagnostics are summarized by positive `omittedBoundaries`. This is not an
+absolute 32-entry cap: retaining all element-cap cuts can exceed that budget.
+Stored evidence and action validation keep every boundary, including those
+not emitted. Missing legacy coverage remains unknown, not proof of readiness,
+absence or completeness; known fields remain strictly validated.
 
 `data.truncated` remains present and matches whether boundaries exist. A root
 element-cap boundary can legitimately exclude every ref in **all** hint
@@ -165,17 +189,40 @@ empty window. Failed target resolution and hard AX observation failures
 errors; `TIMEOUT` and `INTERRUPTED` never become successful partial snapshots.
 Existing compatibility behavior treats a bare `AXError.failure` on an optional
 scalar or action-list read as unavailable: a successful snapshot may omit that
-scalar or report no actions. Success does not guarantee every AX read succeeded.
+scalar or report no actions. That scalar compatibility does not apply to
+setup or top-level batch failures. Only raw top-level `attributeUnsupported`
+permits individual-read compatibility fallback; hard batch errors and malformed
+successful batches fail without retrying singles. Success does not guarantee
+every optional AX attribute was available.
 See [recovery guidance](agent-guide.md#snapshot-coverage-and-recovery) for
 limit-specific retries and explicit screenshots. Use the **new snapshot's
 refs** after every retry or mode change.
 
-Snapshot collection now performs two additional target identity validations
-around its preparation hook, **even with the no-op default**. Live metadata
-and AX reads, lock/deadline cost, and earlier transient identity errors from
-these checks have not been measured. The compiled, fake-tested AX activation
-experiment is inactive; the shipping hook remains no-op, not a claim of
-zero added snapshot work or browser readiness.
+### Bounded preparation (requested, not ready)
+
+The shipping snapshot path performs bounded `AXSnapshotPreparation` inside
+the desktop lock, bracketed by target identity checks before and after it.
+Trust and an exact positive PID are validated before optional state/read/write
+IPC. Each call uses a requested messaging-timeout cap of at most 250 ms,
+recomputed against the remaining command budget after application creation;
+synchronous native calls are not forcibly cancelled by that cap.
+
+Only an actual optional `AXManualAccessibility`/`AXEnhancedUserInterface`
+write returning `attributeUnsupported`, `failure` or `illegalArgument` can
+reject that write and negotiate the next attribute. Both rejected means
+unsupported, not ready. The optional manual-state read accepts only a strict
+Boolean success or absence (`attributeUnsupported`/`noValue`); timeout setup
+must succeed. Malformed successful state, setup errors, permission/liveness
+failures, cancellation and deadline expiry stop observation/publication rather
+than becoming preparation success. `apiDisabled` remains `PERMISSION_DENIED`;
+other hard AX errors remain `NATIVE_FAILURE`.
+
+A newly requested manual enable with prior state not true waits 250 ms only
+when more than 500 ms remains; enhanced/unsupported/already-enabled or lower
+budgets do not incur that wait. A successful write means **requested**, not
+“web AX ready” or browser fixed. Identity checks, preparation and observation
+consume the same deadline/lock budget; live latency and side effects are
+unmeasured. Preparation is not run during action validation.
 
 ## Direct input
 
@@ -287,28 +334,36 @@ report what is actually provable:
 
 ## Testing
 
+Run composed-candidate automated gates separately, in this order:
+
 ```sh
+npm run native-tests          # complete Swift fixture suite
 npm run typecheck
-npm test                      # vitest, fully mocked
-npm run native-tests          # Swift XCTest (fixtures)
-npm run test:native-protocol  # real host over stdio
+npm test                      # vitest with mock hosts
+npm run test:native-protocol   # protocol-version and invalid requests only
 npm run test:build-hygiene
-node scripts/package-smoke.mjs  # isolated-install end-to-end
+npm run build                 # complete TS + release-native build
+npm test                      # post-build mock rerun
 ```
 
-See `docs/testing.md` for what each layer does and does not prove, and for
-live-acceptance gating.
+See `docs/testing.md` for fixture/build evidence versus later independent
+review and integrated-main automated checks. This integration's real-app
+acceptance is **user-owned / NOT RUN by workers/coordinator** (including
+Chrome, keyboard and Shopee); it is **not an automated or local-integration
+gate**. Automated success does not establish live readiness or release approval.
 
 ## Known limitations
 
-- Target resolution fails for login-launched apps (Finder, Dock,
-  SystemUIServer) where `NSRunningApplication.launchDate` is `nil` —
-  reports `TARGET_NOT_FOUND`.
-- **`NSOpenPanel`/`NSSavePanel` are untargetable.** Open/Save dialogs run in
-  a separate `openAndSavePanelService` process (no `launchDate`), so the
-  dialog window can't be resolved by `--app` (the app owns no such window) or
-  by `--pid` (the service has no start identity). Dismiss the panel via
-  `key --app <app> --key escape`, then target the app's real window.
+- AppKit launch date is preferred for process start identity. When it is
+  missing, targeting uses a validated matching-PID kernel process start.
+  If neither source provides a trustworthy start, targeting still reports
+  `TARGET_NOT_FOUND`, while application/window inventory remains available.
+  Persisted identity uses exact comparison: a source
+  transition with different formatted timestamps can reject as stale.
+- Open/Save dialogs (`NSOpenPanel`/`NSSavePanel`) may be hosted by a separate
+  service. `--app` targets the named application's own windows; targeting a
+  service by `--pid` still depends on trustworthy start identity, a unique
+  eligible window match, and permissions. Panel targeting is not guaranteed.
 - Apps on an inactive Space, minimized, or with non-standard window-server
   reporting report `TARGET_NOT_FOUND` / `INELIGIBLE_TARGET`.
 - `press`/`set-value` rely on the app honoring the AX action; success means

@@ -463,17 +463,8 @@ public final class NativeService {
 }
 
 private func windowJSON(_ window: TargetWindow) -> JSONValue {
-    let eligible = window.cg.onScreen && window.ax.minimized != true
-    let reason: JSONValue
-    if eligible {
-        reason = .null
-    } else if window.ax.minimized == true {
-        reason = .string("minimized")
-    } else if !window.cg.onScreen {
-        reason = .string("offscreen")
-    } else {
-        reason = .string("ineligible")
-    }
+    let eligible = window.isEligible
+    let reason: JSONValue = window.ineligibilityReason.map(JSONValue.string) ?? (eligible ? .null : .string("ineligible"))
     return .object([
         "id": .number(Double(window.cg.id)),
         "title": .string(window.cg.title ?? window.ax.title ?? ""),

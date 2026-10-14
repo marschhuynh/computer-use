@@ -1,3 +1,4 @@
+import ApplicationServices
 import Darwin
 import XCTest
 @testable import ComputerUseCore
@@ -600,14 +601,40 @@ final class SnapshotTests: XCTestCase {
         }
     }
 
-    func testShippingPreparationDefaultRemainsExplicitlyNoOp() throws {
-        // Inspect the release gate without executing a default that a future
-        // candidate might wire to live AX against a fixture PID.
+    func testShippingPreparationDefaultInvokesAXSnapshotPreparation() throws {
+        // Inspect the default preparation wiring without executing live AX against a fixture PID.
         let native = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let source = try String(contentsOf: native.appendingPathComponent("Sources/ComputerUseCore/SnapshotService.swift"))
-        XCTAssertTrue(source.contains("prepareSnapshot: @escaping PrepareSnapshot = { _, _ in }"))
-        XCTAssertFalse(source.contains("AXSnapshotPreparation."))
+        XCTAssertTrue(source.contains("AXSnapshotPreparation.prepare(target: target, context: context)"))
+    }
+
+    func testKeyboardConstructionRetainsPrivateSourcesAndIsolatedFlags() throws {
+        // Supplemental source retention only: no event construction/posting or live delivery claim.
+        let native = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(contentsOf: native.appendingPathComponent("Sources/ComputerUseCore/NativeInput.swift"), encoding: .utf8)
+        for (start, end, unicode) in [
+            ("public func postKey(_", "public func postFocusedKey(", false),
+            ("private func postKeyToTap(", "public func postText(", false),
+            ("public func postText(_", "public func postFocusedText(", true),
+            ("public func postFocusedText(_", "public func scroll(", true)
+        ] {
+            let begin = try XCTUnwrap(source.range(of: start))
+            let finish = try XCTUnwrap(source.range(of: end, range: begin.upperBound..<source.endIndex))
+            let body = source[begin.lowerBound..<finish.lowerBound]
+            XCTAssertTrue(body.contains("CGEventSource(stateID: .privateState)"), start)
+            XCTAssertFalse(body.contains(".hidSystemState"), start)
+            XCTAssertTrue(body.contains("up.flags = []"), start)
+            if unicode {
+                XCTAssertTrue(body.contains("event.flags = []"), start)
+                XCTAssertTrue(body.contains("usleep(4_000)"), start)
+                XCTAssertFalse(body.contains("flags = modifiers"), start)
+            } else {
+                XCTAssertTrue(body.contains("down.flags = modifiers"), start)
+                XCTAssertFalse(body.contains("up.flags = modifiers"), start)
+            }
+        }
     }
 
     func testZeroRefSnapshotPreparesOnceWithoutAutomaticScreenshot() async throws {
@@ -867,12 +894,140 @@ final class SnapshotTests: XCTestCase {
 
     func testCompactKeepsActionNodesEvenWhenBoundaryExcludesTheirRefs() throws {
         let root = AXTreeInputNode(role: "AXWindow", children: [
-            .init(role: "AXGroup", children: [.init(role: "AXButton", actions: ["AXPress"])]),
+            .init(role: "AXGroup", children: [
+                .init(role: "AXButton", actions: ["AXPress"], children: [
+                    .init(role: "AXStaticText", value: "Label")
+                ])
+            ]),
             .init(role: "AXGroup")
         ])
         try assertCompactPresentation(root, expected: """
             {"elements":[{"role":"AXWindow","children":[{"role":"AXButton","actions":["AXPress"]}]}]}
             """, emittedNodes: 2, refPaths: [], maxElements: 3)
+    }
+
+    func testCompletedSiblingSubtreeRetainsRefsWhenLaterSiblingHitsMaxElements() throws {
+        let root = AXTreeInputNode(role: "AXWindow", children: [
+            .init(role: "AXGroup", children: [.init(role: "AXButton", actions: ["AXPress"])]),
+            .init(role: "AXGroup")
+        ])
+        try assertCompactPresentation(root, expected: """
+            {"elements":[{"role":"AXWindow","children":[{"role":"AXButton","ref":1,"actions":["AXPress"]}]}]}
+            """, emittedNodes: 2, refPaths: [[0, 0]], maxElements: 3)
+    }
+
+    func testCompletedSubtreeRefDispatchesAndChangedEvidenceRejectsThroughActualAction() async throws {
+        func input(title: String) -> AXTreeInputNode {
+            AXTreeInputNode(role: "AXWindow", children: [
+                .init(role: "AXGroup", children: [.init(role: "AXButton", title: title, actions: ["AXPress"])]),
+                .init(role: "AXGroup")
+            ])
+        }
+        let snapshot = try presentationSnapshot(input(title: "Save"), maxElements: 3)
+        let changed = try presentationSnapshot(input(title: "Changed"), maxElements: 3)
+        XCTAssertEqual(snapshot.evidence.nodes.map(\.path), [[], [0], [0, 0]])
+        XCTAssertEqual(snapshot.evidence.truncation, [
+            AXTraversalBoundary(path: [], reason: .maxElements, observedChildren: 1, totalChildren: 2)
+        ])
+        XCTAssertEqual(snapshot.evidence.refs.map(\.ref), [1])
+        XCTAssertEqual(snapshot.evidence.refs.map(\.path), [[0, 0]])
+        for changedAt in [nil, 1, 2] as [Int?] {
+            let root = temporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let command = snapshotCommandContext(wallNow: Date(timeIntervalSince1970: 1_788_861_900))
+            let store = StateStore(rootURL: root)
+            let record = SnapshotRecord(id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                createdAt: "2026-09-08T10:00:00Z", expiresAt: "2026-09-08T10:10:00Z",
+                target: snapshot.target, treeOptions: snapshot.treeOptions, evidence: snapshot.evidence)
+            try store.writeSnapshot(record, context: command)
+            let first = LiveAXElement(AXUIElementCreateApplication(42))
+            let fresh = LiveAXElement(AXUIElementCreateApplication(43))
+            var observations = 0
+            var preflights = 0
+            var dispatches = 0
+            var preparations = 0
+            var foreground = false
+            let service = SnapshotService(lock: DesktopLock(rootURL: root), store: store,
+                observe: { _, _, received in
+                    XCTAssertTrue(received === command)
+                    observations += 1
+                    if observations == 2 { XCTAssertTrue(foreground) }
+                    return AXTreeObservation(snapshot: changedAt == observations ? changed : snapshot,
+                                             liveElements: [1: observations == 1 ? first : fresh])
+                }, prepareSnapshot: { _, _ in preparations += 1; XCTFail("actions must not prepare snapshots") },
+                validateTarget: { _, _ in snapshot.target }, sameLiveElement: { old, new in
+                    XCTAssertTrue(CFEqual(old.rawValue!, first.rawValue!))
+                    XCTAssertTrue(CFEqual(new.rawValue!, fresh.rawValue!))
+                    return true // Fixture identity; no live AX query.
+                }, prepareForeground: { _, _, _ in foreground = true }, prepareElement: { _, _ in })
+            do {
+                let result = try await service.withValidatedSnapshotAction(snapshotID: record.id, ref: 1,
+                    context: command, stateChanging: true, preflight: { element, _, _ in
+                        preflights += 1
+                        XCTAssertTrue(CFEqual(element.rawValue!, (preflights == 1 ? first : fresh).rawValue!))
+                        return "prepared-\(preflights)"
+                    }, dispatch: { prepared, element, _ in
+                        dispatches += 1
+                        XCTAssertNil(try? store.readSnapshot(id: record.id, context: command))
+                        XCTAssertTrue(CFEqual(element.rawValue!, fresh.rawValue!))
+                        XCTAssertEqual(prepared, "prepared-2")
+                        return "dispatched"
+                    })
+                XCTAssertNil(changedAt)
+                XCTAssertEqual(result, "dispatched")
+            } catch let failure as NativeFailure {
+                XCTAssertNotNil(changedAt)
+                XCTAssertEqual(failure.code, "STALE_SNAPSHOT")
+                XCTAssertEqual(failure.details?["mutationStatus"], .string("notStarted"))
+            }
+            XCTAssertEqual(observations, changedAt == 1 ? 1 : 2)
+            XCTAssertEqual(preflights, changedAt == 1 ? 0 : (changedAt == 2 ? 1 : 2))
+            XCTAssertEqual(dispatches, changedAt == nil ? 1 : 0)
+            XCTAssertEqual(preparations, 0)
+            XCTAssertEqual((try? store.readSnapshot(id: record.id, context: command)) != nil, changedAt == 1)
+        }
+    }
+
+    func testZeroRefIncompleteAndDepthExcludedSnapshotsRejectBeforeActionPreflight() async throws {
+        let snapshots = [
+            try presentationSnapshot(truncationPolicyInput(), maxElements: 2),
+            try presentationSnapshot(AXTreeInputNode(role: "AXWindow", children: [
+                .init(role: "AXGroup", children: [.init(role: "AXButton", actions: ["AXPress"])])
+            ]), maxDepth: 1)
+        ]
+        for snapshot in snapshots {
+            XCTAssertTrue(snapshot.evidence.refs.isEmpty)
+            XCTAssertNoThrow(try AXEvidencePolicy.validate(snapshot.evidence, options: snapshot.treeOptions))
+            let root = temporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let command = snapshotCommandContext(wallNow: Date(timeIntervalSince1970: 1_788_861_900))
+            let store = StateStore(rootURL: root)
+            let record = SnapshotRecord(id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                createdAt: "2026-09-08T10:00:00Z", expiresAt: "2026-09-08T10:10:00Z",
+                target: snapshot.target, treeOptions: snapshot.treeOptions, evidence: snapshot.evidence)
+            try store.writeSnapshot(record, context: command)
+            var observations = 0
+            var preflights = 0
+            var dispatches = 0
+            let service = SnapshotService(lock: DesktopLock(rootURL: root), store: store,
+                observe: { _, _, _ in
+                    observations += 1
+                    return AXTreeObservation(snapshot: snapshot, liveElements: [:])
+                }, prepareSnapshot: { _, _ in XCTFail("no snapshot preparation during action") },
+                validateTarget: { _, _ in snapshot.target }, sameLiveElement: { _, _ in true },
+                prepareForeground: { _, _, _ in XCTFail("no foreground work") },
+                prepareElement: { _, _ in XCTFail("no element preparation") })
+            await XCTAssertThrowsErrorAsync({
+                try await service.withValidatedSnapshotAction(snapshotID: record.id, ref: 1,
+                    context: command, stateChanging: true,
+                    preflight: { _, _, _ in preflights += 1 },
+                    dispatch: { _, _, _ in dispatches += 1 })
+            }) { XCTAssertEqual(($0 as? NativeFailure)?.code, "STALE_SNAPSHOT") }
+            XCTAssertEqual(observations, 1)
+            XCTAssertEqual(preflights, 0)
+            XCTAssertEqual(dispatches, 0)
+            XCTAssertNoThrow(try store.readSnapshot(id: record.id, context: command))
+        }
     }
 
     func testCompactOmitsOnlyNonRefBoundsAndKeepsFalseControlStates() throws {
@@ -940,10 +1095,10 @@ final class SnapshotTests: XCTestCase {
         try assertCompactPresentation(root, expected: """
             {"elements":[{"role":"AXWindow","children":[
                 {"role":"AXGroup","enabled":true,"focused":false,"selected":false,"children":[
-                    {"role":"AXButton","actions":["AXPress"]}
+                    {"role":"AXButton","ref":1,"actions":["AXPress"]}
                 ]}
             ]}]}
-            """, emittedNodes: 3, refPaths: [], maxElements: 3)
+            """, emittedNodes: 3, refPaths: [[0, 0]], maxElements: 3)
         XCTAssertEqual(try presentationSnapshot(root, maxElements: 3).evidence.truncation, [
             AXTraversalBoundary(path: [0], reason: .maxElements, observedChildren: 1, totalChildren: 2)
         ])
@@ -1083,6 +1238,52 @@ final class SnapshotTests: XCTestCase {
             XCTAssertEqual(presentationWire(snapshot)["truncated"], .bool(true))
             XCTAssertEqual(snapshot.evidence, before)
         }
+    }
+
+    func testCoverageBudgetSummarizesDepthCutsButPersistsEveryBoundary() throws {
+        let groups = (0..<40).map { _ in
+            AXTreeInputNode(role: "AXGroup", children: [.init(role: "AXButton", actions: ["AXPress"])])
+        }
+        for mixed in [false, true] {
+            let snapshot = try presentationSnapshot(AXTreeInputNode(role: "AXWindow",
+                children: groups + (mixed ? [.init(role: "AXGroup")] : [])),
+                maxDepth: 1, maxElements: mixed ? 41 : 500)
+            let before = snapshot.evidence
+            XCTAssertEqual(before.nodes.count, 41)
+            XCTAssertEqual(before.truncation.count, mixed ? 41 : 40)
+            XCTAssertEqual(before.truncation.filter { $0.reason == .maxDepth }.count, 40)
+            XCTAssertEqual(before.refs.count, 0)
+            XCTAssertNoThrow(try AXEvidencePolicy.validate(before, options: snapshot.treeOptions))
+            guard case let .object(coverage) = presentationWire(snapshot)["coverage"],
+                  case let .array(boundaries) = coverage["boundaries"] else {
+                return XCTFail("missing coverage diagnostics")
+            }
+            XCTAssertEqual(boundaries.count, 32)
+            for (index, boundary) in boundaries.prefix(mixed ? 31 : 32).enumerated() {
+                XCTAssertEqual(boundary, .object(["path": .array([.number(Double(index))]),
+                    "reason": .string("maxDepth"), "observedChildren": .number(0), "totalChildren": .number(1)]))
+            }
+            XCTAssertEqual(coverage["omittedBoundaries"], .number(mixed ? 9 : 8))
+            if mixed {
+                XCTAssertEqual(boundaries.last, .object(["path": .array([]), "reason": .string("maxElements"),
+                    "observedChildren": .number(40), "totalChildren": .number(41)]))
+            }
+            XCTAssertEqual(snapshot.evidence, before)
+            let root = temporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let command = snapshotCommandContext(wallNow: Date(timeIntervalSince1970: 1_788_861_900))
+            let store = StateStore(rootURL: root)
+            let record = SnapshotRecord(id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                createdAt: "2026-09-08T10:00:00Z", expiresAt: "2026-09-08T10:10:00Z",
+                target: snapshot.target, treeOptions: snapshot.treeOptions, evidence: before)
+            try store.writeSnapshot(record, context: command)
+            let persisted = try store.readSnapshot(id: record.id, context: command)
+            XCTAssertEqual(persisted.evidence, before)
+            XCTAssertNoThrow(try AXEvidencePolicy.validate(persisted.evidence, options: persisted.treeOptions))
+        }
+        let small = try presentationSnapshot(AXTreeInputNode(role: "AXWindow", children: Array(groups.prefix(32))), maxDepth: 1)
+        guard case let .object(coverage) = presentationWire(small)["coverage"] else { return XCTFail("missing coverage") }
+        XCTAssertNil(coverage["omittedBoundaries"])
     }
 
     func testCoverageKeepsOriginalNestedPathAfterAncestorCollapse() throws {

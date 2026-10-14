@@ -157,6 +157,7 @@ internal enum AXEvidencePolicy {
         }
 
         var isBoundary = [Bool](repeating: false, count: count)
+        var isDepthBoundary = [Bool](repeating: false, count: count)
         for boundary in boundaries {
             var index = 0
             var resolved = true
@@ -171,16 +172,19 @@ internal enum AXEvidencePolicy {
             }
             if resolved {
                 isBoundary[index] = true
+                if boundary.reason == .maxDepth {
+                    isDepthBoundary[index] = true
+                }
             }
         }
 
-        var atOrBelowBoundary = [Bool](repeating: false, count: count)
+        var belowDepthBoundary = [Bool](repeating: false, count: count)
         var isBoundaryAncestor = [Bool](repeating: false, count: count)
         var isActionableAncestor = [Bool](repeating: false, count: count)
         for index in 0..<count {
             let parentIndex = parent[index]
-            atOrBelowBoundary[index] = isBoundary[index]
-                || (parentIndex >= 0 && atOrBelowBoundary[parentIndex])
+            belowDepthBoundary[index] = parentIndex >= 0
+                && (isDepthBoundary[parentIndex] || belowDepthBoundary[parentIndex])
         }
         for index in stride(from: count - 1, through: 0, by: -1) {
             let parentIndex = parent[index]
@@ -196,7 +200,7 @@ internal enum AXEvidencePolicy {
         var selected: [AXNodeEvidence] = []
         selected.reserveCapacity(count)
         for index in 0..<count {
-            guard !atOrBelowBoundary[index] else { continue }
+            guard !isBoundary[index], !belowDepthBoundary[index] else { continue }
             let node = nodes[index]
             switch mode {
             case .full:
@@ -693,14 +697,131 @@ private func classifyLiveAXResult<Value>(
     return result
 }
 
-private func liveAXTreeReader() -> AXTreeReader<AXUIElement> {
-    AXTreeReader(
-        string: liveAXString,
-        bool: liveAXBool,
+private let liveAXBatchScalarAttributes: [String] = [
+    kAXRoleAttribute,
+    kAXSubroleAttribute,
+    kAXIdentifierAttribute,
+    kAXTitleAttribute,
+    kAXDescriptionAttribute,
+    kAXValueAttribute,
+    kAXEnabledAttribute,
+    kAXFocusedAttribute,
+    kAXSelectedAttribute,
+    kAXPositionAttribute,
+    kAXSizeAttribute
+]
+
+func unpackMultipleAXAttributes(
+    attributes: [String],
+    status: AXError,
+    values: CFArray?
+) -> [String: (status: AXError, value: CFTypeRef?)]? {
+    guard status == .success,
+          let values,
+          CFGetTypeID(values) == CFArrayGetTypeID() else { return nil }
+    let items = values as [AnyObject]
+    guard items.count == attributes.count else { return nil }
+
+    var unpacked: [String: (status: AXError, value: CFTypeRef?)] = [:]
+    unpacked.reserveCapacity(attributes.count)
+    for (index, attribute) in attributes.enumerated() {
+        let item: CFTypeRef = items[index]
+        if CFGetTypeID(item) == AXValueGetTypeID() {
+            let axValue = item as! AXValue
+            if AXValueGetType(axValue) == .axError {
+                var error: AXError = .failure
+                if AXValueGetValue(axValue, .axError, &error) {
+                    unpacked[attribute] = (status: error, value: nil)
+                } else {
+                    unpacked[attribute] = (status: .failure, value: nil)
+                }
+                continue
+            }
+        }
+        if CFGetTypeID(item) == CFNullGetTypeID() {
+            unpacked[attribute] = (status: .noValue, value: nil)
+        } else {
+            unpacked[attribute] = (status: .success, value: item)
+        }
+    }
+    return unpacked
+}
+
+final class LiveAXBatchCache {
+    typealias MultipleRead = (AXUIElement, [String]) -> (status: AXError, values: CFArray?)
+    typealias SingleRead = (AXUIElement, String) -> (status: AXError, value: CFTypeRef?)
+    private let multipleRead: MultipleRead
+    private let singleRead: SingleRead
+
+    init(multipleRead: @escaping MultipleRead = liveAXMultipleAttributes,
+         singleRead: @escaping SingleRead = liveAXAttribute) {
+        self.multipleRead = multipleRead
+        self.singleRead = singleRead
+    }
+
+    private enum Outcome {
+        case entries([String: (status: AXError, value: CFTypeRef?)])
+        case unsupported
+        case failure(NativeFailure)
+    }
+
+    private var cachedElement: AXUIElement?
+    private var cachedOutcome: Outcome?
+
+    func attribute(
+        _ element: AXUIElement,
+        _ name: String
+    ) throws -> (status: AXError, value: CFTypeRef?) {
+        if cachedElement.map({ CFEqual($0, element) }) != true {
+            let read = multipleRead(element, liveAXBatchScalarAttributes)
+            cachedElement = element
+            switch read.status {
+            case .attributeUnsupported:
+                cachedOutcome = .unsupported
+            case .success:
+                if let entries = unpackMultipleAXAttributes(
+                    attributes: liveAXBatchScalarAttributes, status: read.status, values: read.values
+                ), entries.count == liveAXBatchScalarAttributes.count {
+                    cachedOutcome = .entries(entries)
+                } else {
+                    cachedOutcome = .failure(liveAXFailure(for: .success))
+                }
+            default:
+                cachedOutcome = .failure(liveAXFailure(for: read.status))
+            }
+        }
+        switch cachedOutcome {
+        case let .entries(entries):
+            guard let read = entries[name] else { throw liveAXFailure(for: .success) }
+            return read
+        case .unsupported:
+            return singleRead(element, name)
+        case let .failure(failure):
+            throw failure
+        case nil:
+            throw liveAXFailure(for: .success)
+        }
+    }
+}
+
+func liveAXTreeReader(cache: LiveAXBatchCache = LiveAXBatchCache()) -> AXTreeReader<AXUIElement> {
+    return AXTreeReader(
+        string: { try liveAXString($0, $1, readAttribute: cache.attribute) },
+        bool: { try liveAXBool($0, $1, readAttribute: cache.attribute) },
         children: { try liveAXChildren($0, attribute: kAXChildrenAttribute) },
         actions: liveAXActions,
-        bounds: liveAXBounds
+        bounds: { try liveAXBounds($0, readAttribute: cache.attribute) }
     )
+}
+
+func liveAXMultipleAttributes(
+    _ element: AXUIElement, _ attributes: [String]
+) -> (status: AXError, values: CFArray?) {
+    var values: CFArray?
+    let status = AXUIElementCopyMultipleAttributeValues(
+        element, attributes as CFArray, AXCopyMultipleAttributeOptions(rawValue: 0), &values
+    )
+    return (status, values)
 }
 
 func liveAXAttribute(
@@ -759,9 +880,10 @@ func axScalarReadResult<Value>(
 
 private func liveAXString(
     _ element: AXUIElement,
-    _ attribute: String
+    _ attribute: String,
+    readAttribute: (AXUIElement, String) throws -> (status: AXError, value: CFTypeRef?) = liveAXAttribute
 ) throws -> AXReadResult<String> {
-    let read = liveAXAttribute(element, attribute)
+    let read = try readAttribute(element, attribute)
     return try classifyLiveAXResult(
         status: read.status,
         result: axScalarReadResult(
@@ -776,9 +898,10 @@ private func liveAXString(
 
 private func liveAXBool(
     _ element: AXUIElement,
-    _ attribute: String
+    _ attribute: String,
+    readAttribute: (AXUIElement, String) throws -> (status: AXError, value: CFTypeRef?) = liveAXAttribute
 ) throws -> AXReadResult<Bool> {
-    let read = liveAXAttribute(element, attribute)
+    let read = try readAttribute(element, attribute)
     return try classifyLiveAXResult(
         status: read.status,
         result: axScalarReadResult(
@@ -868,9 +991,12 @@ private func liveAXActions(_ element: AXUIElement) throws -> AXReadResult<[Strin
     )
 }
 
-private func liveAXBounds(_ element: AXUIElement) throws -> AXReadResult<WindowBounds> {
-    let positionRead = liveAXAttribute(element, kAXPositionAttribute)
-    let sizeRead = liveAXAttribute(element, kAXSizeAttribute)
+private func liveAXBounds(
+    _ element: AXUIElement,
+    readAttribute: (AXUIElement, String) throws -> (status: AXError, value: CFTypeRef?) = liveAXAttribute
+) throws -> AXReadResult<WindowBounds> {
+    let positionRead = try readAttribute(element, kAXPositionAttribute)
+    let sizeRead = try readAttribute(element, kAXSizeAttribute)
     let position: AXReadResult<AXValue> = axReadResult(
         status: positionRead.status,
         value: positionRead.value,

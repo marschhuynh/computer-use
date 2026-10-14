@@ -103,6 +103,81 @@ final class DiscoveryTests: XCTestCase {
         XCTAssertEqual(nonNullReasons.count, 2)
     }
 
+    func testWindowsListMarksAXUnknownWindowsIneligibleWithNonStandardReason() async throws {
+        let bounds = WindowBounds(x: 0, y: 0, width: 100, height: 100)
+        let windows = [
+            TargetWindow(
+                ax: AXWindowMetadata(role: "AXWindow", title: "Main", bounds: bounds, minimized: false, subrole: "AXStandardWindow"),
+                cg: CGWindowMetadata(id: 7, title: "Main", bounds: bounds, onScreen: true, minimized: false)
+            ),
+            TargetWindow(
+                ax: AXWindowMetadata(role: "AXWindow", title: "", bounds: bounds, minimized: false, subrole: "AXUnknown"),
+                cg: CGWindowMetadata(id: 8, title: "", bounds: bounds, onScreen: true, minimized: false)
+            ),
+        ]
+        let service = NativeService(
+            snapshotService: SnapshotService(prepareSnapshot: { _, _ in }),
+            targetResolver: TargetResolver(provider: TargetResolverProvider(
+                listApplications: { [ProcessMetadata(name: "Arc", pid: 42, launchDate: nil, bundleId: "company.thebrowser.Browser")] },
+                windowsForPID: { _, _ in windows },
+                listDisplays: { [] }
+            ))
+        )
+        let reply = await service.execute(windowsRequest(pid: 42), context: discoveryContext())
+        XCTAssertTrue(reply.ok, "expected success, got \(String(describing: reply.error))")
+        guard case let .array(listed) = reply.data?["windows"] else {
+            return XCTFail("expected windows array, got \(String(describing: reply.data))")
+        }
+        XCTAssertEqual(listed.count, 2)
+        guard case let .object(standard) = listed[0],
+              case let .object(phantom) = listed[1] else {
+            return XCTFail("expected window objects")
+        }
+        XCTAssertEqual(standard["eligible"], .bool(true))
+        XCTAssertEqual(standard["reason"], .null)
+        XCTAssertEqual(phantom["eligible"], .bool(false))
+        XCTAssertEqual(phantom["reason"], .string("nonStandardWindow"))
+    }
+
+    func testDecodedWindowsDispatchNeverQueriesNameCollisionOutsideExactBundle() async throws {
+        let bundle = "com.example.Editor"
+        for regularPID in [nil, 42] as [Int?] {
+            let apps = [42, 43].map { pid in
+                ProcessMetadata(name: "Helper", pid: pid, launchDate: nil, bundleId: bundle,
+                                isRegularApp: regularPID == pid)
+            } + [ProcessMetadata(name: bundle, pid: 99, launchDate: nil, bundleId: "com.other.Regular", isRegularApp: true)]
+            var queries: [Int] = []
+            let bounds = WindowBounds(x: 0, y: 0, width: 100, height: 100)
+            let service = NativeService(snapshotService: SnapshotService(prepareSnapshot: { _, _ in
+                XCTFail("windows must not prepare a snapshot")
+            }), targetResolver: TargetResolver(provider: TargetResolverProvider(
+                listApplications: { apps }, windowsForPID: { pid, _ in
+                    queries.append(pid)
+                    return [TargetWindow(
+                        ax: AXWindowMetadata(role: "AXWindow", title: "PID \(pid)", bounds: bounds, minimized: false),
+                        cg: CGWindowMetadata(id: pid, title: "PID \(pid)", bounds: bounds, onScreen: true, minimized: false))]
+                }, listDisplays: { [] })))
+            let request = try XCTUnwrap(WireRequest.decode(windowsRequest(app: bundle).object))
+            let reply = await service.execute(request, context: discoveryContext())
+            if let regularPID {
+                XCTAssertTrue(reply.ok, String(describing: reply.error))
+                XCTAssertEqual(queries, [regularPID])
+                guard case let .array(windows) = reply.data?["windows"],
+                      windows.count == 1, case let .object(window) = windows[0] else {
+                    return XCTFail("missing confined windows")
+                }
+                XCTAssertEqual(window["id"], .number(Double(regularPID)))
+                XCTAssertEqual(window["eligible"], .bool(true))
+                XCTAssertEqual(window["reason"], .null)
+            } else {
+                XCTAssertFalse(reply.ok)
+                XCTAssertEqual(reply.error?.code, "AMBIGUOUS_TARGET")
+                XCTAssertEqual(queries, [])
+            }
+            XCTAssertFalse(queries.contains(99))
+        }
+    }
+
     func testWindowsSelectsSingleApplicationWithoutRequiringUniquenessOfWindows() async throws {
         let bounds = WindowBounds(x: 0, y: 0, width: 100, height: 100)
         let windows = (0..<3).map { id in

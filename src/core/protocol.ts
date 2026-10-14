@@ -21,6 +21,7 @@ export type SnapshotCoverage = {
   refCount: number;
   limits: { maxDepth: number; maxElements: number };
   boundaries: SnapshotBoundary[];
+  omittedBoundaries?: number;
   noRefReason?: 'traversalLimited' | 'noEligibleRefs';
 };
 export type Direction = 'up' | 'down' | 'left' | 'right';

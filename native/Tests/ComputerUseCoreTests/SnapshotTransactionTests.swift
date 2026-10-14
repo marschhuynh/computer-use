@@ -167,6 +167,154 @@ final class SnapshotTransactionTests: XCTestCase {
         }
     }
 
+    func testRawPreparationFailuresStopObservationAndPublication() async throws {
+        let snapshot = try transactionFixture("save-cancel")
+        let statuses: [AXError] = [.attributeUnsupported, .failure, .illegalArgument, .cannotComplete,
+                                    .invalidUIElement, .apiDisabled, .notImplemented, .noValue]
+        for phase in ["read-timeout", "write-timeout", "copy", "write", "throw"] {
+            let phaseStatuses: [AXError]
+            if phase == "copy" { phaseStatuses = statuses.filter { $0 != .attributeUnsupported && $0 != .noValue } }
+            else if phase == "write" { phaseStatuses = [.cannotComplete, .invalidUIElement, .apiDisabled, .notImplemented, .noValue] }
+            else if phase == "throw" { phaseStatuses = [.failure] }
+            else { phaseStatuses = statuses }
+            for status in phaseStatuses {
+                let root = transactionRoot()
+                defer { try? FileManager.default.removeItem(at: root) }
+                var lockHeld = false
+                let lock = DesktopLock(rootURL: root, flock: { fd, op in
+                    let result = flock(fd, op)
+                    if result == 0 { lockHeld = op != LOCK_UN }
+                    return SystemCallResult(value: result, error: result < 0 ? errno : 0)
+                })
+                var setups = 0
+                var writes = 0
+                var observations = 0
+                var validations = 0
+                let expected = phase == "throw"
+                    ? NativeFailure("NATIVE_FAILURE", "raw setup threw", details: ["phase": .string(phase)])
+                    : liveAXFailure(for: status)
+                let api = AXPreparationAPI(isTrusted: { true },
+                    createApplication: { _ in AXUIElementCreateApplication(42) },
+                    setMessagingTimeout: { _, _ in
+                        if phase == "throw" { throw expected }
+                        setups += 1
+                        return phase == "read-timeout" || (phase == "write-timeout" && setups == 2) ? status : .success
+                    }, copyAttribute: { _, _ in phase == "copy" ? (status, nil) : (.noValue, nil) },
+                    setAttribute: { _, _, _ in writes += 1; return phase == "write" ? status : .success })
+                let service = SnapshotService(lock: lock, store: StateStore(rootURL: root),
+                    resolve: { _, _ in snapshot.target },
+                    observe: { _, _, _ in
+                        observations += 1
+                        return AXTreeObservation(snapshot: snapshot, liveElements: [:])
+                    }, prepareSnapshot: { target, context in
+                        XCTAssertTrue(lockHeld)
+                        try await AXSnapshotPreparation.prepare(pid: target.identity.pid, context: context,
+                            driver: AXSnapshotPreparation.makeDriver(api: api))
+                    }, validateTarget: { _, _ in validations += 1; return snapshot.target })
+                let failure = await captureTransactionFailure {
+                    try await service.snapshot(selector: .pid(42, windowId: 7), options: snapshot.treeOptions,
+                                               context: self.context())
+                }
+                XCTAssertEqual(failure?.code, expected.code, "\(phase) \(status)")
+                XCTAssertEqual(failure?.message, expected.message)
+                XCTAssertEqual(failure?.details, expected.details)
+                XCTAssertEqual(observations, 0)
+                XCTAssertEqual(validations, 1)
+                XCTAssertEqual(writes, phase == "write" ? 1 : 0)
+                XCTAssertFalse(lockHeld)
+                XCTAssertEqual((try? FileManager.default.contentsOfDirectory(atPath:
+                    root.appendingPathComponent("snapshots").path)) ?? [], [])
+            }
+        }
+    }
+
+    func testRawRequestedAndRejectedWriteControlsPublishWithIdentityBrackets() async throws {
+        let snapshot = try transactionFixture("save-cancel")
+        for status in [AXError.success, .attributeUnsupported, .failure, .illegalArgument] {
+            let root = transactionRoot()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = StateStore(rootURL: root)
+            var phases: [String] = []
+            var writes = 0
+            let api = AXPreparationAPI(isTrusted: { true },
+                createApplication: { _ in AXUIElementCreateApplication(42) },
+                setMessagingTimeout: { _, _ in .success }, copyAttribute: { _, _ in (.success, kCFBooleanTrue) },
+                setAttribute: { _, _, _ in writes += 1; return status })
+            let service = SnapshotService(lock: DesktopLock(rootURL: root), store: store,
+                resolve: { _, _ in phases.append("resolve"); return snapshot.target },
+                observe: { _, _, _ in
+                    phases.append("observe"); return AXTreeObservation(snapshot: snapshot, liveElements: [:])
+                }, prepareSnapshot: { target, context in
+                    phases.append("prepare")
+                    try await AXSnapshotPreparation.prepare(pid: target.identity.pid, context: context,
+                        driver: AXSnapshotPreparation.makeDriver(api: api))
+                }, validateTarget: { _, _ in phases.append("validate"); return snapshot.target })
+            let result = try await service.snapshot(selector: .pid(42, windowId: 7), options: snapshot.treeOptions,
+                                                    context: context())
+            XCTAssertEqual(try store.readSnapshot(id: result.record.id, context: context()).evidence, snapshot.evidence)
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath:
+                root.appendingPathComponent("snapshots").path).count, 1)
+            XCTAssertEqual(writes, status == .success ? 1 : 2)
+            XCTAssertEqual(phases, ["resolve", "validate", "prepare", "validate", "observe", "validate"])
+        }
+    }
+
+    func testProductionBatchFailuresNeverPublishAndValidBatchControlDoes() async throws {
+        let fixture = try transactionFixture("save-cancel")
+        let valid = (["AXWindow" as CFTypeRef] + Array(repeating: kCFNull as CFTypeRef, count: 10)) as CFArray
+        var outcomes: [(AXError, CFArray?)] = [(.success, valid), (.success, nil),
+            (.success, ["AXWindow" as CFString] as CFArray),
+            (.success, Array(repeating: "extra" as CFString, count: 12) as CFArray)]
+        outcomes += [AXError.apiDisabled, .invalidUIElement, .cannotComplete, .failure, .noValue,
+                     .illegalArgument, .notImplemented].map { ($0, nil) }
+        for (status, values) in outcomes {
+            let root = transactionRoot()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = StateStore(rootURL: root)
+            var singles = 0
+            var batches = 0
+            var lockHeld = false
+            let lock = DesktopLock(rootURL: root, flock: { fd, op in
+                let result = flock(fd, op)
+                if result == 0 { lockHeld = op != LOCK_UN }
+                return SystemCallResult(value: result, error: result < 0 ? errno : 0)
+            })
+            let cache = LiveAXBatchCache(multipleRead: { _, _ in batches += 1; return (status, values) },
+                singleRead: { _, name in
+                    singles += 1
+                    return name == kAXRoleAttribute ? (.success, "AXWindow" as CFString) : (.noValue, nil)
+                })
+            let scalars = liveAXTreeReader(cache: cache)
+            let reader = AXTreeReader<AXUIElement>(string: scalars.string, bool: scalars.bool,
+                children: { _ in .unavailable }, actions: { _ in .unavailable }, bounds: scalars.bounds)
+            let service = SnapshotService(lock: lock, store: store,
+                resolve: { _, _ in fixture.target }, observe: { target, options, context in
+                    let read = try AXTree.readSnapshot(target: target, options: options,
+                        root: AXUIElementCreateApplication(42), reader: reader,
+                        checkpoint: { try context.check() }, prepare: { _ in })
+                    return AXTreeObservation(snapshot: read.snapshot, liveElements: [:])
+                }, prepareSnapshot: { _, _ in }, validateTarget: { _, _ in fixture.target })
+            if status == .success && values === valid {
+                let result = try await service.snapshot(selector: .pid(42, windowId: 7),
+                    options: fixture.treeOptions, context: context())
+                XCTAssertEqual(try store.readSnapshot(id: result.record.id, context: context()).evidence,
+                               result.snapshot.evidence)
+                XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath:
+                    root.appendingPathComponent("snapshots").path).count, 1)
+            } else {
+                await assertTransactionFailure(status == .apiDisabled ? "PERMISSION_DENIED" : "NATIVE_FAILURE") {
+                    try await service.snapshot(selector: .pid(42, windowId: 7),
+                        options: fixture.treeOptions, context: self.context())
+                }
+                XCTAssertEqual((try? FileManager.default.contentsOfDirectory(atPath:
+                    root.appendingPathComponent("snapshots").path)) ?? [], [])
+            }
+            XCTAssertEqual(batches, 1)
+            XCTAssertEqual(singles, 0)
+            XCTAssertFalse(lockHeld)
+        }
+    }
+
     func testSnapshotRefreshesIdentityAfterObservationBeforePublishing() async throws {
         let root = transactionRoot()
         defer { try? FileManager.default.removeItem(at: root) }

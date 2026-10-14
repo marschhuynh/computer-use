@@ -328,6 +328,10 @@ function projectSnapshotCoverage(
     || (options.hintMode !== 'leafCompact' && value.emittedNodes !== value.observedNodes)) return undefined;
   if (!Array.isArray(value.boundaries) || value.boundaries.length > value.observedNodes
     || truncated !== (value.boundaries.length > 0)) return undefined;
+  if (value.omittedBoundaries !== undefined
+    && (!positiveSafeInteger(value.omittedBoundaries)
+      || value.boundaries.length === 0
+      || value.boundaries.length + value.omittedBoundaries > value.observedNodes)) return undefined;
   const noRefReason = value.boundaries.length > 0 ? 'traversalLimited' : 'noEligibleRefs';
   if (value.refCount === 0 ? value.noRefReason !== noRefReason : value.noRefReason !== undefined) return undefined;
 
@@ -343,7 +347,7 @@ function projectSnapshotCoverage(
       || !boundary.path.every(index => nonnegativeSafeInteger(index) && index < observedNodes)
       || !nonnegativeSafeInteger(boundary.observedChildren) || !nonnegativeSafeInteger(boundary.totalChildren)
       || boundary.observedChildren >= boundary.totalChildren || boundary.observedChildren >= value.observedNodes
-      || (boundary.path.length === 0 && value.refCount !== 0)) return undefined;
+      || (boundary.path.length === 0 && (tree.rootHasRef || (boundary.observedChildren === 0 && value.refCount !== 0)))) return undefined;
     const pathKey = JSON.stringify(boundary.path);
     if (paths.has(pathKey)) return undefined;
     paths.add(pathKey);
@@ -365,6 +369,7 @@ function projectSnapshotCoverage(
     scope: 'selectedWindow', absenceIsConclusive: false,
     observedNodes: value.observedNodes, emittedNodes: value.emittedNodes, refCount: value.refCount,
     limits: { maxDepth: limits.maxDepth, maxElements: limits.maxElements }, boundaries,
+    ...(value.omittedBoundaries === undefined ? {} : { omittedBoundaries: value.omittedBoundaries }),
     ...(value.refCount === 0 ? { noRefReason } : {}),
   };
   return coverage;
@@ -387,7 +392,7 @@ function projectSnapshotTarget(value: unknown): Record<string, JsonValue> | unde
 }
 
 type ProjectedSnapshotTree = {
-  tree: Record<string, JsonValue>; nodeCount: number; refCount: number; rootCount: number;
+  tree: Record<string, JsonValue>; nodeCount: number; refCount: number; rootCount: number; rootHasRef: boolean;
 };
 type SnapshotTreeCounts = { refs: Set<number>; nodeCount: number };
 
@@ -395,15 +400,19 @@ function projectSnapshotTree(value: unknown): ProjectedSnapshotTree | undefined 
   if (!isRecord(value) || !Array.isArray(value.elements) || value.elements.length > 1) return undefined;
   const counts: SnapshotTreeCounts = { refs: new Set(), nodeCount: 0 };
   const elements: JsonValue[] = [];
+  let rootHasRef = false;
   for (const element of value.elements) {
     const projected = projectSnapshotNode(element, counts);
     if (projected === undefined) return undefined;
+    if (projected.ref !== undefined) rootHasRef = true;
     elements.push(projected);
   }
   for (let ref = 1; ref <= counts.refs.size; ref += 1) {
     if (!counts.refs.has(ref)) return undefined;
   }
-  return { tree: { elements }, nodeCount: counts.nodeCount, refCount: counts.refs.size, rootCount: elements.length };
+  return {
+    tree: { elements }, nodeCount: counts.nodeCount, refCount: counts.refs.size, rootCount: elements.length, rootHasRef,
+  };
 }
 
 function projectSnapshotNode(value: unknown, counts: SnapshotTreeCounts): Record<string, JsonValue> | undefined {

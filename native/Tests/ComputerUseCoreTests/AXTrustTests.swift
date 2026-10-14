@@ -272,6 +272,273 @@ final class AXTrustTests: XCTestCase {
             XCTAssertEqual(liveAXFailure(for: status).code, "NATIVE_FAILURE")
         }
     }
+
+    func testProductionBatchHardTopLevelStatusesNeverCallSuccessfulSingleReader() {
+        for status in [AXError.apiDisabled, .invalidUIElement, .cannotComplete, .failure,
+                       .noValue, .illegalArgument, .notImplemented] {
+            var batches = 0
+            var singles = 0
+            let element = AXUIElementCreateApplication(42)
+            let cache = LiveAXBatchCache(multipleRead: { _, attributes in
+                batches += 1
+                XCTAssertEqual(attributes, [kAXRoleAttribute, kAXSubroleAttribute, kAXIdentifierAttribute,
+                    kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute, kAXEnabledAttribute,
+                    kAXFocusedAttribute, kAXSelectedAttribute, kAXPositionAttribute, kAXSizeAttribute])
+                return (status, nil)
+            }, singleRead: { _, _ in singles += 1; return (.success, "would hide failure" as CFString) })
+            let code = status == .apiDisabled ? "PERMISSION_DENIED" : "NATIVE_FAILURE"
+            let reader = liveAXTreeReader(cache: cache)
+            assertBatchFailure(code) { _ = try cache.attribute(element, kAXRoleAttribute) }
+            // Optional title .failure must not be degraded after a top-level failure.
+            assertBatchFailure(code) { _ = try reader.string(element, kAXTitleAttribute) }
+            assertBatchFailure(code) { _ = try reader.bool(element, kAXEnabledAttribute) }
+            assertBatchFailure(code) { _ = try reader.bounds(element) }
+            XCTAssertEqual(batches, 1)
+            XCTAssertEqual(singles, 0, "hard batch \(status) was erased")
+            assertBatchFailure(code) { _ = try reader.string(AXUIElementCreateApplication(43), kAXTitleAttribute) }
+            XCTAssertEqual(batches, 2, "switching handles must obtain a fresh batch")
+            XCTAssertEqual(singles, 0)
+        }
+    }
+
+    func testProductionBatchMalformedSuccessNeverFallsBack() {
+        for values in [nil, ["AXWindow" as CFString] as CFArray,
+                       Array(repeating: "extra" as CFString, count: 12) as CFArray] as [CFArray?] {
+            var batches = 0
+            var singles = 0
+            let cache = LiveAXBatchCache(multipleRead: { _, _ in batches += 1; return (.success, values) },
+                singleRead: { _, _ in singles += 1; return (.success, "AXWindow" as CFString) })
+            let element = AXUIElementCreateApplication(42)
+            for _ in 0..<2 {
+                assertBatchFailure("NATIVE_FAILURE") { _ = try liveAXTreeReader(cache: cache).string(element, kAXRoleAttribute) }
+            }
+            XCTAssertEqual(batches, 1)
+            XCTAssertEqual(singles, 0)
+        }
+    }
+
+    func testOnlyUnsupportedBatchUsesSinglesAndCachesTheDecisionPerElement() throws {
+        var batches = 0
+        var singles: [String] = []
+        let cache = LiveAXBatchCache(multipleRead: { _, _ in batches += 1; return (.attributeUnsupported, nil) },
+            singleRead: { _, name in
+                singles.append(name)
+                return name == kAXEnabledAttribute ? (.success, kCFBooleanTrue) : (.success, "AXButton" as CFString)
+            })
+        let reader = liveAXTreeReader(cache: cache)
+        let first = AXUIElementCreateApplication(42)
+        XCTAssertEqual(try reader.string(first, kAXRoleAttribute), .value("AXButton"))
+        XCTAssertEqual(try reader.string(first, kAXTitleAttribute), .value("AXButton"))
+        XCTAssertEqual(try reader.bool(first, kAXEnabledAttribute), .value(true))
+        XCTAssertEqual(batches, 1)
+        XCTAssertEqual(singles, [kAXRoleAttribute, kAXTitleAttribute, kAXEnabledAttribute])
+        XCTAssertEqual(try reader.string(AXUIElementCreateApplication(43), kAXRoleAttribute), .value("AXButton"))
+        XCTAssertEqual(batches, 2)
+        XCTAssertEqual(singles.count, 4)
+    }
+
+    func testCompleteProductionBatchPreservesPayloadsAndScalarAdapters() throws {
+        var batches = 0
+        var singles = 0
+        let values = try batchFixtureValues()
+        let cache = LiveAXBatchCache(multipleRead: { _, _ in batches += 1; return (.success, values) },
+            singleRead: { _, _ in singles += 1; return (.failure, nil) })
+        let reader = liveAXTreeReader(cache: cache)
+        let element = AXUIElementCreateApplication(42)
+        XCTAssertEqual(try reader.string(element, kAXRoleAttribute), .value("AXWindow"))
+        XCTAssertEqual(try reader.string(element, kAXTitleAttribute), .value("Fixture"))
+        XCTAssertEqual(try reader.string(element, kAXSubroleAttribute), .unavailable)
+        XCTAssertEqual(try reader.bool(element, kAXEnabledAttribute), .value(true))
+        XCTAssertEqual(try reader.bool(element, kAXFocusedAttribute), .value(false))
+        XCTAssertEqual(try reader.bool(element, kAXSelectedAttribute), .unavailable)
+        XCTAssertEqual(try reader.bounds(element), .value(WindowBounds(x: 12, y: 34, width: 56, height: 78)))
+        XCTAssertEqual(batches, 1)
+        XCTAssertEqual(singles, 0)
+        // Requesting an absent entry is not a compatibility fallback from a successful batch.
+        assertBatchFailure("NATIVE_FAILURE") { _ = try cache.attribute(element, "not-in-batch") }
+        XCTAssertEqual(singles, 0)
+    }
+
+    func testValidPerEntryAndUnsupportedSingleScalarPoliciesRemainLocal() throws {
+        for useBatch in [true, false] {
+            for status in [AXError.noValue, .attributeUnsupported, .failure, .apiDisabled,
+                           .invalidUIElement, .cannotComplete, .illegalArgument, .notImplemented] {
+                var singles = 0
+                var encoded = status
+                let error = try XCTUnwrap(AXValueCreate(.axError, &encoded))
+                let values = try batchFixtureValues(title: error)
+                let cache = LiveAXBatchCache(multipleRead: { _, _ in
+                    useBatch ? (.success, values) : (.attributeUnsupported, nil)
+                }, singleRead: { _, _ in singles += 1; return (status, nil) })
+                let reader = liveAXTreeReader(cache: cache)
+                let element = AXUIElementCreateApplication(42)
+                if [.noValue, .attributeUnsupported, .failure].contains(status) {
+                    XCTAssertEqual(try reader.string(element, kAXTitleAttribute), .unavailable)
+                } else {
+                    assertBatchFailure(status == .apiDisabled ? "PERMISSION_DENIED" : "NATIVE_FAILURE") {
+                        _ = try reader.string(element, kAXTitleAttribute)
+                    }
+                }
+                XCTAssertEqual(try cache.attribute(element, kAXTitleAttribute).status, status)
+                XCTAssertEqual(singles, useBatch ? 0 : 2)
+            }
+        }
+        var failure = AXError.failure
+        let values = try batchFixtureValues(role: XCTUnwrap(AXValueCreate(.axError, &failure)))
+        let cache = LiveAXBatchCache(multipleRead: { _, _ in (.success, values) },
+                                    singleRead: { _, _ in XCTFail("no single"); return (.success, "AXWindow" as CFString) })
+        assertBatchFailure("NATIVE_FAILURE") {
+            _ = try liveAXTreeReader(cache: cache).string(AXUIElementCreateApplication(42), kAXRoleAttribute)
+        }
+        // Malformed descriptive scalar compatibility is unchanged, but Boolean preparation isn't a scalar read.
+        let malformed = LiveAXBatchCache(multipleRead: { _, _ in
+            (.success, try! batchFixtureValues(title: kCFBooleanTrue))
+        })
+        XCTAssertEqual(try liveAXTreeReader(cache: malformed).string(AXUIElementCreateApplication(42), kAXTitleAttribute), .unavailable)
+    }
+
+    func testUnpackMultipleAXAttributesUnpacksValuesErrorsAndCFNull() throws {
+        let attributes = [
+            kAXRoleAttribute,
+            kAXSubroleAttribute,
+            kAXIdentifierAttribute,
+            kAXTitleAttribute,
+            kAXDescriptionAttribute,
+            kAXEnabledAttribute,
+            kAXFocusedAttribute,
+            kAXPositionAttribute,
+            kAXSizeAttribute
+        ]
+
+        var noValueError = AXError.noValue
+        let noValueAX = try XCTUnwrap(AXValueCreate(.axError, &noValueError))
+        var unsupportedError = AXError.attributeUnsupported
+        let unsupportedAX = try XCTUnwrap(AXValueCreate(.axError, &unsupportedError))
+        var cannotCompleteError = AXError.cannotComplete
+        let cannotCompleteAX = try XCTUnwrap(AXValueCreate(.axError, &cannotCompleteError))
+        var point = CGPoint(x: 12, y: 34)
+        let pointAX = try XCTUnwrap(AXValueCreate(.cgPoint, &point))
+        var size = CGSize(width: 56, height: 78)
+        let sizeAX = try XCTUnwrap(AXValueCreate(.cgSize, &size))
+
+        let values: [AnyObject] = [
+            "AXButton" as CFString,
+            noValueAX,
+            unsupportedAX,
+            cannotCompleteAX,
+            kCFNull,
+            kCFBooleanTrue,
+            kCFBooleanFalse,
+            pointAX,
+            sizeAX
+        ]
+
+        let unpacked = try XCTUnwrap(unpackMultipleAXAttributes(
+            attributes: attributes,
+            status: .success,
+            values: values as CFArray
+        ))
+
+        XCTAssertEqual(unpacked[kAXRoleAttribute]?.status, .success)
+        XCTAssertEqual(unpacked[kAXRoleAttribute]?.value as? String, "AXButton")
+
+        XCTAssertEqual(unpacked[kAXSubroleAttribute]?.status, .noValue)
+        XCTAssertNil(unpacked[kAXSubroleAttribute]?.value)
+
+        XCTAssertEqual(unpacked[kAXIdentifierAttribute]?.status, .attributeUnsupported)
+        XCTAssertNil(unpacked[kAXIdentifierAttribute]?.value)
+
+        XCTAssertEqual(unpacked[kAXTitleAttribute]?.status, .cannotComplete)
+        XCTAssertNil(unpacked[kAXTitleAttribute]?.value)
+
+        XCTAssertEqual(unpacked[kAXDescriptionAttribute]?.status, .noValue)
+        XCTAssertNil(unpacked[kAXDescriptionAttribute]?.value)
+
+        XCTAssertEqual(unpacked[kAXEnabledAttribute]?.status, .success)
+        XCTAssertEqual(unpacked[kAXEnabledAttribute]?.value as? Bool, true)
+
+        XCTAssertEqual(unpacked[kAXFocusedAttribute]?.status, .success)
+        XCTAssertEqual(unpacked[kAXFocusedAttribute]?.value as? Bool, false)
+
+        XCTAssertEqual(unpacked[kAXPositionAttribute]?.status, .success)
+        XCTAssertEqual(CFGetTypeID(try XCTUnwrap(unpacked[kAXPositionAttribute]?.value)), AXValueGetTypeID())
+
+        XCTAssertEqual(unpacked[kAXSizeAttribute]?.status, .success)
+        XCTAssertEqual(CFGetTypeID(try XCTUnwrap(unpacked[kAXSizeAttribute]?.value)), AXValueGetTypeID())
+    }
+
+    func testUnpackMultipleAXAttributesReturnsNilOnTopLevelErrorOrCountMismatch() {
+        let attributes = [kAXRoleAttribute, kAXTitleAttribute]
+        let validValues = ["AXWindow" as CFString, "Doc" as CFString] as CFArray
+
+        for status in [AXError.cannotComplete, .apiDisabled, .invalidUIElement, .failure] {
+            XCTAssertNil(unpackMultipleAXAttributes(
+                attributes: attributes,
+                status: status,
+                values: validValues
+            ))
+        }
+        XCTAssertNil(unpackMultipleAXAttributes(
+            attributes: attributes,
+            status: .success,
+            values: nil
+        ))
+        XCTAssertNil(unpackMultipleAXAttributes(
+            attributes: attributes,
+            status: .success,
+            values: ["AXWindow" as CFString] as CFArray
+        ))
+    }
+
+    func testUnpackedScalarReadResultsPreserveFailureAndUnavailableSemantics() throws {
+        let attributes = [
+            kAXRoleAttribute,
+            kAXSubroleAttribute,
+            kAXTitleAttribute,
+            kAXDescriptionAttribute,
+            kAXValueAttribute
+        ]
+
+        var failureError = AXError.failure
+        let failureAX = try XCTUnwrap(AXValueCreate(.axError, &failureError))
+        var cannotCompleteError = AXError.cannotComplete
+        let cannotCompleteAX = try XCTUnwrap(AXValueCreate(.axError, &cannotCompleteError))
+        var apiDisabledError = AXError.apiDisabled
+        let apiDisabledAX = try XCTUnwrap(AXValueCreate(.axError, &apiDisabledError))
+        var invalidElementError = AXError.invalidUIElement
+        let invalidElementAX = try XCTUnwrap(AXValueCreate(.axError, &invalidElementError))
+
+        let values: [AnyObject] = [
+            failureAX,
+            failureAX,
+            cannotCompleteAX,
+            apiDisabledAX,
+            invalidElementAX
+        ]
+
+        let unpacked = try XCTUnwrap(unpackMultipleAXAttributes(
+            attributes: attributes,
+            status: .success,
+            values: values as CFArray
+        ))
+
+        func classifyString(_ attr: String) throws -> AXReadResult<String> {
+            let read = try XCTUnwrap(unpacked[attr])
+            return axScalarReadResult(
+                attribute: attr,
+                status: read.status,
+                value: read.value,
+                expectedTypeID: CFStringGetTypeID(),
+                decode: { $0 as? String }
+            )
+        }
+
+        XCTAssertEqual(try classifyString(kAXRoleAttribute), .failure)
+        XCTAssertEqual(try classifyString(kAXSubroleAttribute), .unavailable)
+        XCTAssertEqual(try classifyString(kAXTitleAttribute), .failure)
+        XCTAssertEqual(try classifyString(kAXDescriptionAttribute), .failure)
+        XCTAssertEqual(try classifyString(kAXValueAttribute), .failure)
+    }
 }
 
 private let axFailureCases = [
@@ -344,4 +611,23 @@ private func trustTarget() -> ResolvedTarget {
         title: "Document",
         bounds: WindowBounds(x: 100, y: 100, width: 600, height: 400)
     )
+}
+
+private func batchFixtureValues(
+    role: CFTypeRef = "AXWindow" as CFString, title: CFTypeRef = "Fixture" as CFString
+) throws -> CFArray {
+    var point = CGPoint(x: 12, y: 34)
+    var size = CGSize(width: 56, height: 78)
+    return [role, kCFNull!, kCFNull!, title, kCFNull!, kCFNull!, kCFBooleanTrue!,
+            kCFBooleanFalse!, kCFNull!, try XCTUnwrap(AXValueCreate(.cgPoint, &point)),
+            try XCTUnwrap(AXValueCreate(.cgSize, &size))] as CFArray
+}
+
+private func assertBatchFailure(
+    _ code: String, file: StaticString = #filePath, line: UInt = #line,
+    _ body: () throws -> Void
+) {
+    do { try body(); XCTFail("expected " + code, file: file, line: line) }
+    catch let failure as NativeFailure { XCTAssertEqual(failure.code, code, file: file, line: line) }
+    catch { XCTFail("unexpected \(error)", file: file, line: line) }
 }

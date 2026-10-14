@@ -64,9 +64,18 @@ public struct WindowBounds: Codable, Equatable {
 
 public struct AXWindowMetadata: Codable, Equatable {
     public let role: String?
+    public let subrole: String?
     public let title: String?
     public let bounds: WindowBounds?
     public let minimized: Bool?
+
+    public init(role: String?, title: String?, bounds: WindowBounds?, minimized: Bool?, subrole: String? = nil) {
+        self.role = role
+        self.subrole = subrole
+        self.title = title
+        self.bounds = bounds
+        self.minimized = minimized
+    }
 }
 
 public struct CGWindowMetadata: Codable, Equatable {
@@ -80,6 +89,23 @@ public struct CGWindowMetadata: Codable, Equatable {
 public struct TargetWindow: Codable, Equatable {
     public let ax: AXWindowMetadata
     public let cg: CGWindowMetadata
+
+    public var isEligible: Bool {
+        ineligibilityReason == nil
+    }
+
+    public var ineligibilityReason: String? {
+        if ax.minimized == true || cg.minimized {
+            return "minimized"
+        }
+        if !cg.onScreen {
+            return "offscreen"
+        }
+        if ax.subrole == "AXUnknown" {
+            return "nonStandardWindow"
+        }
+        return nil
+    }
 }
 
 public struct TargetApplication: Codable, Equatable {
@@ -99,12 +125,25 @@ public struct ProcessMetadata: Equatable, Sendable {
     public let pid: Int
     public let launchDate: String?
     public let bundleId: String?
+    public let isRegularApp: Bool
 
-    public init(name: String, pid: Int, launchDate: String?, bundleId: String?) {
+    public init(name: String, pid: Int, launchDate: String?, bundleId: String?, isRegularApp: Bool = true) {
         self.name = name
         self.pid = pid
         self.launchDate = launchDate
         self.bundleId = bundleId
+        self.isRegularApp = isRegularApp
+    }
+
+    init(
+        name: String, pid: Int, appKitLaunchDate: Date?, bundleId: String?,
+        isRegularApp: Bool = true, kernelStartLookup: (Int) -> Date?
+    ) {
+        self.init(
+            name: name, pid: pid,
+            launchDate: (appKitLaunchDate ?? kernelStartLookup(pid)).map(ProcessLaunchDate.format),
+            bundleId: bundleId, isRegularApp: isRegularApp
+        )
     }
 
     init(application: TargetApplication) {
@@ -112,6 +151,7 @@ public struct ProcessMetadata: Equatable, Sendable {
         pid = application.pid
         launchDate = application.launchDate
         bundleId = application.bundleId
+        isRegularApp = true
     }
 }
 
@@ -198,10 +238,27 @@ public final class TargetResolver {
         try context.check()
         let applications = try await provider.listApplications()
         try context.check()
+        return try selectApplication(selector, from: applications)
+    }
+
+    private func selectApplication(
+        _ selector: TargetSelector,
+        from applications: [ProcessMetadata]
+    ) throws -> ProcessMetadata {
         let selected: [ProcessMetadata]
         switch selector {
         case let .app(name, _):
-            selected = applications.filter { $0.name == name || $0.bundleId == name }
+            let exactBundleMatches = applications.filter { $0.bundleId == name }
+            // An exact bundle match fixes the entire tie-break domain. A name
+            // collision from another bundle must never redirect this selector.
+            let matches = exactBundleMatches.isEmpty
+                ? applications.filter { $0.name == name }
+                : exactBundleMatches
+            if matches.count > 1 {
+                let regularMatches = matches.filter(\.isRegularApp)
+                if regularMatches.count == 1 { return regularMatches[0] }
+            }
+            selected = matches
         case let .pid(pid, _):
             selected = applications.filter { $0.pid == pid }
         case .display, .global:
@@ -233,22 +290,7 @@ public final class TargetResolver {
         let applications = try await provider.listApplications()
         try context.check()
 
-        let selected: [ProcessMetadata]
-        switch selector {
-        case let .app(name, _):
-            selected = applications.filter { $0.name == name || $0.bundleId == name }
-        case let .pid(pid, _):
-            selected = applications.filter { $0.pid == pid }
-        case .display, .global:
-            throw NativeFailure("INVALID_ARGUMENT", "This target is not a window")
-        }
-        guard selected.count == 1 else {
-            throw NativeFailure(
-                selected.isEmpty ? "TARGET_NOT_FOUND" : "AMBIGUOUS_TARGET",
-                "Application selection is not unique"
-            )
-        }
-        let application = selected[0]
+        let application = try selectApplication(selector, from: applications)
         guard let launchDate = application.launchDate, !launchDate.isEmpty else {
             throw NativeFailure("TARGET_NOT_FOUND", "Process start identity is unavailable")
         }
@@ -269,7 +311,7 @@ public final class TargetResolver {
         guard !candidates.isEmpty else {
             throw NativeFailure("TARGET_NOT_FOUND", "Window was not found")
         }
-        let eligible = candidates.filter { $0.cg.onScreen && !$0.cg.minimized }
+        let eligible = candidates.filter(\.isEligible)
         guard !eligible.isEmpty else {
             throw NativeFailure("INELIGIBLE_TARGET", "No eligible window is available")
         }
@@ -374,6 +416,27 @@ public final class TargetResolver {
     }
 }
 
+enum KernelProcessStart {
+    typealias Query = (pid_t, inout kinfo_proc, inout size_t) -> Int32
+
+    static func liveQuery(_ pid: pid_t, _ process: inout kinfo_proc, _ size: inout size_t) -> Int32 {
+        var mib = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        return sysctl(&mib, u_int(mib.count), &process, &size, nil, 0)
+    }
+
+    static func lookup(pid: Int, query: Query = liveQuery) -> Date? {
+        guard let requestedPID = pid_t(exactly: pid), requestedPID > 0 else { return nil }
+        var process = kinfo_proc()
+        var size = size_t(MemoryLayout<kinfo_proc>.size)
+        guard query(requestedPID, &process, &size) == 0,
+              size == MemoryLayout<kinfo_proc>.size else { return nil }
+        let start = process.kp_proc.p_starttime
+        guard process.kp_proc.p_pid == requestedPID,
+              start.tv_sec > 0, (0...999_999).contains(start.tv_usec) else { return nil }
+        return Date(timeIntervalSince1970: Double(start.tv_sec) + Double(start.tv_usec) / 1_000_000)
+    }
+}
+
 enum ProcessLaunchDate {
     static func format(_ date: Date) -> String {
         let formatter = ISO8601DateFormatter()
@@ -436,8 +499,10 @@ private func liveProcessMetadata() -> [ProcessMetadata] {
         ProcessMetadata(
             name: application.localizedName ?? "",
             pid: Int(application.processIdentifier),
-            launchDate: application.launchDate.map(ProcessLaunchDate.format),
-            bundleId: application.bundleIdentifier
+            appKitLaunchDate: application.launchDate,
+            bundleId: application.bundleIdentifier,
+            isRegularApp: application.activationPolicy == .regular,
+            kernelStartLookup: { KernelProcessStart.lookup(pid: $0) }
         )
     }
 }
@@ -597,7 +662,8 @@ private func liveWindows(for pid: Int, context: CommandContext) throws -> [Targe
             role: try resolverString(element, kAXRoleAttribute),
             title: try resolverString(element, kAXTitleAttribute),
             bounds: try resolverBounds(element),
-            minimized: try resolverBool(element, kAXMinimizedAttribute)
+            minimized: try resolverBool(element, kAXMinimizedAttribute),
+            subrole: try resolverString(element, kAXSubroleAttribute)
         )
         candidates.append(AXWindowCandidate(
             resolvedWindowID: resolver.windowID(for: element),

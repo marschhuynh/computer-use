@@ -48,8 +48,9 @@ public final class SnapshotService {
         observe: @escaping Observe = { target, options, context in
             try AXTree.capture(target: target, options: options, context: context)
         },
-        // Live AX preparation remains gated; shipping snapshots do not opt in.
-        prepareSnapshot: @escaping PrepareSnapshot = { _, _ in },
+        prepareSnapshot: @escaping PrepareSnapshot = { target, context in
+            try await AXSnapshotPreparation.prepare(target: target, context: context)
+        },
         validateTarget: @escaping ValidateTarget = { identity, context in
             try await TargetResolver().validate(identity, context: context)
         },

@@ -7,7 +7,7 @@ const root = new URL('../', import.meta.url);
 const staleToolsDirectory = new URL('../dist/tools/', import.meta.url);
 const staleTool = new URL('../dist/tools/stale.js', import.meta.url);
 const stalePort = new URL('../dist/ports.js', import.meta.url);
-const originalTool = new URL('../src/tools/ComputerUseTool.ts', import.meta.url);
+const originalTool = new URL('../src/cli.ts', import.meta.url);
 
 async function exists(path) {
   try {
@@ -44,6 +44,6 @@ assert.equal(await exists(new URL('../dist/cli.js', import.meta.url)), true, 'bu
   const mode = (await stat(cli)).mode & 0o777;
   assert.equal(mode & 0o111, 0o111, 'dist/cli.js must be executable');
 }
-assert.equal(await exists(originalTool), true, 'build:ts must not delete original src/tools sources');
+assert.equal(await exists(originalTool), true, 'build:ts must not delete original src/cli.ts source');
 
 process.stdout.write('build hygiene regression passed\n');
