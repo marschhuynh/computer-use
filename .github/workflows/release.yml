@@ -1,0 +1,103 @@
+name: CI and Release
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Queue main releases; never cancel an in-flight publish.
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    name: macOS CI
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.19.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - name: Check native build platform
+        run: |
+          test "$(uname -m)" = arm64
+          swift --version
+          xcodebuild -version
+      - run: pnpm install --frozen-lockfile
+      - name: Validate Changesets configuration
+        # No changeset-coverage policy: version PRs have already consumed theirs.
+        run: pnpm exec changeset status --since HEAD
+      - run: pnpm run typecheck
+      - run: pnpm test
+      - run: pnpm run native-tests
+      - run: pnpm run test:native-protocol
+      - run: pnpm run test:build-hygiene
+      - run: pnpm run build
+      - name: Check package contents and executable modes
+        run: |
+          # Changesets publishes via pnpm, whose archive modes differ from npm's.
+          pnpm pack --out "$RUNNER_TEMP/computer-use.tgz"
+          pack_dir=$(mktemp -d "$RUNNER_TEMP/computer-use.XXXXXX")
+          tar -xzf "$RUNNER_TEMP/computer-use.tgz" -C "$pack_dir"
+          node --input-type=module - "$pack_dir/package" <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync, statSync } from 'node:fs';
+          const root = process.argv[2];
+          assert.equal(JSON.parse(readFileSync(`${root}/package.json`, 'utf8')).name, '@nuvin/computer-use');
+          for (const path of ['dist/cli.js', 'dist/native/computer-use-host']) {
+            assert.equal(statSync(`${root}/${path}`).mode & 0o777, 0o755, `${path} must be executable`);
+          }
+          NODE
+          "$pack_dir/package/dist/cli.js" --version
+          "$pack_dir/package/dist/cli.js" --help
+          "$pack_dir/package/dist/native/computer-use-host" --protocol-version | grep -x 1
+
+  release:
+    name: Version Packages or Publish
+    needs: ci
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.19.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - name: Check trusted publishing prerequisites
+        run: |
+          test "$(uname -m)" = arm64
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { execFileSync } from 'node:child_process';
+          const [major, minor, patch] = execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim().split('.').map(Number);
+          assert.ok(major > 11 || (major === 11 && (minor > 5 || (minor === 5 && patch >= 1))), 'npm >=11.5.1 is required for OIDC');
+          NODE
+      - run: pnpm install --frozen-lockfile
+      - uses: changesets/action@v1
+        with:
+          version: pnpm run version-packages
+          publish: pnpm run release
+          title: 'Version Packages'
+          commit: 'chore: version packages'
+          createGithubReleases: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

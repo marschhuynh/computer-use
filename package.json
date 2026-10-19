@@ -3,7 +3,8 @@
   "version": "0.2.0",
   "private": false,
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "executableFiles": ["dist/native/computer-use-host"]
   },
   "type": "module",
   "description": "Drive the macOS desktop from a CLI — accessibility-tree actions (snapshot → press/set-value) and pixel actions (screenshot → click/move/drag). Foreground automation for agents.",
@@ -52,9 +53,13 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run --exclude tests/native-protocol.test.ts --exclude '**/.worktrees/**'",
     "test:native-protocol": "node scripts/native-protocol-tests.mjs",
-    "ax-helper": "make ax-helper"
+    "ax-helper": "make ax-helper",
+    "changeset": "changeset",
+    "version-packages": "changeset version && pnpm install --lockfile-only --ignore-scripts && npm install --package-lock-only --ignore-scripts --no-audit --no-fund",
+    "release": "pnpm run build && changeset publish --tag latest"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.31.1",
     "@types/node": "^24.10.1",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"
