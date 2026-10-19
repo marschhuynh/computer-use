@@ -37,7 +37,7 @@ Main runs are serialized and in-flight releases are not cancelled. Do not run
 
 ## One-time administrator setup (not performed by this change)
 
-1. In GitHub repository `marschhuynh/nuvin-computer-use`, enable Actions and
+1. In GitHub repository `marschhuynh/computer-use`, enable Actions and
    allow **GitHub Actions to create and approve pull requests** under
    Settings → Actions → General → Workflow permissions. Repository policy
    must permit the workflow's explicit `contents: write` and
@@ -50,7 +50,7 @@ Main runs are serialized and in-flight releases are not cancelled. Do not run
 3. In npm settings for **@nuvin/computer-use**, add a **GitHub Actions** trusted
    publisher with these exact values:
    - Organization or user: `marschhuynh`
-   - Repository: `nuvin-computer-use`
+   - Repository: `computer-use`
    - Workflow filename: **`release.yml`** (not a path, and not `publish.yml`)
    - Environment name: leave blank (this workflow does not use an environment).
    - Under **Allowed actions**, enable **Allow npm publish**. New trusted

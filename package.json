@@ -24,7 +24,7 @@
   "author": "Marsch Huynh <marsch.huynh@gmail.com>",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/marschhuynh/nuvin-computer-use.git"
+    "url": "git+https://github.com/marschhuynh/computer-use.git"
   },
   "bin": {
     "nuvin-computer-use": "dist/cli.js"
