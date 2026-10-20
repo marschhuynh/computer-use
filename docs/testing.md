@@ -123,6 +123,47 @@ plan. User-owned acceptance is not an automated or local-integration gate;
 actual input effect, broader browser readiness, service-hosted panel targeting
 and live/release acceptance remain unproved by the fixture/build checks.
 
+## Offline input repair — drag-event-cadence (G1)
+
+This workflow's live verification is **DEFERRED / PROHIBITED under G1**.
+Do not run real desktop/browser/GUI, input posting, screenshots, real AX
+queries, live fixtures, doctor or package smoke for this repair. This section
+does not change another workflow's authority or grant future live permission.
+
+`DragCadenceTests` injects event construction/post/wait operations into the
+shipping synchronous `LiveInputDriver.drag`, sharing a fake monotonic clock.
+No production event poster or sleep runs. The timing **candidate** is 20
+straight-line samples with 15 ms minimum gaps between all 22 normal posts
+(down, 20 samples, up): 21 gaps, 315 ms nominal without overhead. Synchronous
+wait requests are positive, at most 5 ms, and capped by gap and command budget;
+early wakes and scheduler delay never compress the next gap. Short budgets
+can now return `TIMEOUT` rather than speed up a stroke.
+
+Cancellation, expiry and construction/wait failure after down immediately
+release the preallocated up at the last dispatched point. That single emergency
+release is the intentional exception to pacing/context validity, not continued
+drawing. Preparation failure posts nothing; cleanup does not allocate or wait.
+`CaptureTests` proves actual input geometry/cadence equivalence for cursor-on/off
+using seeded capture records, fake providers and a recording renderer. It also
+checks stale geometry, failure envelopes, overlay cleanup and lock release.
+
+Task 1's non-live commands are:
+
+```sh
+swift test --package-path native --filter DragCadenceTests
+swift test --package-path native --filter CaptureTests
+npm run native-tests
+```
+
+Inspect fixtures before execution: use injected post/wait, renderer and AX
+operations, never live fallbacks. Inert event/AX-handle allocation and synthetic
+image encoding are not desktop input, AX queries or real screen captures.
+See the [offline evidence and unresolved acceptance report](verification/2026-10-20-offline-input-delivery.md)
+for RED/GREEN results and scope. Dispatch-only `verification:"dispatched"` does
+not prove receiver continuity or repair. Keyboard code remains unchanged and
+functional delivery unresolved; Task 2's AX diagnostics/composed build gates
+are pending. Underlying Chrome AX readiness and all live acceptance stay open.
+
 ## Notes for contributors
 
 - **Host protocol quirk:** the Swift host holds stdin open while processing.

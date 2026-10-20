@@ -164,10 +164,33 @@ public enum KeyChord {
 
 // MARK: - Live driver
 
+/// Drag-only operations: tests replace all three without posting or sleeping.
+struct DragEventOperations {
+    let makeEvent: (CGEventType, CGPoint) -> CGEvent?
+    let post: (CGEvent) -> Void
+    let waitNanoseconds: (UInt64) throws -> Void
+
+    static var live: DragEventOperations {
+        DragEventOperations(
+            makeEvent: { type, point in
+                CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left)
+            },
+            post: { $0.post(tap: .cghidEventTap) },
+            waitNanoseconds: { Thread.sleep(forTimeInterval: Double($0) / 1_000_000_000) }
+        )
+    }
+}
+
 /// Real AX/CGEvent input. Owns the actual desktop calls; held-input cleanup
 /// releases only what this driver pressed.
 public final class LiveInputDriver: NativeInputDriver {
-    public init() {}
+    private let dragOperations: DragEventOperations
+
+    public init() { dragOperations = .live }
+
+    init(dragOperations: DragEventOperations) {
+        self.dragOperations = dragOperations
+    }
 
     public func performAXAction(_ action: String, on element: LiveAXElement, context: CommandContext) throws {
         guard let raw = element.rawValue else {
@@ -368,37 +391,67 @@ public final class LiveInputDriver: NativeInputDriver {
 
     public func drag(from start: CGPoint, to end: CGPoint, context: CommandContext) throws {
         try context.check()
-        guard let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: start, mouseButton: .left) else {
+        guard let down = dragOperations.makeEvent(.leftMouseDown, start) else {
             throw NativeFailure("NATIVE_FAILURE", "Unable to construct drag event")
         }
-        down.post(tap: .cghidEventTap)
+        guard let up = dragOperations.makeEvent(.leftMouseUp, start) else {
+            throw NativeFailure("NATIVE_FAILURE", "Unable to release drag")
+        }
+        var didPostDown = false
         var didRelease = false
+        var lastPoint = start
         defer {
-            if !didRelease {
-                if let up = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: end, mouseButton: .left) {
-                    up.post(tap: .cghidEventTap)
+            // The only post-interruption exception: release the held button at
+            // the last dispatched point, with no allocation, wait or context check.
+            if didPostDown && !didRelease {
+                up.location = lastPoint
+                dragOperations.post(up)
+            }
+        }
+        try context.check()
+        dragOperations.post(down)
+        didPostDown = true
+        // Measure from post return, not a scheduled timeline: late dispatch must
+        // not shorten the next gap. 21 gaps × 15 ms = 315 ms without overhead.
+        var lastPostTime = context.clock.monotonicNow()
+        func waitForNextPost() throws {
+            while true {
+                try context.check()
+                let elapsed = context.clock.monotonicNow() - lastPostTime
+                if elapsed >= 15_000_000 { return }
+                let duration = min(5_000_000, 15_000_000 - elapsed, context.remainingNanoseconds)
+                guard duration > 0 else {
+                    try context.check()
+                    continue
                 }
+                try dragOperations.waitNanoseconds(duration)
+                try context.check()
             }
         }
         // Bounded straight-line interpolation, checking the deadline between steps.
         let steps = 20
         for i in 1...steps {
-            try context.check()
+            try waitForNextPost()
             let t = CGFloat(i) / CGFloat(steps)
-            let point = CGPoint(x: start.x + (end.x - start.x) * t, y: start.y + (end.y - start.y) * t)
-            guard let move = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDragged, mouseCursorPosition: point, mouseButton: .left) else { continue }
-            move.post(tap: .cghidEventTap)
+            let point = i == steps ? end : CGPoint(x: start.x + (end.x - start.x) * t, y: start.y + (end.y - start.y) * t)
+            guard let move = dragOperations.makeEvent(.leftMouseDragged, point) else {
+                throw NativeFailure("NATIVE_FAILURE", "Unable to construct drag event")
+            }
+            try context.check()
+            dragOperations.post(move)
+            lastPoint = point
+            lastPostTime = context.clock.monotonicNow()
         }
-        guard let up = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: end, mouseButton: .left) else {
-            throw NativeFailure("NATIVE_FAILURE", "Unable to release drag")
-        }
-        up.post(tap: .cghidEventTap)
+        try waitForNextPost()
+        try context.check()
+        up.location = end
+        dragOperations.post(up)
         didRelease = true
     }
 
     public func releaseHeldInputs() throws {
-        // If a drag was interrupted the defer in `drag` already released the
-        // button; this is the belt-and-suspenders path for held modifiers.
+        // Drag owns its release even after interruption; the wrapper's failure
+        // cleanup must not post a duplicate up.
     }
 }
 

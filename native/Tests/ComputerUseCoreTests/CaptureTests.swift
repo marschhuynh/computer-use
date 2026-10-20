@@ -587,3 +587,222 @@ final class CaptureTests: XCTestCase {
         XCTAssertTrue(recorder.clicks.isEmpty)
     }
 }
+
+extension CaptureTests {
+    private final class DragRenderer: CursorRenderer, InputMarking {
+        let fixture: DragFixture
+        var calls: [String] = []
+        var points: [CGPoint] = []
+        var prepareFails = false
+        init(_ fixture: DragFixture) { self.fixture = fixture }
+        func prepare() throws {
+            calls.append("prepare")
+            if prepareFails { throw NativeFailure("NATIVE_FAILURE", "injected overlay preparation failure") }
+        }
+        func approach(_ point: CGPoint, context: CommandContext) async throws {
+            calls.append("approach")
+            points.append(point)
+            XCTAssertTrue(fixture.posts.isEmpty)
+            fixture.now += 40_000_000
+        }
+        func dragAlong(_ points: [CGPoint], context: CommandContext) async throws {
+            calls.append("drag")
+            self.points += points
+            XCTAssertTrue(fixture.posts.isEmpty)
+            fixture.now += 60_000_000
+        }
+        func pulse() async throws { XCTFail("drag must not pulse") }
+        func markInput() { calls.append("input") }
+        func hide() async throws { calls.append("hide") }
+        func teardown() async throws { calls.append("teardown") }
+    }
+
+    private struct NoDragActivation: AppActivator {
+        func activate(pid: Int, context: CommandContext) async throws {
+            XCTFail("spatial drag must not activate an app")
+            throw NativeFailure("NATIVE_FAILURE", "unexpected activation")
+        }
+    }
+
+    private func displayDragService(
+        displays: @escaping () -> [DisplayMetadata], input: NativeInput,
+        renderer: @escaping () -> CursorRenderer, store: StateStore, lock: DesktopLock
+    ) -> NativeService {
+        NativeService(
+            snapshotService: SnapshotService(lock: lock, store: store,
+                resolve: { _, _ in throw NativeFailure("NATIVE_FAILURE", "unexpected snapshot resolution") },
+                observe: { _, _, _ in throw NativeFailure("NATIVE_FAILURE", "unexpected AX observation") },
+                prepareSnapshot: { _, _ in },
+                validateTarget: { _, _ in throw NativeFailure("NATIVE_FAILURE", "unexpected snapshot validation") }),
+            desktopLock: lock,
+            targetResolver: TargetResolver(provider: TargetResolverProvider(
+                listApplications: { XCTFail("unexpected applications query"); return [] },
+                windowsForPID: { _, _ in XCTFail("unexpected windows query"); return [] },
+                listDisplays: displays)),
+            environment: DoctorEnvironment(accessibilityTrusted: false, screenRecordingTrusted: false),
+            store: store,
+            captureService: CaptureService(capturer: { _, _, _ in
+                XCTFail("seeded drag must not capture")
+                throw NativeFailure("NATIVE_FAILURE", "unexpected capture")
+            }, store: store),
+            input: input, activator: NoDragActivation(), renderer: renderer)
+    }
+
+    private func dragRequest(captureID: String, cursor: Bool, endX: Double = 300) -> WireRequest {
+        WireRequest(command: .drag, object: [
+            "schemaVersion": 1, "command": "drag", "captureId": captureID,
+            "from": ["x": 100, "y": 50], "to": ["x": endX, "y": 150],
+            "options": ["timeoutMs": 2_000, "cursor": cursor ? "on" : "off"],
+        ])
+    }
+
+    func testDragCursorModesUseSameActualGeometryAndCadence() async throws {
+        var normalized: [[DragFixture.Post]] = []
+        for cursor in [false, true] {
+            let root = temporaryStateRoot()
+            let store = StateStore(rootURL: root)
+            let lock = DesktopLock(rootURL: root)
+            let frame = WindowBounds(x: -400, y: 200, width: 2056, height: 1329)
+            let id = try seedDisplayCapture(store: store, frame: frame)
+            let f = DragFixture()
+            let renderer = DragRenderer(f)
+            var rendererCreations = 0
+            let service = displayDragService(
+                displays: { [DisplayMetadata(displayID: 77, frame: frame, width: 2056, height: 1329)] },
+                input: NativeInput(driver: f.driver), renderer: {
+                    rendererCreations += 1
+                    return renderer
+                }, store: store, lock: lock)
+            let reply = await service.execute(dragRequest(captureID: id, cursor: cursor), context: f.context())
+            XCTAssertTrue(reply.ok, String(describing: reply.error))
+            XCTAssertEqual(reply.data?["method"], .string("cg-event"))
+            XCTAssertEqual(reply.data?["verification"], .string("dispatched"))
+            XCTAssertEqual(reply.data?["visualization"], .string(cursor ? "drag" : "none"))
+            XCTAssertEqual(rendererCreations, cursor ? 1 : 0)
+            XCTAssertEqual(renderer.calls, cursor ? ["prepare", "approach", "drag", "input", "hide", "teardown"] : [])
+            let start = CGPoint(x: -300, y: 250), end = CGPoint(x: -100, y: 350)
+            XCTAssertEqual(renderer.points, cursor ? [start, start, end] : [])
+            XCTAssertEqual(f.posts.count, 22)
+            XCTAssertEqual(f.posts.map(\.type), [.leftMouseDown] + Array(repeating: .leftMouseDragged, count: 20) + [.leftMouseUp])
+            XCTAssertEqual(f.posts.first?.point, start)
+            XCTAssertEqual(f.posts.last?.point, end)
+            for (i, post) in f.posts.dropFirst().prefix(20).enumerated() {
+                XCTAssertEqual(post.point, CGPoint(x: start.x + Double(i + 1) * 10, y: start.y + Double(i + 1) * 5))
+            }
+            let firstTime = try XCTUnwrap(f.posts.first?.time)
+            XCTAssertEqual(firstTime, cursor ? 100_000_000 : 0)
+            let relative = f.posts.map { DragFixture.Post(type: $0.type, point: $0.point, button: $0.button, time: $0.time - firstTime) }
+            XCTAssertEqual(relative.map(\.time), (0...21).map { UInt64($0) * 15_000_000 })
+            normalized.append(relative)
+        }
+        XCTAssertEqual(normalized[0], normalized[1])
+    }
+}
+
+extension CaptureTests {
+    func testDragRejectsInvalidCaptureAndGeometryBeforeAnyInputOrOverlay() async throws {
+        for failure in ["expired", "invalidated", "missingCapture", "missingDisplay", "movedDisplay", "movedUnderLock", "outsideImage"] {
+            let root = temporaryStateRoot()
+            let store = StateStore(rootURL: root)
+            let lock = DesktopLock(rootURL: root)
+            let frame = WindowBounds(x: -400, y: 200, width: 2056, height: 1329)
+            var id = try seedDisplayCapture(store: store, frame: frame)
+            let f = DragFixture()
+            if failure == "expired" { f.wall = ISO8601DateFormatter().date(from: "2026-09-08T10:11:00Z")! }
+            if failure == "invalidated" {
+                let record = try store.readCapture(id: id, context: f.context())
+                try store.invalidateRecords(for: record.target.identity, context: f.context())
+            }
+            if failure == "missingCapture" { id = "123e4567-e89b-42d3-a456-4266141740bb" }
+            let renderer = DragRenderer(f)
+            var queries = 0
+            let service = displayDragService(displays: {
+                queries += 1
+                if failure == "missingDisplay" { return [] }
+                let moved = failure == "movedDisplay" || (failure == "movedUnderLock" && queries == 2)
+                let current = moved ? WindowBounds(x: 0, y: 0, width: 2056, height: 1329) : frame
+                return [DisplayMetadata(displayID: 77, frame: current, width: 2056, height: 1329)]
+            }, input: NativeInput(driver: f.driver), renderer: {
+                XCTFail("invalid capture/geometry must be rejected before renderer creation")
+                return renderer
+            }, store: store, lock: lock)
+            let reply = await service.execute(dragRequest(captureID: id, cursor: true,
+                endX: failure == "outsideImage" ? 2056 : 300), context: f.context())
+            XCTAssertFalse(reply.ok, failure)
+            XCTAssertEqual(reply.error?.code, failure == "outsideImage" ? "INVALID_ARGUMENT" : "STALE_CAPTURE", failure)
+            XCTAssertEqual(reply.error?.details, ["mutationStatus": .string("notStarted")], failure)
+            XCTAssertTrue(f.posts.isEmpty, failure)
+            XCTAssertTrue(f.constructions.isEmpty, failure)
+            XCTAssertTrue(f.waits.isEmpty, failure)
+            XCTAssertTrue(renderer.calls.isEmpty, failure)
+            var reacquired = false
+            try await lock.withLock(context: f.context()) { reacquired = true }
+            XCTAssertTrue(reacquired)
+        }
+    }
+
+    func testDragOverlayPreparationFailureDoesNotEnterInputAndReleasesLock() async throws {
+        let root = temporaryStateRoot()
+        let store = StateStore(rootURL: root)
+        let lock = DesktopLock(rootURL: root)
+        let frame = WindowBounds(x: -400, y: 200, width: 2056, height: 1329)
+        let id = try seedDisplayCapture(store: store, frame: frame)
+        let f = DragFixture()
+        let renderer = DragRenderer(f)
+        renderer.prepareFails = true
+        let service = displayDragService(
+            displays: { [DisplayMetadata(displayID: 77, frame: frame, width: 2056, height: 1329)] },
+            input: NativeInput(driver: f.driver), renderer: { renderer }, store: store, lock: lock)
+        let reply = await service.execute(dragRequest(captureID: id, cursor: true), context: f.context())
+        XCTAssertFalse(reply.ok)
+        XCTAssertEqual(reply.error?.code, "NATIVE_FAILURE")
+        XCTAssertEqual(reply.error?.message, "injected overlay preparation failure")
+        XCTAssertEqual(reply.error?.details, ["mutationStatus": .string("notStarted")])
+        XCTAssertEqual(renderer.calls, ["prepare", "teardown"])
+        XCTAssertTrue(f.posts.isEmpty)
+        XCTAssertTrue(f.constructions.isEmpty)
+        XCTAssertTrue(f.waits.isEmpty)
+        var reacquired = false
+        try await lock.withLock(context: f.context()) { reacquired = true }
+        XCTAssertTrue(reacquired)
+    }
+
+    func testDragWaitFailureReportsPotentialMutationReleasesAndTearsDown() async throws {
+        for cursor in [false, true] {
+            let root = temporaryStateRoot()
+            let store = StateStore(rootURL: root)
+            let lock = DesktopLock(rootURL: root)
+            let frame = WindowBounds(x: -400, y: 200, width: 2056, height: 1329)
+            let id = try seedDisplayCapture(store: store, frame: frame)
+            let f = DragFixture()
+            let renderer = DragRenderer(f)
+            var faultTime: UInt64 = 0
+            f.onWait = { duration in
+                if f.posts.count == 11 {
+                    faultTime = f.now
+                    throw NativeFailure("NATIVE_FAILURE", "injected drag wait failure")
+                }
+                f.now += duration
+            }
+            let service = displayDragService(
+                displays: { [DisplayMetadata(displayID: 77, frame: frame, width: 2056, height: 1329)] },
+                input: NativeInput(driver: f.driver), renderer: {
+                    XCTAssertTrue(cursor)
+                    return renderer
+                }, store: store, lock: lock)
+            let reply = await service.execute(dragRequest(captureID: id, cursor: cursor), context: f.context())
+            XCTAssertFalse(reply.ok)
+            XCTAssertNil(reply.data)
+            XCTAssertEqual(reply.error?.code, "NATIVE_FAILURE")
+            XCTAssertEqual(reply.error?.message, "injected drag wait failure")
+            XCTAssertEqual(reply.error?.details, ["mutationStatus": .string("potentiallyApplied")])
+            XCTAssertEqual(f.posts.map(\.type), [.leftMouseDown] + Array(repeating: .leftMouseDragged, count: 10) + [.leftMouseUp])
+            XCTAssertEqual(f.posts.last?.point, CGPoint(x: -200, y: 300))
+            XCTAssertEqual(f.posts.last?.time, faultTime)
+            XCTAssertEqual(renderer.calls, cursor ? ["prepare", "approach", "drag", "hide", "teardown"] : [])
+            var reacquired = false
+            try await lock.withLock(context: f.context()) { reacquired = true }
+            XCTAssertTrue(reacquired)
+        }
+    }
+}
