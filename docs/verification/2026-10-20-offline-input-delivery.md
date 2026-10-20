@@ -1,4 +1,9 @@
-# Offline input delivery — Task 1 evidence (2026-10-20)
+# Offline input delivery — Tasks 1–2 evidence (2026-10-20)
+
+The Task 1 record below is retained as historical evidence. The appended
+**Task 2 / composed candidate** section updates its pending AX/build dispositions;
+it does not close any live acceptance. Task 1 was independently accepted by the
+coordinator before Task 2; Task 2 independent review remains a separate gate.
 
 ## Disposition and authority
 
@@ -205,3 +210,198 @@ E3 offline keyboard/AX findings as incorporated in the approved spec. Those
 original untracked files, live TODOs and private artifacts were not copied,
 modified, closed or staged. This new sanitized note does not replace historical
 observations or claim all three functional bugs repaired.
+
+
+## Task 2 / composed candidate — offline implementation complete
+
+**Live verification: DEFERRED / PROHIBITED under G1.** Drag remains a **timing
+candidate** with receiver continuity unverified. AX work is a **diagnostic
+improvement**, not Chrome recovery. **Keyboard delivery: unresolved.**
+**Chrome AX readiness: unresolved.** This report does not claim all three
+functional bugs fixed.
+
+Authority: canonical primary-checkout `docs/flow/drag-event-cadence/progress.md`,
+“Task 1 accepted; Task 2 exact approval,” Assistant under G1. No delegation and no
+writes or source execution in the primary checkout. The inherited spec and plan
+hashes were verified exactly; the full Task 2 brief equals the approved plan's
+Task 2 section. Base HEAD during every source check/build was
+`22146226ce646a6d9b56c9e03c58a41a2dfc28bc` on `fix/offline-input-delivery`.
+Candidate content is pinned below; the subsequent task-scoped commit is recorded
+in the helper `task-2-report.md`. No product/test source changed after the ordered
+gates; only task documentation and local evidence were then completed.
+
+### Implemented scope and safety
+
+- Optional `details.ax` contains only phase, operation, allowlisted attribute,
+  paired numeric actual status/static name, scope and reason; at most seven
+  scalar fields, ASCII strings ≤64 characters. Unknown attributes are omitted;
+  unknown codes retain their numeric value plus `unknown`.
+- Timeout failures receive explicit resolution/observation labels at those
+  callers; unrelated action setup retains the unlabelled default. Preparation
+  timeout, strict Boolean reads and actual hard writes own their context. Existing
+  cancellation/deadline checks and negotiation status rules remain unchanged.
+- Observation preserves top-level batch ownership (no invented attribute),
+  entry/direct provenance and actual status distinct from compatibility sentinels.
+  Missing/shape/array/bounds/decode failures retain their specific reason and
+  status `0` for malformed success. Bounds still reads position then size before
+  classifying, preserving failure/absence precedence. First diagnosed failures
+  propagate unchanged.
+- No retry, weakened trust rule, empty-success fallback or added publication path.
+  Optional scalar/actions/children policies remain intact. Transaction fixtures
+  prove no observation after hard preparation, no publication after hard failure,
+  released locks, and unchanged identity brackets and valid/unsupported controls.
+- Native sentinel tests cover titles, values, URLs, identifiers, CF objects/array
+  members, unknown names and arbitrary thrown error descriptions. JSONEncoder of
+  actual NativeService replies retains safe metadata without those payloads.
+  Deliberately supplied NativeFailure values still pass through unchanged;
+  generic non-AX errors keep existing generic serialization. TS projection is
+  unchanged and redaction can remove diagnostic scalars or the entire object.
+- All exercised AX, input, renderer, discovery and capture operations use injected
+  providers/event sinks/CF values or synthetic encoded images. Inert handle/event
+  construction is not IPC or posting. Typed `CFArray` APIs cannot safely represent
+  a wrong non-array pointer; no unsafe-pointer fabrication was attempted. Existing
+  wrong-array unavailability guards are retained; decoder failures use narrow pure
+  decoder injection rather than any real AX query.
+- Inspected package/scripts, discovered native fixtures, mock-host JSON mode,
+  CLI static exits and native framing/validation guards before gates. Protocol
+  tests submit 27 invalid shared fixtures, framing/EOF cases and static version;
+  no valid GUI-host command is sent. Synthetic in-process request names are not
+  live apps/doctor/snapshot/input operations.
+- No real desktop, browser, GUI, screenshots, input posts, AX query, doctor,
+  app/window discovery, live fixture or package smoke. No installs, network,
+  permission/TCC changes, merge/push/publication or discretionary cleanup. Normal
+  approved build-local dist regeneration and fixture teardown only. `node_modules`
+  remains the pre-existing untracked dependency symlink, never staged/deleted.
+
+### Task 2 meaningful RED/GREEN
+
+All commands and evidence in this section have cwd
+`/Users/marsch/Projects/nuvin/nuvin-computer-use-input-fixes`.
+Full stdout/stderr is retained under `.agentic-flow/drag-event-cadence/` in
+`task2-*.log`; these are newly generated synthetic logs, not copied private history.
+Counts are XCTest counts, not the separate zero-test Swift Testing footer.
+
+| Behavior slice / command | Compiled RED (exit 1) | GREEN (exit 0) | Log suffixes after `task2-` |
+| --- | --- | --- | --- |
+| Shared timeout: `swift test --package-path native --filter AXDiagnosticsTests` | 2 tests / 6 missing-details assertions | 2 / 0 | `timeout-red`, `timeout-green` |
+| Preparation owners: `swift test --package-path native --filter AXSnapshotPreparationTests` | 28 / 36 missing-details assertions | 28 / 0 | `preparation-red`, `preparation-green` |
+| Preparation propagation: `swift test --package-path native --filter SnapshotTransactionTests` | 19 / 27 missing-details assertions | 19 / 0 | `transaction-preparation-red`, `transaction-preparation-green` |
+| Batch ownership: `swift test --package-path native --filter AXTrustTests` | 23 / 46 missing-details assertions | 23 / 0 | `batch-red-confirmed`, `batch-green` |
+| Batch propagation: `swift test --package-path native --filter SnapshotTransactionTests` | 19 / 10 missing-details assertions | 19 / 0 | `transaction-batch-red`, `transaction-batch-green` |
+| Scalar/entry provenance: `swift test --package-path native --filter AXTrustTests` | 24 / 23 missing-details assertions | 24 / 0 | `scalar-red`, `scalar-green` |
+| Children/actions: `swift test --package-path native --filter AXTrustTests` | 25 / 15 missing-details assertions | 25 / 0 | `collections-red`, `collections-green` |
+| Bounds/extraction: `swift test --package-path native --filter AXTrustTests` | 27 / 27 missing-details assertions | 27 / 0 | `bounds-red`, `bounds-green` |
+| First array decode reason: `swift test --package-path native --filter AXTrustTests` | 28 / 1; `invalidArrayElement` incorrectly displaced earlier `decodeFailure` | 28 / 0 | `first-decode-red`, `trust-final` |
+
+Representative owner RED: `failure.details` was `nil` instead of the exact safe
+`ax` object (e.g. preparation/setMessagingTimeout/-25204/cannotComplete/direct).
+No signature/compiler failure was counted as RED. Mechanical timeout, collection
+and pure decoder seams preserved existing decisions before behavioral assertions.
+
+One test-wiring mistake was diagnosed before batch production changes:
+`task2-batch-red.log` unexpectedly passed 23 tests because `assertBatchFailure`
+accepted but did not inspect its new expected `ax` argument. Inspection of that
+helper localized the omission; adding the assertion produced 46 genuine RED
+failures (`batch-red-confirmed`), then the owner implementation passed them.
+Self-review also found the array classifier's second scan could replace an earlier
+injected decode failure with a later invalid member. A compiled regression proved
+that mismatch; recording the first reason during decoding fixed it before gates.
+Neither case changed optional availability or permitted a live fallback.
+
+Final focused results, all exit 0:
+
+| Literal command | Result | Log |
+| --- | --- | --- |
+| `swift test --package-path native --filter AXDiagnosticsTests` | 4 passed | `task2-diagnostics-final.log` |
+| `swift test --package-path native --filter AXSnapshotPreparationTests` | 28 passed | `task2-preparation-final.log` |
+| `swift test --package-path native --filter AXTrustTests` | 28 passed | `task2-trust-final.log` |
+| `swift test --package-path native --filter SnapshotTransactionTests` | 20 passed | `task2-transaction-final.log` |
+| `npm test -- tests/backend-macos.test.ts` | 291 passed, 1 file | `task2-backend-focused.log` |
+| `swift test --package-path native --filter DragCadenceTests` | 13 passed | `task2-drag-final.log` |
+| `swift test --package-path native --filter CaptureTests` | 23 passed | `task2-capture-final.log` |
+
+### Ordered composed gates
+
+The following ran separately in this exact order, all exit 0, with full output
+retained in the corresponding `task2-gate-NN-*.log` (same cwd above):
+
+| # | Literal command | Observed output/result |
+| --- | --- | --- |
+| 1 | `npm run native-tests` | 309 XCTest tests / 18 suites, 0 failures; completion 10:30:56, 2.805 seconds |
+| 2 | `npm run typecheck` | `tsc --noEmit` passed |
+| 3 | `npm test` | 399 tests / 4 files passed |
+| 4 | `npm run test:native-protocol` | Fresh debug host; 5 tests passed (27 invalid fixtures within one test) |
+| 5 | `npm run test:build-hygiene` | `build hygiene regression passed` |
+| 6 | `npm run build` | Fresh TS/release native build; `Build complete! (18.39s)` |
+| 7 | `npm test` | Post-build 399 tests / 4 files passed |
+| 8 | `env NUVIN_COMPUTER_USE_TEST_HOST=/Users/marsch/Projects/nuvin/nuvin-computer-use-input-fixes/dist/native/computer-use-host node node_modules/vitest/vitest.mjs run tests/native-protocol.test.ts` | 5 tests passed against exact release dist host; no debug-host substitution |
+| 9 | `node ./dist/cli.js --version` | `0.1.0` (known package-version mismatch left untouched) |
+| 10 | `node ./dist/cli.js --help` | Static usage/command/global-flag text |
+| 11 | `./dist/native/computer-use-host --protocol-version` | `1` |
+
+Release build emitted existing forced-cast, unused-result, trailing-closure and
+Swift 6 sendability warnings under this Swift 5 package. The original casts and
+unrelated warning sites were not changed to silence them. All required offline
+gates passed; no required offline check was omitted. All live acceptance is
+**DEFERRED / PROHIBITED under G1**, not an unrun offline gate.
+
+### Built source and artifact identity
+
+Build base HEAD: `22146226ce646a6d9b56c9e03c58a41a2dfc28bc` plus the four AX
+production and five test paths listed below. Documentation was completed after
+the checks. Exact SHA-256 identity (computed after the build):
+
+| File | SHA-256 |
+| --- | --- |
+| `dist/cli.js` | `2cc55b2e6cd36ae2a5e8f80244764acd4a6b2093bb938ac87e3e19e018d9f6df` |
+| `dist/native/computer-use-host` | `1548c5bd441f914ee0df3287f4e5cb82ee7b2b5ff3fc0d8a388b63bbcb4635da` |
+| `native/Sources/ComputerUseCore/NativeInput.swift` | `c97bd416fe87d5d645639739c73cf09de8a5f2ffc0ab3a16bf4f9d3e482c104f` |
+| `native/Sources/ComputerUseCore/AXTree.swift` | `cf9a7fc88ed7210290f8cf64994582013a082a89ea2c701c961daaa0b718e801` |
+| `native/Sources/ComputerUseCore/AXSnapshotPreparation.swift` | `03a8a80c9ca5d873030ae770f0ef882dbfd116f9de49173d3b10d1de2ad5a363` |
+| `native/Sources/ComputerUseCore/AXDiagnostics.swift` | `c7d55e6258176ff2bfee1438370605a6b8e9c020b83059d8e44a9557ed43a2b7` |
+| `native/Sources/ComputerUseCore/TargetResolver.swift` | `5ca43e0365a3b82d2f37f4a978414a2443e42fc20bf7d8b72b97e1d3ca27351a` |
+
+The worktree `native/.build/arm64-apple-macosx/release/computer-use-host` hash
+exactly equals the dist host hash. `dist` was absent before gate 5; neither it
+nor `native/.build` is an external directory symlink (Swift's internal debug
+symlink stays within this build). No primary dist/cache or historical host was
+used. Build log `task2-gate-06-build.log` SHA-256:
+`bd7c2cbce458d8bd08df9df3e28da13f157902e4c861b4869064792bd25c1396`.
+The helper `task2-source-build.sha256` also pins all five changed test files;
+its SHA-256 is `a5322e9929b20ec3ec6f2004c0aa7be95bd12129b30aceddd7cddd4402a2fb52`.
+`task2-log-manifest.json` inventories complete log byte sizes, hashes and totals.
+
+Task 2 changed paths (11; no Task 1 input/test edits):
+
+- `native/Sources/ComputerUseCore/AXDiagnostics.swift` (new)
+- `native/Sources/ComputerUseCore/AXTree.swift`
+- `native/Sources/ComputerUseCore/AXSnapshotPreparation.swift`
+- `native/Sources/ComputerUseCore/TargetResolver.swift`
+- `native/Tests/ComputerUseCoreTests/AXDiagnosticsTests.swift` (new)
+- `native/Tests/ComputerUseCoreTests/AXSnapshotPreparationTests.swift`
+- `native/Tests/ComputerUseCoreTests/AXTrustTests.swift`
+- `native/Tests/ComputerUseCoreTests/SnapshotTransactionTests.swift`
+- `tests/backend-macos.test.ts`
+- `docs/testing.md`
+- `docs/verification/2026-10-20-offline-input-delivery.md`
+
+Self-review read the full production/test diffs and both new files, including
+ownership, decoder/status provenance, privacy and unchanged policy controls.
+`NativeInput.swift`, `src/backend/macos.ts`, `SnapshotService.swift` and
+`Protocol.swift` diffs against Task 1 are empty. No keyboard method/keycode/timing
+or Task 1 drag behavior changed. `git diff --check` passed. Status contained only
+the above task paths plus the known untracked dependency symlink; generated
+builds/helper evidence are ignored. Independent review is not this self-review.
+
+### Current unresolved-item disposition (supersedes Task 1 pending rows)
+
+| Item | Current disposition |
+| --- | --- |
+| Drag algorithm cadence/release | Offline implementation/regressions passed; **timing candidate**, not receiver acceptance. |
+| Drag receiver continuity, Excalidraw/Kleki live matrix | **Unverified; DEFERRED / PROHIBITED under G1.** No live TODO closed. |
+| AX diagnostic loss | Offline diagnostic improvement implemented and checked; safe metadata reaches native/TS envelopes unless privacy redaction removes it. |
+| Keyboard delivery | **Keyboard delivery: unresolved.** E3 supports no functional repair; keyboard unchanged. |
+| Underlying Chrome snapshot/AX cause | **Chrome AX readiness: unresolved.** Diagnostics do not recover historical missing status or prove functional readiness. |
+| Composed offline candidate | All required focused, full-suite, build and post-build gates passed. |
+| Task 2 independent review | Separate coordinator-owned gate; not self-approved. |
+| Future real-app evidence | Requires new authority; **DEFERRED / PROHIBITED under G1**. No implied follow-up live execution. |

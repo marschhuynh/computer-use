@@ -161,8 +161,41 @@ image encoding are not desktop input, AX queries or real screen captures.
 See the [offline evidence and unresolved acceptance report](verification/2026-10-20-offline-input-delivery.md)
 for RED/GREEN results and scope. Dispatch-only `verification:"dispatched"` does
 not prove receiver continuity or repair. Keyboard code remains unchanged and
-functional delivery unresolved; Task 2's AX diagnostics/composed build gates
-are pending. Underlying Chrome AX readiness and all live acceptance stay open.
+functional delivery unresolved. Task 2's AX diagnostic improvement and composed
+offline gates are complete for the identified candidate in that report;
+underlying Chrome AX readiness and all live acceptance stay open.
+
+`AXDiagnosticsTests`, `AXSnapshotPreparationTests`, `AXTrustTests` and
+`SnapshotTransactionTests` exercise raw injected timeout/read/write/cache/action
+callbacks, in-memory CF objects and temporary stores. No live AX query runs.
+`error.details.ax` is optional: one flat object with at most seven scalar fields
+(`phase`, `operation`, optional `attribute`, paired `statusCode`/`statusName`,
+`statusScope`, `reason`). Labels are fixed ASCII strings of at most 64 characters;
+attributes use an exact compile-time allowlist. Unknown attributes are omitted;
+unknown actual AX codes keep their number and the static name `unknown`.
+Malformed success reports status `0`/`success` with a validation reason, not a
+fabricated failure status. Compatibility-only absence sentinels are not actual
+AX statuses. Existing permission, capability negotiation, optional unavailability,
+unsupported-batch-only fallback and transaction/publication rules are unchanged.
+
+Safe synthetic example (no AX values, titles, URLs, identifiers or objects):
+
+```json
+{"ax":{"phase":"observation","operation":"copyMultipleAttributes","attribute":"AXRole","statusCode":-25204,"statusName":"cannotComplete","statusScope":"batchEntry","reason":"statusFailure"}}
+```
+
+Native serialization and JSON-file mock-host backend tests prove privacy at the
+source and transport boundaries. Existing supplied-value redaction still wins:
+matching diagnostic scalars or an entire `ax` object may be removed. No backend
+exception preserves diagnostics at the expense of supplied-text privacy.
+
+The composed checks additionally run focused AX suites and
+`npm test -- tests/backend-macos.test.ts`, then, in order: native tests, typecheck,
+mocked JS tests, invalid/framing-only debug protocol tests, build hygiene, a fresh
+worktree release build, mocked JS tests again, and the same invalid/framing suite
+against the exact fresh `dist/native/computer-use-host`. Only static `--version`,
+`--help` and `--protocol-version` invocations follow; never valid live requests.
+See the report for literal commands, counts and source/build/log hashes.
 
 ## Notes for contributors
 

@@ -791,6 +791,34 @@ describe('MacOSBackend', { timeout: 25_000 }, () => {
     });
   });
 
+  it('preserves bounded AX diagnostics on non-mutating errors without mutation status', async () => {
+    const ax = { phase: 'observation', operation: 'copyMultipleAttributes', attribute: 'AXRole',
+      statusCode: -25204, statusName: 'cannotComplete', statusScope: 'batchEntry', reason: 'statusFailure' };
+    const reply = await executeSnapshotReply({ schemaVersion: 1, ok: false, command: 'snapshot',
+      error: { code: 'NATIVE_FAILURE', message: 'Accessibility data could not be read reliably',
+        details: { ax, mutationStatus: 'notStarted' } } });
+    expect(reply).toEqual({ schemaVersion: 1, ok: false, command: 'snapshot',
+      error: { code: 'NATIVE_FAILURE', message: 'Accessibility data could not be read reliably', details: { ax } } });
+  });
+
+  it.each(['sentinel', 'scalar', 'object'])('supplied-value redaction wins over AX diagnostics: %s', async mode => {
+    const ax = { phase: 'preparation', operation: 'setAttribute', attribute: 'AXManualAccessibility',
+      statusCode: -25204, statusName: 'cannotComplete', statusScope: 'direct', reason: 'statusFailure' };
+    const text = mode === 'sentinel' ? 'PRIVATE-supplied-value-9731' : mode === 'scalar' ? ax.operation : JSON.stringify(ax);
+    const reply = await executeSnapshotReply({ schemaVersion: 1, ok: false, command: 'set-value',
+      error: { code: 'NATIVE_FAILURE', message: 'Accessibility data could not be read reliably',
+        details: { ax, reflection: text, safe: 'kept', mutationStatus: 'potentiallyApplied' } } }, mutationRequest(text));
+    const expectedAX = mode === 'object' ? {} : { ax: mode === 'scalar'
+      ? { phase: ax.phase, attribute: ax.attribute, statusCode: ax.statusCode, statusName: ax.statusName,
+          statusScope: ax.statusScope, reason: ax.reason }
+      : ax };
+    expect(reply).toEqual({ schemaVersion: 1, ok: false, command: 'set-value',
+      error: { code: 'NATIVE_FAILURE', message: 'Accessibility data could not be read reliably',
+        details: { ...expectedAX, safe: 'kept', mutationStatus: 'potentiallyApplied' } } });
+    expect(formatReply(reply, true)).not.toContain(text);
+    expect(formatReply(reply, false)).not.toContain(text);
+  });
+
   it('rejects a zero exit without a response', async () => {
     const backend = new MacOSBackend({ helper: fixture('exits-after-receiving-request') });
     await expect(backend.execute(appsRequest(), new AbortController().signal)).resolves.toMatchObject({

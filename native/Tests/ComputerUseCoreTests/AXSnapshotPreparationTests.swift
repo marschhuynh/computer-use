@@ -107,7 +107,7 @@ final class AXSnapshotPreparationTests: XCTestCase {
 
     func testRawTimeoutSetupNeverNegotiatesOrGetsSwallowed() async {
         for status in [AXError.attributeUnsupported, .failure, .illegalArgument, .cannotComplete,
-                       .invalidUIElement, .apiDisabled, .notImplemented, .noValue] {
+                       .invalidUIElement, .apiDisabled, .notImplemented, .noValue, AXError(rawValue: -99999)!] {
             for writeSetup in [false, true] {
                 let raw = RawPreparationProbe()
                 var setups = 0
@@ -115,7 +115,9 @@ final class AXSnapshotPreparationTests: XCTestCase {
                     setups += 1
                     return setups == (writeSetup ? 2 : 1) ? status : .success
                 }
-                await assertRawPreparationFailure(status == .apiDisabled ? "PERMISSION_DENIED" : "NATIVE_FAILURE") {
+                await assertRawPreparationFailure(status == .apiDisabled ? "PERMISSION_DENIED" : "NATIVE_FAILURE",
+                    ax: expectedAXDiagnostic(phase: "preparation", operation: "setMessagingTimeout",
+                        status: status, name: testAXName(status))) {
                     try await AXSnapshotPreparation.prepare(pid: 42, context: preparationContext(),
                                                             driver: AXSnapshotPreparation.makeDriver(api: raw.api))
                 }
@@ -143,7 +145,10 @@ final class AXSnapshotPreparationTests: XCTestCase {
         ] as [(AXError, CFTypeRef?)] {
             let raw = RawPreparationProbe()
             raw.copy = { (status, value) }
-            await assertRawPreparationFailure(status == .apiDisabled ? "PERMISSION_DENIED" : "NATIVE_FAILURE") {
+            await assertRawPreparationFailure(status == .apiDisabled ? "PERMISSION_DENIED" : "NATIVE_FAILURE",
+                ax: expectedAXDiagnostic(phase: "preparation", operation: "copyAttribute", attribute: "AXManualAccessibility",
+                    status: status, name: testAXName(status),
+                    reason: status == .success ? (value == nil ? "missingValue" : "unexpectedType") : "statusFailure")) {
                 try await AXSnapshotPreparation.prepare(pid: 42, context: preparationContext(),
                                                         driver: AXSnapshotPreparation.makeDriver(api: raw.api))
             }
@@ -155,17 +160,21 @@ final class AXSnapshotPreparationTests: XCTestCase {
         for status in [AXError.noValue, .cannotComplete, .invalidUIElement, .apiDisabled, .notImplemented] {
             let raw = RawPreparationProbe()
             raw.set = { _ in status }
-            await assertRawPreparationFailure(status == .apiDisabled ? "PERMISSION_DENIED" : "NATIVE_FAILURE") {
+            await assertRawPreparationFailure(status == .apiDisabled ? "PERMISSION_DENIED" : "NATIVE_FAILURE",
+                ax: expectedAXDiagnostic(phase: "preparation", operation: "setAttribute", attribute: "AXManualAccessibility",
+                    status: status, name: testAXName(status))) {
                 try await AXSnapshotPreparation.prepare(pid: 42, context: preparationContext(),
                                                         driver: AXSnapshotPreparation.makeDriver(api: raw.api))
             }
             XCTAssertEqual(raw.calls.names.filter { $0.hasPrefix("set:") }, ["set:AXManualAccessibility"])
         }
-        for phase in ["create", "timeout"] {
+        for phase in ["create", "timeout", "copy", "set"] {
             let raw = RawPreparationProbe()
             let expected = NativeFailure("NATIVE_FAILURE", "distinctive setup", details: ["origin": .string(phase)])
             if phase == "create" { raw.create = { throw expected } }
-            else { raw.timeout = { _ in throw expected } }
+            else if phase == "timeout" { raw.timeout = { _ in throw expected } }
+            else if phase == "copy" { raw.copy = { throw expected } }
+            else { raw.set = { _ in throw expected } }
             do {
                 try await AXSnapshotPreparation.prepare(pid: 42, context: preparationContext(),
                                                         driver: AXSnapshotPreparation.makeDriver(api: raw.api))
@@ -175,8 +184,8 @@ final class AXSnapshotPreparationTests: XCTestCase {
                 XCTAssertEqual(failure.message, expected.message)
                 XCTAssertEqual(failure.details, expected.details)
             } catch { XCTFail("unexpected \(error)") }
-            XCTAssertFalse(raw.calls.names.contains("copy"))
-            XCTAssertEqual(raw.calls.names.filter { $0.hasPrefix("set:") }, [])
+            XCTAssertEqual(raw.calls.names.contains("copy"), ["copy", "set"].contains(phase))
+            XCTAssertEqual(raw.calls.names.filter { $0.hasPrefix("set:") }, phase == "set" ? ["set:AXManualAccessibility"] : [])
         }
     }
 
@@ -272,6 +281,7 @@ final class AXSnapshotPreparationTests: XCTestCase {
                 release.signal()
                 let failure = await work.value
                 XCTAssertEqual(failure?.code, interruption == "deadline" ? "TIMEOUT" : "INTERRUPTED")
+                XCTAssertNil(failure?.details)
                 let names = raw.calls.names
                 XCTAssertEqual(names.last, phase == "set" ? "set:AXManualAccessibility" : phase)
             }
@@ -339,6 +349,8 @@ final class AXSnapshotPreparationTests: XCTestCase {
             })
             XCTAssertThrowsError(try AXSnapshotPreparation.request(pid: 42,
                 context: preparationContext(), driver: driver)) {
+                assertAXDiagnostic($0, phase: "preparation", operation: "setAttribute", attribute: "AXEnhancedUserInterface",
+                                   status: status, name: testAXName(status))
                 XCTAssertEqual(($0 as? NativeFailure)?.code, code)
             }
             XCTAssertEqual(calls, ["AXManualAccessibility", "AXEnhancedUserInterface"])
@@ -678,10 +690,13 @@ private final class PreparationNow {
 }
 
 private func assertRawPreparationFailure(
-    _ code: String, file: StaticString = #filePath, line: UInt = #line,
+    _ code: String, ax: JSONValue? = nil, file: StaticString = #filePath, line: UInt = #line,
     _ body: () async throws -> Void
 ) async {
     do { try await body(); XCTFail("expected " + code, file: file, line: line) }
-    catch let failure as NativeFailure { XCTAssertEqual(failure.code, code, file: file, line: line) }
+    catch let failure as NativeFailure {
+        XCTAssertEqual(failure.code, code, file: file, line: line)
+        XCTAssertEqual(failure.details?["ax"], ax, file: file, line: line)
+    }
     catch { XCTFail("unexpected \(error)", file: file, line: line) }
 }

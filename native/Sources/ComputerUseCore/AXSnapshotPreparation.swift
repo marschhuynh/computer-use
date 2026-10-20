@@ -105,7 +105,10 @@ public enum AXSnapshotPreparation {
                                     expectedTypeID: CFBooleanGetTypeID(), decode: { $0 as? Bool }) {
                 case let .value(value): return value
                 case .unavailable: return nil
-                case .failure: throw liveAXFailure(for: read.status)
+                case .failure:
+                    throw liveAXFailure(for: read.status,
+                        diagnostic: AXDiagnosticContext(phase: .preparation, operation: .copyAttribute, attribute: name),
+                        reason: axReadFailureReason(status: read.status, value: read.value, expectedTypeID: CFBooleanGetTypeID()))
                 }
             }
         )
@@ -130,7 +133,10 @@ public enum AXSnapshotPreparation {
         try context.check()
         let status = try api.setMessagingTimeout(application, timeout)
         try context.check()
-        guard status == .success else { throw liveAXFailure(for: status) }
+        guard status == .success else {
+            throw liveAXFailure(for: status,
+                diagnostic: AXDiagnosticContext(phase: .preparation, operation: .setMessagingTimeout))
+        }
         return application
     }
 
@@ -169,7 +175,8 @@ public enum AXSnapshotPreparation {
             if status == .success { return outcome }
             switch status {
             case .attributeUnsupported, .failure, .illegalArgument: continue
-            default: throw liveAXFailure(for: status)
+            default: throw liveAXFailure(for: status,
+                diagnostic: AXDiagnosticContext(phase: .preparation, operation: .setAttribute, attribute: name))
             }
         }
         return .unsupported

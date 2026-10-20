@@ -626,7 +626,7 @@ private func liveWindows(for pid: Int, context: CommandContext) throws -> [Targe
         throw NativeFailure("TARGET_NOT_FOUND", "Process was not found")
     }
     let application = AXUIElementCreateApplication(nativePID)
-    try prepareLiveAXMessaging(application, context: context)
+    try prepareLiveAXMessaging(application, context: context, phase: .resolution)
     var rawWindows: CFTypeRef?
     let status = AXUIElementCopyAttributeValue(
         application,
@@ -657,7 +657,7 @@ private func liveWindows(for pid: Int, context: CommandContext) throws -> [Targe
     var candidates: [AXWindowCandidate] = []
     for element in windowElements {
         try context.check()
-        try prepareLiveAXMessaging(element, context: context)
+        try prepareLiveAXMessaging(element, context: context, phase: .resolution)
         let metadata = AXWindowMetadata(
             role: try resolverString(element, kAXRoleAttribute),
             title: try resolverString(element, kAXTitleAttribute),

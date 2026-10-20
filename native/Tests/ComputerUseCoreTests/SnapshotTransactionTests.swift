@@ -192,7 +192,12 @@ final class SnapshotTransactionTests: XCTestCase {
                 var validations = 0
                 let expected = phase == "throw"
                     ? NativeFailure("NATIVE_FAILURE", "raw setup threw", details: ["phase": .string(phase)])
-                    : liveAXFailure(for: status)
+                    : NativeFailure(status == .apiDisabled ? "PERMISSION_DENIED" : "NATIVE_FAILURE",
+                        status == .apiDisabled ? "Accessibility access is unavailable" : "Accessibility data could not be read reliably",
+                        details: ["ax": expectedAXDiagnostic(phase: "preparation",
+                            operation: phase == "copy" ? "copyAttribute" : phase == "write" ? "setAttribute" : "setMessagingTimeout",
+                            attribute: ["copy", "write"].contains(phase) ? "AXManualAccessibility" : nil,
+                            status: status, name: testAXName(status))])
                 let api = AXPreparationAPI(isTrusted: { true },
                     createApplication: { _ in AXUIElementCreateApplication(42) },
                     setMessagingTimeout: { _, _ in
@@ -225,6 +230,74 @@ final class SnapshotTransactionTests: XCTestCase {
                 XCTAssertEqual((try? FileManager.default.contentsOfDirectory(atPath:
                     root.appendingPathComponent("snapshots").path)) ?? [], [])
             }
+        }
+    }
+
+    func testNativeServiceSerializesSafeRawFailuresAndNeverArbitraryErrorDescriptions() async throws {
+        let fixture = try transactionFixture("save-cancel")
+        let sentinels = ["PRIVATE-title-836", "PRIVATE-value-937", "https://private.invalid/738", "PRIVATE-identifier-639"]
+        let request = try XCTUnwrap(WireRequest.decode([
+            "schemaVersion": 1, "command": "snapshot", "target": ["pid": 42, "windowId": 7],
+            "tree": ["maxDepth": 8, "maxElements": 500, "hintMode": "full"],
+            "options": ["timeoutMs": 1_000, "cursor": "off"]
+        ]))
+        for stage in ["preparation", "observation", "generic", "first-context"] {
+            let root = transactionRoot()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let lock = DesktopLock(rootURL: root)
+            let first = liveAXFailure(for: .cannotComplete, diagnostic:
+                AXDiagnosticContext(phase: .resolution, operation: .setMessagingTimeout))
+            let api = AXPreparationAPI(isTrusted: { true }, createApplication: { _ in AXUIElementCreateApplication(42) },
+                setMessagingTimeout: { _, _ in .success }, copyAttribute: { _, _ in
+                    if stage == "generic" { throw NSError(domain: sentinels[0], code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: sentinels.joined(separator: " ")]) }
+                    if stage == "first-context" { throw first }
+                    return stage == "preparation" ? (.success, ["private-object": sentinels] as CFDictionary) : (.success, kCFBooleanTrue)
+                }, setAttribute: { _, _, _ in .success })
+            var observations = 0
+            let service = SnapshotService(lock: lock, store: StateStore(rootURL: root), resolve: { _, _ in fixture.target },
+                observe: { target, options, context in
+                    observations += 1
+                    var status = AXError.cannotComplete
+                    let values = [AXValueCreate(.axError, &status)!] + sentinels.map { $0 as CFTypeRef }
+                        + Array(repeating: ["private-object": sentinels] as CFDictionary, count: 6)
+                    let cache = LiveAXBatchCache(multipleRead: { _, _ in (.success, values as CFArray) },
+                        singleRead: { _, _ in XCTFail("no fallback"); return (.failure, nil) })
+                    let reader = liveAXTreeReader(cache: cache,
+                        readChildrenAttribute: { _, _ in XCTFail("role failure stops children"); return (.noValue, nil) },
+                        copyActionNames: { _ in XCTFail("role failure stops actions"); return (.noValue, nil) })
+                    let read = try AXTree.readSnapshot(target: target, options: options,
+                        root: AXUIElementCreateApplication(42), reader: reader,
+                        checkpoint: { try context.check() }, prepare: { _ in })
+                    return AXTreeObservation(snapshot: read.snapshot, liveElements: [:])
+                }, prepareSnapshot: { target, context in
+                    try await AXSnapshotPreparation.prepare(pid: target.identity.pid, context: context,
+                        driver: AXSnapshotPreparation.makeDriver(api: api))
+                }, validateTarget: { _, _ in fixture.target })
+            let reply = await NativeService(snapshotService: service).execute(request, context: context())
+            XCTAssertFalse(reply.ok)
+            let expected: [String: JSONValue]?
+            switch stage {
+            case "preparation": expected = ["ax": expectedAXDiagnostic(phase: "preparation", operation: "copyAttribute",
+                attribute: "AXManualAccessibility", status: .success, name: "success", reason: "unexpectedType")]
+            case "observation": expected = ["ax": expectedAXDiagnostic(operation: "copyMultipleAttributes", attribute: "AXRole",
+                status: .cannotComplete, name: "cannotComplete", scope: "batchEntry")]
+            case "first-context": expected = first.details
+            default: expected = nil
+            }
+            XCTAssertEqual(reply.error?.details, expected)
+            XCTAssertEqual(reply.error?.message, stage == "generic" ? "Native command failed" : "Accessibility data could not be read reliably")
+            let encoded = try JSONEncoder().encode(reply)
+            let json = try XCTUnwrap(String(data: encoded, encoding: .utf8))
+            for sentinel in sentinels + ["private-object"] { XCTAssertFalse(json.contains(sentinel)) }
+            let decoded = try JSONDecoder().decode(JSONValue.self, from: encoded)
+            guard case let .object(envelope) = decoded, case let .object(error)? = envelope["error"] else {
+                return XCTFail("invalid native envelope")
+            }
+            XCTAssertEqual(error["details"], expected.map(JSONValue.object))
+            XCTAssertEqual(observations, stage == "observation" ? 1 : 0)
+            XCTAssertEqual((try? FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("snapshots").path)) ?? [], [])
+            try await lock.withLock(context: context()) {} // all failure paths release the lock
         }
     }
 
@@ -302,10 +375,13 @@ final class SnapshotTransactionTests: XCTestCase {
                 XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath:
                     root.appendingPathComponent("snapshots").path).count, 1)
             } else {
-                await assertTransactionFailure(status == .apiDisabled ? "PERMISSION_DENIED" : "NATIVE_FAILURE") {
+                let failure = await captureTransactionFailure {
                     try await service.snapshot(selector: .pid(42, windowId: 7),
                         options: fixture.treeOptions, context: self.context())
                 }
+                assertAXDiagnostic(try XCTUnwrap(failure), operation: "copyMultipleAttributes",
+                    status: status, name: testAXName(status), scope: "batchTopLevel",
+                    reason: status != .success ? "statusFailure" : values == nil ? "missingValue" : "batchLengthMismatch")
                 XCTAssertEqual((try? FileManager.default.contentsOfDirectory(atPath:
                     root.appendingPathComponent("snapshots").path)) ?? [], [])
             }
