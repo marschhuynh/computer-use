@@ -1,10 +1,12 @@
 {
   "name": "@nuvin/computer-use",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": false,
   "publishConfig": {
     "access": "public",
-    "executableFiles": ["dist/native/computer-use-host"]
+    "executableFiles": [
+      "dist/native/computer-use-host"
+    ]
   },
   "type": "module",
   "description": "Drive the macOS desktop from a CLI — accessibility-tree actions (snapshot → press/set-value) and pixel actions (screenshot → click/move/drag). Foreground automation for agents.",
@@ -32,7 +34,9 @@
   "engines": {
     "node": ">=22"
   },
-  "os": ["darwin"],
+  "os": [
+    "darwin"
+  ],
   "files": [
     "dist/",
     "docs/cli.md",
